@@ -1,0 +1,270 @@
+// Command lema-mcp is the lema MCP server — the local, DB-less wedge an agent
+// queries. It parses a repo's docs/adr/ on disk and serves four tools over stdio
+// with no account, no database, and no network: search_decisions returns the
+// most relevant atomic claims (lexical over ADR sections, the ADR-0025 §4
+// response contract); get_decision / list_decisions / get_decision_graph serve
+// whole decisions and the typed-edge graph for drill-down. The hosted tier (its
+// own Cloud Run service, ADR-0033 §7) serves the same four-tool contract over
+// the pgvector atom layer behind a DB-backed DecisionSource.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/lemahq/lema-mcp/internal/adr"
+	"github.com/lemahq/lema-mcp/internal/source"
+)
+
+var (
+	src         source.DecisionSource // all four tools read through this seam
+	repoName    = "local"             // identifier shown in search results
+	usageLog    *os.File
+	questionLog *os.File
+)
+
+// logUsage records each tool call and the approximate token size of the context
+// returned — the input half of any tokens-saved measurement. Written to stderr
+// so it never pollutes the stdio MCP protocol stream on stdout.
+func logUsage(tool, query string, results int, payload any) {
+	approxTokens := 0
+	if b, err := json.Marshal(payload); err == nil {
+		approxTokens = len(b) / 4
+	}
+	line, _ := json.Marshal(map[string]any{
+		"ts":            time.Now().UTC().Format(time.RFC3339),
+		"tool":          tool,
+		"query":         query,
+		"results":       results,
+		"approx_tokens": approxTokens,
+	})
+	fmt.Fprintln(os.Stderr, "lema-mcp usage "+string(line))
+	if usageLog != nil {
+		fmt.Fprintln(usageLog, string(line))
+	}
+}
+
+type listInput struct {
+	Status string `json:"status,omitempty" jsonschema:"filter by status: proposed, accepted, superseded, deprecated, rejected. empty for all"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"max results (default 50)"`
+}
+type listOutput struct {
+	Decisions []source.Summary `json:"decisions"`
+}
+
+type getInput struct {
+	Number int `json:"number" jsonschema:"the ADR number, e.g. 16"`
+}
+type getOutput struct {
+	Decision source.Detail `json:"decision"`
+}
+
+type searchInput struct {
+	Query     string `json:"query" jsonschema:"natural-language question about this repo's decisions"`
+	K         int    `json:"k,omitempty" jsonschema:"max atoms to consider (default 8)"`
+	MaxTokens int    `json:"max_tokens,omitempty" jsonschema:"token budget for the returned atoms (default 1500)"`
+}
+
+// searchOutput is the ADR-0025 §4 response contract: shared fields once, a
+// minimal per-atom payload, and a truncation flag when the budget clipped results.
+type searchOutput struct {
+	Repo       string        `json:"repo"`
+	Claims     []source.Atom `json:"claims"`
+	TokensUsed int           `json:"tokens_used"`
+	Truncated  bool          `json:"truncated"`
+}
+
+type graphInput struct {
+	Number int `json:"number" jsonschema:"the ADR number to start from"`
+	Depth  int `json:"depth,omitempty" jsonschema:"edge-traversal depth (default 1, max 5)"`
+}
+type graphOutput struct {
+	Graph source.Graph `json:"graph"`
+}
+
+func listDecisions(ctx context.Context, _ *mcp.CallToolRequest, in listInput) (*mcp.CallToolResult, listOutput, error) {
+	ds, err := src.List(ctx, in.Status, in.Limit)
+	if err != nil {
+		return nil, listOutput{}, err
+	}
+	out := listOutput{Decisions: ds}
+	logUsage("list_decisions", in.Status, len(ds), out)
+	return nil, out, nil
+}
+
+func getDecision(ctx context.Context, _ *mcp.CallToolRequest, in getInput) (*mcp.CallToolResult, getOutput, error) {
+	d, err := src.Get(ctx, in.Number)
+	if err != nil {
+		return nil, getOutput{}, err
+	}
+	out := getOutput{Decision: d}
+	logUsage("get_decision", fmt.Sprintf("#%d", in.Number), 1, out)
+	return nil, out, nil
+}
+
+// searchDecisions returns atomic claims via the DecisionSource (lexical locally,
+// hybrid retrieval in the hosted backend), bounded by max_tokens. This is the
+// token-efficient surface: tight, sourced atoms instead of whole-ADR bodies.
+func searchDecisions(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, searchOutput, error) {
+	k := in.K
+	if k <= 0 {
+		k = 8
+	}
+	atoms, err := src.Search(ctx, in.Query, k)
+	if err != nil {
+		return nil, searchOutput{}, err
+	}
+	budget := in.MaxTokens
+	if budget <= 0 {
+		budget = 1500
+	}
+	kept, used, truncated := fitBudget(atoms, budget)
+	out := searchOutput{Repo: repoName, Claims: kept, TokensUsed: used, Truncated: truncated}
+	logUsage("search_decisions", in.Query, len(kept), out)
+	logQuestion(in.Query, kept)
+	return nil, out, nil
+}
+
+func getDecisionGraph(ctx context.Context, _ *mcp.CallToolRequest, in graphInput) (*mcp.CallToolResult, graphOutput, error) {
+	g, err := src.Graph(ctx, in.Number, in.Depth)
+	if err != nil {
+		return nil, graphOutput{}, err
+	}
+	out := graphOutput{Graph: g}
+	logUsage("get_decision_graph", fmt.Sprintf("#%d", in.Number), len(g.Nodes), out)
+	return nil, out, nil
+}
+
+// fitBudget keeps the highest-ranked atoms whose cumulative token estimate fits
+// the budget, flagging truncation when more relevant atoms existed.
+func fitBudget(atoms []source.Atom, budget int) ([]source.Atom, int, bool) {
+	used := 0
+	kept := make([]source.Atom, 0, len(atoms))
+	for _, a := range atoms {
+		t := (len(a.Text) + 3) / 4
+		if used+t > budget && len(kept) > 0 {
+			return kept, used, true
+		}
+		kept = append(kept, a)
+		used += t
+	}
+	return kept, used, false
+}
+
+// logQuestion appends the agent's query to a local question log (the gap-
+// flywheel substrate, ADR-0025 §1/§7) when LEMA_QUESTION_LOG is set. Local mode
+// has no database; a query asked repeatedly with no good match is still a ranked
+// gap, which the hosted tier can ingest later.
+func logQuestion(query string, atoms []source.Atom) {
+	if questionLog == nil {
+		return
+	}
+	ids := make([]string, 0, len(atoms))
+	for _, a := range atoms {
+		ids = append(ids, a.ID)
+	}
+	line, _ := json.Marshal(map[string]any{
+		"ts":                time.Now().UTC().Format(time.RFC3339),
+		"query":             query,
+		"matched_claim_ids": ids,
+		"resolved":          len(ids) > 0,
+	})
+	fmt.Fprintln(questionLog, string(line))
+}
+
+func main() {
+	adrDir := flag.String("adr-dir", "", "ADR directory (local path, or in-repo subpath with --repo). Empty = auto-discover docs/adr, doc/adr, docs/decisions, …")
+	repoFlag := flag.String("repo", "", "github.com/org/repo to fetch (public; GITHUB_TOKEN for private), or a label for local --adr-dir mode")
+	refFlag := flag.String("ref", "", "git ref/branch to fetch from (default: the repo's default branch); remote --repo only")
+	patternFlag := flag.String("pattern", `^\d{3,4}[-_].+\.md$`, "ADR filename regex (default matches NNNN-*.md / NNN_*.md); widen for other conventions")
+	flag.Parse()
+
+	pat, err := regexp.Compile(*patternFlag)
+	if err != nil {
+		log.Fatalf("lema-mcp: bad --pattern %q: %v", *patternFlag, err)
+	}
+
+	if p := os.Getenv("LEMA_USAGE_LOG"); p != "" {
+		if f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+			usageLog = f
+			defer usageLog.Close()
+		}
+	}
+	if p := os.Getenv("LEMA_QUESTION_LOG"); p != "" {
+		if f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+			questionLog = f
+			defer questionLog.Close()
+		}
+	}
+
+	var (
+		adrs    []adr.ADR
+		srcDesc string
+	)
+	if owner, repo, ok := parseGitHubRepo(*repoFlag); ok {
+		// Remote: fetch the repo's ADRs from GitHub (no local checkout needed).
+		fctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		var ferr error
+		if adrs, repoName, ferr = fetchRemoteADRs(fctx, owner, repo, *adrDir, *refFlag, pat); ferr != nil {
+			cancel()
+			log.Fatalf("lema-mcp: %v", ferr)
+		}
+		cancel()
+		srcDesc = repoName
+	} else {
+		// Local: parse a docs/adr-style directory on disk, auto-discovered when --adr-dir is empty.
+		dir := *adrDir
+		if dir == "" {
+			if dir = discoverLocalADRDir("."); dir == "" {
+				log.Fatalf("lema-mcp: no ADR directory found (looked in: %s); pass --adr-dir", strings.Join(adrDirCandidates, ", "))
+			}
+		}
+		var perr error
+		if adrs, perr = adr.ParseDirMatching(dir, pat); perr != nil {
+			log.Fatalf("lema-mcp: %v", perr)
+		}
+		if *repoFlag != "" {
+			repoName = *repoFlag
+		} else {
+			repoName = dir
+		}
+		srcDesc = dir
+	}
+	if len(adrs) == 0 {
+		log.Fatalf("lema-mcp: no ADRs found in %s", srcDesc)
+	}
+	src = source.NewLocal(adrs)
+	fmt.Fprintf(os.Stderr, "lema-mcp: %d decisions from %s (repo %q); local lexical search, no account\n", len(adrs), srcDesc, repoName)
+
+	ctx := context.Background()
+	server := mcp.NewServer(&mcp.Implementation{Name: "lema-mcp", Version: "0.3.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "search_decisions",
+		Description: "Search this repo's decisions and return the most relevant atomic claims (chosen/rejected/constraint/consequence) with their source ADR. Call this BEFORE writing or changing code to learn the constraints and what was already ruled out. Returns tight, sourced claims, not whole documents.",
+	}, searchDecisions)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "get_decision",
+		Description: "Get one decision's full body, status, and edges by its ADR number — use to drill down after search_decisions surfaces a relevant ref.",
+	}, getDecision)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_decisions",
+		Description: "List the architecture decisions recorded in this repo, optionally filtered by status.",
+	}, listDecisions)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "get_decision_graph",
+		Description: "Traverse typed edges (supersedes, superseded_by, depends_on, related_to) from a decision to find connected decisions.",
+	}, getDecisionGraph)
+
+	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
+		log.Fatalf("lema-mcp: %v", err)
+	}
+}
