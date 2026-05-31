@@ -387,7 +387,7 @@ func bestSnippet(clean string, terms []string, maxLen int) string {
 	}
 	hitRune := 0
 	if hitByte > 0 {
-		hitRune = len([]rune(clean[:hitByte]))
+		hitRune = len([]rune(lower[:hitByte]))
 	}
 	start := max(hitRune-maxLen/3, 0)
 	end := start + maxLen

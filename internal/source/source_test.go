@@ -93,3 +93,21 @@ func TestSnippetsAreTightAndClean(t *testing.T) {
 		t.Errorf("markdown link not cleaned out: %q", top)
 	}
 }
+
+// bestSnippet can panic if strings.ToLower(clean) changes the byte length of the string,
+// which causes the hitByte to exceed the bounds of the original string.
+// TestBestSnippetMultiByte verifies that we safely handle multibyte strings that
+// expand during lowercase conversion (like 'Ⱥ' -> 'ⱥ').
+func TestBestSnippetMultiByte(t *testing.T) {
+	// 'Ⱥ' is 2 bytes (U+023A), its lowercase 'ⱥ' is 3 bytes (U+2C65).
+	// A long string of them creates a large byte length discrepancy.
+	clean := strings.Repeat("Ⱥ", 10) + " want"
+	terms := []string{"want"}
+
+	// If the out-of-bounds slice vulnerability is present, this will panic.
+	got := bestSnippet(clean, terms, 10)
+
+	if !strings.Contains(got, "want") {
+		t.Errorf("expected snippet to contain 'want', got %q", got)
+	}
+}
