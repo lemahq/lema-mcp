@@ -22,6 +22,7 @@ import (
 type ADR struct {
 	Number       int
 	Slug         string
+	Ref          string // display ref (e.g. "openspec/change/add-auth"); empty falls back to "ADR-NNNN"
 	Path         string
 	Title        string
 	Status       string
@@ -42,9 +43,47 @@ type frontmatter struct {
 	Authors      []string `yaml:"authors"`
 	Tags         []string `yaml:"tags"`
 	Supersedes   []string `yaml:"supersedes"`
-	SupersededBy *string  `yaml:"superseded_by"`
+	SupersededBy flexRef  `yaml:"superseded_by"`
 	DependsOn    []string `yaml:"depends_on"`
 	RelatedTo    []string `yaml:"related_to"`
+}
+
+// flexRef accepts `superseded_by` written as a scalar (`superseded_by: 9` or
+// `superseded_by: 0009`), as null, OR as a single-element sequence
+// (`superseded_by: [2]`). The canonical form is a scalar — `superseded_by` is
+// at most one successor — but the list form is a natural authoring mistake (the
+// sibling supersedes/depends_on/related_to fields ARE lists), and some of our
+// own dogfood ADRs use it. Rejecting the whole file on that asymmetry would
+// crash ParseDir for the entire directory and block the hosted import for any
+// repo with one such file, so the parser is lenient: a sequence resolves to its
+// first element. The value is captured as a string (not an int) for the same
+// octal reason as toNums — strconv.Atoi later forces base-10.
+type flexRef struct {
+	value *string // nil when absent or null
+}
+
+func (f *flexRef) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		// `null`/`~`/empty tag → leave nil; otherwise take the scalar text.
+		if node.Tag == "!!null" || node.Value == "" {
+			return nil
+		}
+		v := node.Value
+		f.value = &v
+		return nil
+	case yaml.SequenceNode:
+		if len(node.Content) == 0 {
+			return nil
+		}
+		// First element only; a multi-successor list is malformed but we take
+		// the first rather than failing the parse.
+		v := node.Content[0].Value
+		f.value = &v
+		return nil
+	default:
+		return fmt.Errorf("superseded_by: unsupported YAML node kind %v", node.Kind)
+	}
 }
 
 // fileRe matches the canonical docs/adr/NNNN-anything.md naming. Files that
@@ -144,7 +183,7 @@ func ParseBytes(raw []byte, filename, sourcePath string) (ADR, error) {
 		Authors:      fm.Authors,
 		Tags:         fm.Tags,
 		Supersedes:   toNums(fm.Supersedes),
-		SupersededBy: toNum(fm.SupersededBy),
+		SupersededBy: toNum(fm.SupersededBy.value),
 		DependsOn:    toNums(fm.DependsOn),
 		RelatedTo:    toNums(fm.RelatedTo),
 		Body:         strings.TrimSpace(body),

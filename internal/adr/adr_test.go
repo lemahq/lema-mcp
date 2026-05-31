@@ -101,6 +101,27 @@ func TestParseFile_NullSupersededByIsNil(t *testing.T) {
 	}
 }
 
+// TestParseFile_SupersededByAcceptsSequence pins the leniency that lets a
+// real dogfood ADR (0001 uses `superseded_by: [2]`) parse instead of crashing
+// ParseDir for the whole directory. The list form resolves to its first
+// element, and the octal-safety of the scalar path must hold through the
+// sequence path too (a zero-padded `[0009]` is 9, not 11).
+func TestParseFile_SupersededByAcceptsSequence(t *testing.T) {
+	dir := t.TempDir()
+	writeADR(t, dir, "0001-x.md", "---\ntitle: X\nstatus: superseded\nsuperseded_by: [2]\n---\nbody")
+	writeADR(t, dir, "0002-y.md", "---\ntitle: Y\nstatus: superseded\nsuperseded_by: [0009]\n---\nbody")
+	adrs, err := ParseDir(dir)
+	if err != nil {
+		t.Fatalf("ParseDir must not fail on a list-form superseded_by: %v", err)
+	}
+	if adrs[0].SupersededBy == nil || *adrs[0].SupersededBy != 2 {
+		t.Errorf("0001 SupersededBy = %v, want 2", adrs[0].SupersededBy)
+	}
+	if adrs[1].SupersededBy == nil || *adrs[1].SupersededBy != 9 {
+		t.Errorf("0002 SupersededBy = %v, want 9 (octal-safe through sequence path)", adrs[1].SupersededBy)
+	}
+}
+
 func TestParseFile_NoFrontmatterFallsBackToFirstH1(t *testing.T) {
 	dir := t.TempDir()
 	writeADR(t, dir, "0001-no-fm.md", "# Just a heading\n\nsome text\n")

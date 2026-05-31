@@ -64,11 +64,20 @@ type Graph struct {
 // ADR sections) and the hosted atom-search backend both return these, so
 // search_decisions is backend-agnostic and the open-source binary needs no
 // pgvector/Vertex dependency.
+//
+// Edges is the additive edge-aware annotation (2026-05-30 spec): the typed
+// decision-graph relationships of the atom's source decision, so an agent that
+// searched a claim immediately sees what it supersedes / depends on / ruled out
+// without a second get_decision_graph round trip. Locally these come from the
+// ADR's frontmatter; the hosted backend fills the same field from the edges
+// table. It is attached after ranking and omits when empty, so it never affects
+// the order search_decisions returns.
 type Atom struct {
 	ID    string  `json:"id"`
 	Type  string  `json:"type"`
 	Text  string  `json:"text"`
 	Ref   string  `json:"ref"`
+	Edges []Edge  `json:"edges,omitempty"`
 	Score float64 `json:"-"`
 }
 
@@ -175,7 +184,10 @@ func (l *Local) Search(_ context.Context, query string, k int) ([]Atom, error) {
 	seen := map[string]bool{}
 	for _, n := range l.order {
 		a := l.byNum[n]
-		ref := fmt.Sprintf("ADR-%04d", a.Number)
+		ref := a.Ref
+		if ref == "" {
+			ref = fmt.Sprintf("ADR-%04d", a.Number)
+		}
 		titleL := strings.ToLower(a.Title)
 		tagsL := strings.ToLower(strings.Join(a.Tags, " "))
 		var titleScore float64
@@ -219,7 +231,7 @@ func (l *Local) Search(_ context.Context, query string, k int) ([]Atom, error) {
 				}
 				seen[norm] = true
 				adrCands = append(adrCands, cand{
-					atom:  Atom{ID: fmt.Sprintf("%d-%d", a.Number, bi), Type: typ, Text: text, Ref: ref},
+					atom:  Atom{ID: fmt.Sprintf("%d-%d", a.Number, bi), Type: typ, Text: text, Ref: ref, Edges: edgesOf(a)},
 					score: rerank(3*hits+headScore+titleScore, len([]rune(clean)), a.Status),
 				})
 			}
@@ -231,7 +243,7 @@ func (l *Local) Search(_ context.Context, query string, k int) ([]Atom, error) {
 			// Only the title/tags matched — surface one representative lead block so
 			// a title hit still returns something, without flooding with every block.
 			cands = append(cands, cand{
-				atom:  Atom{ID: fmt.Sprintf("%d-%d", a.Number, leadID), Type: leadType, Text: bestSnippet(leadText, terms, 240), Ref: ref},
+				atom:  Atom{ID: fmt.Sprintf("%d-%d", a.Number, leadID), Type: leadType, Text: bestSnippet(leadText, terms, 240), Ref: ref, Edges: edgesOf(a)},
 				score: rerank(titleScore, len([]rune(leadText)), a.Status),
 			})
 		}
@@ -252,27 +264,21 @@ type section struct{ heading, text string }
 // Content before the first heading becomes a preamble section with no heading.
 func splitSections(body string) []section {
 	var secs []section
-	var heading string
-	var textBuilder strings.Builder
+	cur := section{}
 	flush := func() {
-		text := strings.TrimSpace(textBuilder.String())
-		if heading != "" || text != "" {
-			secs = append(secs, section{heading: heading, text: text})
+		cur.text = strings.TrimSpace(cur.text)
+		if cur.heading != "" || cur.text != "" {
+			secs = append(secs, cur)
 		}
-		// ⚡ Bolt: Resetting strings.Builder reuses the allocated buffer,
-		// preventing O(N²) memory allocations from string concatenation.
-		// Performance impact: ~100x faster for long sections (10ms -> 0.1ms per 1k lines).
-		textBuilder.Reset()
 	}
 	for ln := range strings.SplitSeq(body, "\n") {
 		t := strings.TrimSpace(ln)
 		if strings.HasPrefix(t, "## ") || strings.HasPrefix(t, "### ") {
 			flush()
-			heading = strings.TrimSpace(strings.TrimLeft(t, "# "))
+			cur = section{heading: strings.TrimSpace(strings.TrimLeft(t, "# "))}
 			continue
 		}
-		textBuilder.WriteString(ln)
-		textBuilder.WriteByte('\n')
+		cur.text += ln + "\n"
 	}
 	flush()
 	return secs
@@ -281,13 +287,16 @@ func splitSections(body string) []section {
 // sectionType maps a canonical ADR heading to a claim type for the §4 contract.
 func sectionType(heading string) string {
 	switch strings.ToLower(strings.TrimSpace(heading)) {
-	case "decision":
+	// "end state" is the Commander's Intent win-condition — a chosen target.
+	case "decision", "what changes", "what", "design", "approach", "end state", "end-state":
 		return "chosen"
-	case "alternatives", "alternatives considered":
+	case "alternatives", "alternatives considered", "other approaches", "rejected":
 		return "rejected"
-	case "consequences", "tradeoffs":
+	case "consequences", "tradeoffs", "trade-offs", "impact":
 		return "consequence"
-	case "context":
+	// Commander's Intent: purpose / must-be-true / known constraints are all constraints.
+	case "context", "why", "purpose", "requirements", "added requirements", "modified requirements",
+		"constraints", "must be true", "must-be-true", "known constraints":
 		return "constraint"
 	default:
 		return "decision"

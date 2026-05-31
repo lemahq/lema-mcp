@@ -55,6 +55,22 @@ func discoverLocalADRDir(root string) string {
 	return ""
 }
 
+// discoverOpenSpecDir returns root/openspec when it exists and holds a specs/ or
+// changes/ subdir, else "" — so `lema-mcp` run in a repo root picks up an
+// OpenSpec tree without requiring --openspec-dir.
+func discoverOpenSpecDir(root string) string {
+	dir := filepath.Join(root, "openspec")
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return ""
+	}
+	for _, sub := range []string{"specs", "changes"} {
+		if fi, err := os.Stat(filepath.Join(dir, sub)); err == nil && fi.IsDir() {
+			return dir
+		}
+	}
+	return ""
+}
+
 // fetchRemoteADRs pulls a repo's ADRs from GitHub and parses each file whose
 // basename matches `match` — the network counterpart to adr.ParseDirMatching, so
 // the wedge works on any public repo with no local checkout. If subdir is given

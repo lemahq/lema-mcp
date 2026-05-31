@@ -22,6 +22,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/lemahq/lema-mcp/internal/adr"
+	"github.com/lemahq/lema-mcp/internal/openspec"
 	"github.com/lemahq/lema-mcp/internal/source"
 )
 
@@ -80,6 +81,7 @@ type searchOutput struct {
 	Repo       string        `json:"repo"`
 	Claims     []source.Atom `json:"claims"`
 	TokensUsed int           `json:"tokens_used"`
+	Usage      localUsage    `json:"usage"`
 	Truncated  bool          `json:"truncated"`
 }
 
@@ -128,7 +130,7 @@ func searchDecisions(ctx context.Context, _ *mcp.CallToolRequest, in searchInput
 		budget = 1500
 	}
 	kept, used, truncated := fitBudget(atoms, budget)
-	out := searchOutput{Repo: repoName, Claims: kept, TokensUsed: used, Truncated: truncated}
+	out := searchOutput{Repo: repoName, Claims: kept, TokensUsed: used, Usage: localSearchROI(ctx, kept), Truncated: truncated}
 	logUsage("search_decisions", in.Query, len(kept), out)
 	logQuestion(in.Query, kept)
 	return nil, out, nil
@@ -186,6 +188,7 @@ func main() {
 	repoFlag := flag.String("repo", "", "github.com/org/repo to fetch (public; GITHUB_TOKEN for private), or a label for local --adr-dir mode")
 	refFlag := flag.String("ref", "", "git ref/branch to fetch from (default: the repo's default branch); remote --repo only")
 	patternFlag := flag.String("pattern", `^\d{3,4}[-_].+\.md$`, "ADR filename regex (default matches NNNN-*.md / NNN_*.md); widen for other conventions")
+	openspecDir := flag.String("openspec-dir", "", "OpenSpec root (dir with specs/ and changes/) to ingest alongside ADRs; empty auto-detects ./openspec in local mode")
 	flag.Parse()
 
 	pat, err := regexp.Compile(*patternFlag)
@@ -206,44 +209,86 @@ func main() {
 		}
 	}
 
-	var (
-		adrs    []adr.ADR
-		srcDesc string
-	)
-	if owner, repo, ok := parseGitHubRepo(*repoFlag); ok {
-		// Remote: fetch the repo's ADRs from GitHub (no local checkout needed).
-		fctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		var ferr error
-		if adrs, repoName, ferr = fetchRemoteADRs(fctx, owner, repo, *adrDir, *refFlag, pat); ferr != nil {
-			cancel()
-			log.Fatalf("lema-mcp: %v", ferr)
+	// Hosted mode (ADR-0040): when LEMA_API_URL is set, search_decisions runs
+	// against the hosted atom layer via POST /retrieve instead of the local
+	// lexical index, and the local ADR discovery below is skipped entirely.
+	if apiURL := os.Getenv("LEMA_API_URL"); apiURL != "" {
+		token := os.Getenv("LEMA_API_TOKEN")
+		if token == "" {
+			log.Fatal("lema-mcp: LEMA_API_TOKEN is required when LEMA_API_URL is set")
 		}
-		cancel()
-		srcDesc = repoName
-	} else {
-		// Local: parse a docs/adr-style directory on disk, auto-discovered when --adr-dir is empty.
-		dir := *adrDir
-		if dir == "" {
-			if dir = discoverLocalADRDir("."); dir == "" {
-				log.Fatalf("lema-mcp: no ADR directory found (looked in: %s); pass --adr-dir", strings.Join(adrDirCandidates, ", "))
+		src = source.NewHosted(apiURL, token, nil)
+		fmt.Fprintf(os.Stderr, "lema-mcp: hosted atom search via %s (search-only)\n", apiURL)
+	}
+
+	if src == nil {
+		var (
+			adrs      []adr.ADR
+			srcDesc   string
+			localMode = true
+		)
+		if owner, repo, ok := parseGitHubRepo(*repoFlag); ok {
+			// Remote: fetch the repo's ADRs from GitHub (no local checkout needed).
+			localMode = false
+			fctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			var ferr error
+			if adrs, repoName, ferr = fetchRemoteADRs(fctx, owner, repo, *adrDir, *refFlag, pat); ferr != nil {
+				cancel()
+				log.Fatalf("lema-mcp: %v", ferr)
+			}
+			cancel()
+			srcDesc = repoName
+		} else {
+			// Local: parse a docs/adr-style directory on disk, auto-discovered when
+			// --adr-dir is empty. Absence is tolerated — an openspec/ tree (below) may
+			// supply the records instead.
+			dir := *adrDir
+			if dir == "" {
+				dir = discoverLocalADRDir(".")
+			}
+			if dir != "" {
+				var perr error
+				if adrs, perr = adr.ParseDirMatching(dir, pat); perr != nil {
+					log.Fatalf("lema-mcp: %v", perr)
+				}
+				srcDesc = dir
+			}
+			if *repoFlag != "" {
+				repoName = *repoFlag
+			} else if dir != "" {
+				repoName = dir
 			}
 		}
-		var perr error
-		if adrs, perr = adr.ParseDirMatching(dir, pat); perr != nil {
-			log.Fatalf("lema-mcp: %v", perr)
+
+		// OpenSpec (local only in v1): ingest an openspec/ tree alongside the ADRs,
+		// numbered above the highest ADR so the two never collide in the index.
+		osDir := strings.TrimSpace(*openspecDir)
+		if osDir == "" && localMode {
+			osDir = discoverOpenSpecDir(".")
 		}
-		if *repoFlag != "" {
-			repoName = *repoFlag
-		} else {
-			repoName = dir
+		var osRecs []adr.ADR
+		if osDir != "" {
+			var oerr error
+			if osRecs, oerr = openspec.ParseDir(osDir, maxADRNumber(adrs)+1); oerr != nil {
+				log.Fatalf("lema-mcp: openspec: %v", oerr)
+			}
+			if srcDesc == "" {
+				srcDesc = osDir
+			} else {
+				srcDesc += " + " + osDir
+			}
+			if repoName == "local" {
+				repoName = osDir
+			}
 		}
-		srcDesc = dir
+
+		records := append(adrs, osRecs...)
+		if len(records) == 0 {
+			log.Fatalf("lema-mcp: no decisions found (looked for ADRs in %s and an openspec/ tree); pass --adr-dir or --openspec-dir", strings.Join(adrDirCandidates, ", "))
+		}
+		src = source.NewLocal(records)
+		fmt.Fprintf(os.Stderr, "lema-mcp: %d decisions (%d ADR, %d OpenSpec) from %s (repo %q); local lexical search, no account\n", len(records), len(adrs), len(osRecs), srcDesc, repoName)
 	}
-	if len(adrs) == 0 {
-		log.Fatalf("lema-mcp: no ADRs found in %s", srcDesc)
-	}
-	src = source.NewLocal(adrs)
-	fmt.Fprintf(os.Stderr, "lema-mcp: %d decisions from %s (repo %q); local lexical search, no account\n", len(adrs), srcDesc, repoName)
 
 	ctx := context.Background()
 	server := mcp.NewServer(&mcp.Implementation{Name: "lema-mcp", Version: "0.3.0"}, nil)
@@ -267,4 +312,16 @@ func main() {
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		log.Fatalf("lema-mcp: %v", err)
 	}
+}
+
+// maxADRNumber returns the highest ADR number, or 0 — so OpenSpec records can be
+// numbered above the ADRs without colliding in the in-memory index.
+func maxADRNumber(adrs []adr.ADR) int {
+	m := 0
+	for _, a := range adrs {
+		if a.Number > m {
+			m = a.Number
+		}
+	}
+	return m
 }
