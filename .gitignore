@@ -30,3 +30,9 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# npm: per-platform binaries are cross-compiled at publish time by
+# scripts/build-npm.sh, never committed (keeps the repo small).
+npm/*/bin/lema-mcp
+npm/*/bin/lema-mcp.exe
+node_modules/

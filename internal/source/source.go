@@ -73,12 +73,18 @@ type Graph struct {
 // table. It is attached after ranking and omits when empty, so it never affects
 // the order search_decisions returns.
 type Atom struct {
-	ID    string  `json:"id"`
-	Type  string  `json:"type"`
-	Text  string  `json:"text"`
-	Ref   string  `json:"ref"`
-	Edges []Edge  `json:"edges,omitempty"`
-	Score float64 `json:"-"`
+	ID    string `json:"id"`
+	Type  string `json:"type"`
+	Text  string `json:"text"`
+	Ref   string `json:"ref"`
+	Edges []Edge `json:"edges,omitempty"`
+	// Closed marks an atom an agent must not act on as a live option: a captured
+	// rejected alternative, or a chosen option whose decision was superseded
+	// (ADR-0042). ClosedNote carries the "do not propose X: …" directive. Both
+	// omit when empty, so ADR atoms and the hosted backend are unaffected.
+	Closed     bool    `json:"closed,omitempty"`
+	ClosedNote string  `json:"closed_note,omitempty"`
+	Score      float64 `json:"-"`
 }
 
 // DecisionSource is the interface the four MCP tools call. Swapping the

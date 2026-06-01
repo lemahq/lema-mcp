@@ -1,0 +1,39 @@
+{
+  "name": "lema-mcp",
+  "version": "0.4.0",
+  "description": "Local, database-less MCP server that makes your repo's decisions — and what it ruled out — queryable by your coding agent, and lets the agent record new ones with enforced never-reopen.",
+  "bin": {
+    "lema-mcp": "bin/lema-mcp.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "optionalDependencies": {
+    "lema-mcp-darwin-arm64": "0.4.0",
+    "lema-mcp-darwin-x64": "0.4.0",
+    "lema-mcp-linux-x64": "0.4.0",
+    "lema-mcp-linux-arm64": "0.4.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lemahq/lema-mcp.git"
+  },
+  "homepage": "https://github.com/lemahq/lema",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "claude-code",
+    "cursor",
+    "adr",
+    "architecture-decision-records",
+    "decisions",
+    "ai",
+    "agent",
+    "context"
+  ]
+}

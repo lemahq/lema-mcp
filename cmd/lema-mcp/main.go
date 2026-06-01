@@ -3,7 +3,9 @@
 // with no account, no database, and no network: search_decisions returns the
 // most relevant atomic claims (lexical over ADR sections, the ADR-0025 §4
 // response contract); get_decision / list_decisions / get_decision_graph serve
-// whole decisions and the typed-edge graph for drill-down. The hosted tier (its
+// whole decisions and the typed-edge graph for drill-down; record_decision /
+// check_decided capture decisions at deliberation to a local store and enforce
+// never-reopen (ADR-0042). The hosted tier (its
 // own Cloud Run service, ADR-0033 §7) serves the same four-tool contract over
 // the pgvector atom layer behind a DB-backed DecisionSource.
 package main
@@ -27,7 +29,8 @@ import (
 )
 
 var (
-	src         source.DecisionSource // all four tools read through this seam
+	src         source.DecisionSource // the four read tools go through this seam
+	capture     *source.CaptureStore  // local decision-capture store (ADR-0042): record_decision writes, search/check_decided enforce
 	repoName    = "local"             // identifier shown in search results
 	usageLog    *os.File
 	questionLog *os.File
@@ -125,6 +128,20 @@ func searchDecisions(ctx context.Context, _ *mcp.CallToolRequest, in searchInput
 	if err != nil {
 		return nil, searchOutput{}, err
 	}
+	// Merge this repo's captured decisions (ADR-0042): CLOSED matches lead — an
+	// agent about to re-propose a killed or superseded option must see it first —
+	// then the ADR atoms, then any other captured decisions.
+	if capture != nil {
+		var closed, open []source.Atom
+		for _, a := range capture.Search(in.Query, k) {
+			if a.Closed {
+				closed = append(closed, a)
+			} else {
+				open = append(open, a)
+			}
+		}
+		atoms = append(append(closed, atoms...), open...)
+	}
 	budget := in.MaxTokens
 	if budget <= 0 {
 		budget = 1500
@@ -184,11 +201,21 @@ func logQuestion(query string, atoms []source.Atom) {
 }
 
 func main() {
+	// `lema-mcp init` wires a repo for capture (.mcp.json + AGENTS.md + commit
+	// hook) and exits before the server flags are parsed.
+	if len(os.Args) > 1 && os.Args[1] == "init" {
+		if err := runInit(os.Args[2:]); err != nil {
+			log.Fatalf("lema-mcp init: %v", err)
+		}
+		return
+	}
+
 	adrDir := flag.String("adr-dir", "", "ADR directory (local path, or in-repo subpath with --repo). Empty = auto-discover docs/adr, doc/adr, docs/decisions, …")
 	repoFlag := flag.String("repo", "", "github.com/org/repo to fetch (public; GITHUB_TOKEN for private), or a label for local --adr-dir mode")
 	refFlag := flag.String("ref", "", "git ref/branch to fetch from (default: the repo's default branch); remote --repo only")
 	patternFlag := flag.String("pattern", `^\d{3,4}[-_].+\.md$`, "ADR filename regex (default matches NNNN-*.md / NNN_*.md); widen for other conventions")
 	openspecDir := flag.String("openspec-dir", "", "OpenSpec root (dir with specs/ and changes/) to ingest alongside ADRs; empty auto-detects ./openspec in local mode")
+	captureFile := flag.String("capture-file", ".lema/decisions.jsonl", "local decision-capture store: record_decision appends here; CLOSED decisions enforce never-reopen across searches")
 	flag.Parse()
 
 	pat, err := regexp.Compile(*patternFlag)
@@ -290,8 +317,19 @@ func main() {
 		fmt.Fprintf(os.Stderr, "lema-mcp: %d decisions (%d ADR, %d OpenSpec) from %s (repo %q); local lexical search, no account\n", len(records), len(adrs), len(osRecs), srcDesc, repoName)
 	}
 
+	// Decision capture (ADR-0042) is local and mode-independent: record_decision
+	// writes here and search/check_decided enforce never-reopen, with or without a
+	// hosted backend. A missing file is fine — the first record creates it.
+	var cerr error
+	if capture, cerr = source.NewCaptureStore(*captureFile); cerr != nil {
+		log.Fatalf("lema-mcp: capture store: %v", cerr)
+	}
+	if n := capture.Len(); n > 0 {
+		fmt.Fprintf(os.Stderr, "lema-mcp: %d captured decision(s) in %s\n", n, *captureFile)
+	}
+
 	ctx := context.Background()
-	server := mcp.NewServer(&mcp.Implementation{Name: "lema-mcp", Version: "0.3.0"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "lema-mcp", Version: "0.4.0"}, nil)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_decisions",
 		Description: "Search this repo's decisions and return the most relevant atomic claims (chosen/rejected/constraint/consequence) with their source ADR. Call this BEFORE writing or changing code to learn the constraints and what was already ruled out. Returns tight, sourced claims, not whole documents.",
@@ -308,6 +346,15 @@ func main() {
 		Name:        "get_decision_graph",
 		Description: "Traverse typed edges (supersedes, superseded_by, depends_on, related_to) from a decision to find connected decisions.",
 	}, getDecisionGraph)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "record_decision",
+		Description: "Record a decision you just settled — the chosen option AND the alternatives you rejected (with why each was killed). Call this whenever you make a non-trivial choice (a library, a pattern, an architecture or policy decision). What you record becomes durable context for the next agent and is enforced: rejected and superseded options come back CLOSED so they are not re-proposed.",
+	}, recordDecision)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "check_decided",
+		Description: "Before proposing a direction (a library, an approach, a design), check whether it is already decided and CLOSED. Returns prior decisions that rule the option out; if anything comes back, do not re-propose it — surface the existing decision instead.",
+	}, checkDecided)
 
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		log.Fatalf("lema-mcp: %v", err)
