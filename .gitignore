@@ -36,3 +36,6 @@ go.work.sum
 npm/*/bin/lema-mcp
 npm/*/bin/lema-mcp.exe
 node_modules/
+
+# agent-tooling artifacts — not for the public repo
+.jules/
