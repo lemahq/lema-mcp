@@ -148,5 +148,6 @@ the other tools stay local in this MVP. Capture (`record_decision` /
 
 ## License
 
-MIT. The open-source wedge of [lema](https://github.com/lemahq/lema) — the system
-of record for *why*.
+MIT. `lema-mcp` is the free, local wedge of [**lema**](https://lema.sh) — the
+system of record for *why*. The hosted graph and the team why-surface are coming
+at [lema.sh](https://lema.sh).

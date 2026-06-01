@@ -22,7 +22,7 @@
     "type": "git",
     "url": "git+https://github.com/lemahq/lema-mcp.git"
   },
-  "homepage": "https://github.com/lemahq/lema",
+  "homepage": "https://lema.sh",
   "keywords": [
     "mcp",
     "model-context-protocol",
