@@ -201,13 +201,22 @@ func logQuestion(query string, atoms []source.Atom) {
 }
 
 func main() {
-	// `lema-mcp init` wires a repo for capture (.mcp.json + AGENTS.md + commit
-	// hook) and exits before the server flags are parsed.
-	if len(os.Args) > 1 && os.Args[1] == "init" {
-		if err := runInit(os.Args[2:]); err != nil {
-			log.Fatalf("lema-mcp init: %v", err)
+	// Subcommands run and exit before the server flags are parsed:
+	//   init — wire a repo for capture (.mcp.json + AGENTS.md + commit hook)
+	//   demo — a 30-second never-reopen walkthrough (the instant hook)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "init":
+			if err := runInit(os.Args[2:]); err != nil {
+				log.Fatalf("lema-mcp init: %v", err)
+			}
+			return
+		case "demo":
+			if err := runDemo(os.Args[2:]); err != nil {
+				log.Fatalf("lema-mcp demo: %v", err)
+			}
+			return
 		}
-		return
 	}
 
 	adrDir := flag.String("adr-dir", "", "ADR directory (local path, or in-repo subpath with --repo). Empty = auto-discover docs/adr, doc/adr, docs/decisions, …")

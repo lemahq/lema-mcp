@@ -12,6 +12,10 @@ public npm packages is **free** — no per-download or per-run cost.
 
 ## Each release
 
+**TL;DR:** bump the version (step 1), then `npm login && bash scripts/publish.sh` —
+it runs steps 2–4 in the required order (build → platform packages → launcher).
+Verify with `npx lema-mcp@latest demo`.
+
 1. **Bump the version** to match in all of: `npm/lema-mcp/package.json`, every
    `npm/<platform>/package.json`, and the `optionalDependencies` pins in
    `npm/lema-mcp/package.json` (they must all be identical, e.g. `0.4.0`). Keep it
@@ -30,6 +34,7 @@ public npm packages is **free** — no per-download or per-run cost.
    ```
 5. **Verify on a clean machine:**
    ```bash
+   npx lema-mcp@latest demo      # the 30-second never-reopen walkthrough
    npx lema-mcp@latest init      # writes .mcp.json + AGENTS.md + the hook
    ```
    then point a coding agent at the repo and ask "why did we choose X?".

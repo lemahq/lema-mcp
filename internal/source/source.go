@@ -402,7 +402,10 @@ func bestSnippet(clean string, terms []string, maxLen int) string {
 	}
 	hitRune := 0
 	if hitByte > 0 {
-		hitRune = len([]rune(clean[:hitByte]))
+		// hitByte indexes lower, whose byte length can differ from clean's when
+		// ToLower changes UTF-8 widths ('Ⱥ'→'ⱥ'). Slice lower (always in bounds);
+		// ToLower is a 1:1 per-rune map, so the rune offset matches clean's.
+		hitRune = len([]rune(lower[:hitByte]))
 	}
 	start := max(hitRune-maxLen/3, 0)
 	end := start + maxLen

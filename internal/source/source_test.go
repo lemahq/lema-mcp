@@ -93,3 +93,15 @@ func TestSnippetsAreTightAndClean(t *testing.T) {
 		t.Errorf("markdown link not cleaned out: %q", top)
 	}
 }
+
+// bestSnippet must not panic when strings.ToLower(clean) changes the byte length
+// of the string, which pushes the byte index hitByte past the end of clean. This
+// guards the snippet path against a DoS panic on input that expands during
+// lowercasing ('Ⱥ' U+023A, 2 bytes → 'ⱥ' U+2C65, 3 bytes). Credit: Jules (DoS report).
+func TestBestSnippetMultiByteNoPanic(t *testing.T) {
+	clean := strings.Repeat("Ⱥ", 10) + " want"
+	got := bestSnippet(clean, []string{"want"}, 10) // panics if hitByte is sliced into clean
+	if !strings.Contains(got, "want") {
+		t.Errorf("expected snippet to contain the matched term, got %q", got)
+	}
+}

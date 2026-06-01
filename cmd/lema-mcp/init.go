@@ -50,6 +50,10 @@ func runInit(args []string) error {
 	}
 	fmt.Println("\nNext: open this repo in Claude Code, approve the lema-mcp server, and your")
 	fmt.Println("agent will record decisions (and what it ruled out) as it works.")
+	fmt.Println()
+	fmt.Println("What you just turned on — never-reopen: when your agent reaches for a")
+	fmt.Println("decision you already killed, it gets \"CLOSED — do not propose X\" and surfaces")
+	fmt.Println("the prior decision instead. See it in 30 seconds:  npx lema-mcp demo")
 	return nil
 }
 
