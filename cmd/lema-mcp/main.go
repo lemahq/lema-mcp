@@ -36,6 +36,21 @@ var (
 	questionLog *os.File
 )
 
+var secretPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\bbearer\s+[a-zA-Z0-9\-\._~+/]+`),
+	regexp.MustCompile(`(?i)(api[_\-]?key|secret|token|password)[=:'"]+\s*[a-zA-Z0-9\-\._~+/]+`),
+	regexp.MustCompile(`(?i)(api[_\-]?key|secret|token|password)\s+is\s+[a-zA-Z0-9\-\._~+/]+`),
+	regexp.MustCompile(`\bgh[pousr]_[a-zA-Z0-9_]{36,255}\b`),
+	regexp.MustCompile(`\bsk-[a-zA-Z0-9]{20,}\b`),
+}
+
+func redactSecrets(s string) string {
+	for _, re := range secretPatterns {
+		s = re.ReplaceAllString(s, "[REDACTED]")
+	}
+	return s
+}
+
 // logUsage records each tool call and the approximate token size of the context
 // returned — the input half of any tokens-saved measurement. Written to stderr
 // so it never pollutes the stdio MCP protocol stream on stdout.
@@ -44,10 +59,18 @@ func logUsage(tool, query string, results int, payload any) {
 	if b, err := json.Marshal(payload); err == nil {
 		approxTokens = len(b) / 4
 	}
+
+	finalQuery := query
+	if disable := os.Getenv("LEMA_DISABLE_QUERY_LOGGING"); disable == "true" || disable == "1" {
+		finalQuery = "[REDACTED BY CONFIG]"
+	} else {
+		finalQuery = redactSecrets(query)
+	}
+
 	line, _ := json.Marshal(map[string]any{
 		"ts":            time.Now().UTC().Format(time.RFC3339),
 		"tool":          tool,
-		"query":         query,
+		"query":         finalQuery,
 		"results":       results,
 		"approx_tokens": approxTokens,
 	})
