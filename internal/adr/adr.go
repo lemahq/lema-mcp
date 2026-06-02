@@ -54,7 +54,7 @@ type frontmatter struct {
 // at most one successor — but the list form is a natural authoring mistake (the
 // sibling supersedes/depends_on/related_to fields ARE lists), and some of our
 // own dogfood ADRs use it. Rejecting the whole file on that asymmetry would
-// crash ParseDir for the entire directory and block the hosted import for any
+// crash ParseDirMatching for the entire directory and block the hosted import for any
 // repo with one such file, so the parser is lenient: a sequence resolves to its
 // first element. The value is captured as a string (not an int) for the same
 // octal reason as toNums — strconv.Atoi later forces base-10.
@@ -87,7 +87,7 @@ func (f *flexRef) UnmarshalYAML(node *yaml.Node) error {
 }
 
 // fileRe matches the canonical docs/adr/NNNN-anything.md naming. Files that
-// don't match (README.md, template.md) are skipped by ParseDir.
+// don't match (README.md, template.md) are skipped by ParseDirMatching.
 var fileRe = regexp.MustCompile(`^(\d{4})-(.+)\.md$`)
 
 // firstDigits extracts the leading number from a non-canonical ADR filename. It
@@ -123,13 +123,8 @@ func toNum(s *string) *int {
 	return nil
 }
 
-// ParseDir parses every canonical NNNN-*.md file in dir, sorted by ADR number.
-func ParseDir(dir string) ([]ADR, error) {
-	return ParseDirMatching(dir, fileRe)
-}
-
 // ParseDirMatching parses every file in dir whose basename matches `match`,
-// sorted by ADR number. ParseDir uses the canonical NNNN-*.md matcher; the
+// sorted by ADR number. ParseDirMatching uses the canonical NNNN-*.md matcher; the
 // local-first MCP passes a looser pattern to index repos that store ADRs under
 // other naming conventions, while the hosted curated path stays strict.
 func ParseDirMatching(dir string, match *regexp.Regexp) ([]ADR, error) {
