@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -103,5 +104,70 @@ func TestBestSnippetMultiByteNoPanic(t *testing.T) {
 	got := bestSnippet(clean, []string{"want"}, 10) // panics if hitByte is sliced into clean
 	if !strings.Contains(got, "want") {
 		t.Errorf("expected snippet to contain the matched term, got %q", got)
+	}
+}
+
+// queryTerms must clean queries by lowercasing, dropping punctuation, removing
+// stopwords, and dropping single-character terms.
+func TestQueryTerms(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		want  []string
+	}{
+		{
+			name:  "happy path drops stopwords and punctuation",
+			query: "why did we choose postgres?",
+			want:  []string{"choose", "postgres"},
+		},
+		{
+			name:  "case insensitivity",
+			query: "CHOOSE POSTGRES",
+			want:  []string{"choose", "postgres"},
+		},
+		{
+			name:  "trims surrounding punctuation",
+			query: ".,?!\"'()[]:;\x60hello.,?!\"'()[]:;\x60 \x60world\x60",
+			want:  []string{"hello", "world"},
+		},
+		{
+			name:  "preserves internal punctuation",
+			query: "post,gres pg-vector",
+			want:  []string{"post,gres", "pg-vector"},
+		},
+		{
+			name:  "all stopwords",
+			query: "why did we do this",
+			want:  nil,
+		},
+		{
+			name:  "short words dropped",
+			query: "a b c x y z",
+			want:  nil,
+		},
+		{
+			name:  "empty input",
+			query: "",
+			want:  nil,
+		},
+		{
+			name:  "whitespace only",
+			query: "   \t\n   ",
+			want:  nil,
+		},
+		{
+			name:  "punctuation only",
+			query: ".,?! \"'() [] :;\x60",
+			want:  nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := queryTerms(tc.query)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
