@@ -2,8 +2,9 @@
 #
 # Guard against publishing stale bits: this dist's extracted Go source MUST match
 # a fresh extraction from the monorepo — the single source of truth (ADR-0033 §3).
-# Run by scripts/publish.sh before it builds/publishes. If it reports drift, the
-# fix is to re-run the monorepo's scripts/extract-lema-mcp.sh, then publish again.
+# Run by scripts/publish.sh before it builds/publishes. On drift the remedy depends
+# on DIRECTION: re-extract if the monorepo is ahead, but PORT BACK first if dist has
+# Go the monorepo lacks (e.g. a fix merged here via PR) — re-extract OVERWRITES dist Go.
 #
 #   Bypass (intentional, rare):       LEMA_SKIP_EXTRACT_CHECK=1
 #   Point at a non-default monorepo:  LEMA_MONOREPO=/path/to/lema
@@ -40,7 +41,9 @@ for d in $DIRS; do
 	done
 	if ! diff -rq "$TMP/$d" "$DIST/$d" >/dev/null 2>&1; then
 		echo "  ✗ drift in $d:"
-		diff -rq "$TMP/$d" "$DIST/$d" || true
+		# Relabel the temp/dist paths so the direction of each drift is legible:
+		# "Only in (dist)/…" is the dangerous case a re-extract would delete.
+		diff -rq "$TMP/$d" "$DIST/$d" 2>&1 | sed "s#$TMP#(monorepo)#g; s#$DIST#(dist)#g" || true
 		drift=1
 	fi
 done
@@ -48,10 +51,18 @@ done
 if [ "$drift" = 1 ]; then
 	cat >&2 <<EOF
 
-✗ ABORT: this dist's Go source has drifted from the monorepo.
-  The monorepo is the source of truth (ADR-0033 §3) — do not hand-edit dist Go.
-  Fix:    bash $MONOREPO/scripts/extract-lema-mcp.sh
-  Bypass: LEMA_SKIP_EXTRACT_CHECK=1 bash scripts/publish.sh
+✗ ABORT: this dist's Go source has drifted from the monorepo (source of truth, ADR-0033 §3).
+  The remedy depends on WHICH WAY it drifted — read the lines above:
+
+  • "Files … differ" or "Only in (monorepo)/…"  →  the monorepo is ahead.
+      Fix by re-extracting:  bash $MONOREPO/scripts/extract-lema-mcp.sh
+
+  • "Only in (dist)/…"  →  that file exists ONLY in dist (e.g. a fix merged here via a
+    GitHub PR that never made it back to the monorepo). Re-extract OVERWRITES dist's Go
+    and would DELETE it. Port it INTO the monorepo FIRST, then re-extract — do NOT
+    blindly re-extract.
+
+  Bypass (only if you are certain dist is in sync): LEMA_SKIP_EXTRACT_CHECK=1 bash scripts/publish.sh
 EOF
 	exit 1
 fi
