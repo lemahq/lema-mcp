@@ -14,6 +14,9 @@ VERSION="$(node -p "require('$DIST/npm/lema-mcp/package.json').version")"
 
 echo "lema-mcp publish $VERSION"
 
+echo "→ checking dist is in sync with the monorepo"
+bash "$DIST/scripts/check-extract-sync.sh"
+
 echo "→ building binaries"
 bash "$DIST/scripts/build-npm.sh"
 
