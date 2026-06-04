@@ -248,16 +248,39 @@ func loadADRClosed(dir string) []source.Atom {
 // missing store), emits nothing so a guard failure never blocks the agent —
 // fail-open is correct for an advisory enforcement layer (ADR-0052).
 func runGuard(args []string) {
+	// Fast-path: if guard is disabled, skip all file I/O and corpus loading.
+	mode := os.Getenv(guardModeEnvVar)
+	if mode == "" {
+		mode = guardModeContext
+	}
+	if mode == guardModeOff {
+		os.Exit(0)
+	}
+
 	capturePath := ".lema/decisions.jsonl"
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == "--capture-file" {
 			capturePath = args[i+1]
 		}
 	}
-	data, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		return
+
+	type readResult struct {
+		data []byte
+		err  error
 	}
+	ch := make(chan readResult, 1)
+	go func() { data, err := io.ReadAll(os.Stdin); ch <- readResult{data, err} }()
+	var data []byte
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			os.Exit(0)
+		}
+		data = r.data
+	case <-time.After(3 * time.Second):
+		os.Exit(0) // fail open on timeout
+	}
+
 	var in guardInput
 	if err := json.Unmarshal(data, &in); err != nil {
 		return
@@ -265,10 +288,6 @@ func runGuard(args []string) {
 	store, err := source.NewCaptureStore(capturePath)
 	if err != nil {
 		return
-	}
-	mode := os.Getenv(guardModeEnvVar)
-	if mode == "" {
-		mode = guardModeContext
 	}
 	query := guardQuery(in.ToolInput)
 	// Enforce off BOTH the forward-capture store and the repo's documented ADRs
@@ -299,7 +318,7 @@ func guardLog(in guardInput, out *guardOutput, query string, atom *source.Atom) 
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		_ = os.MkdirAll(dir, 0o755)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return
 	}
@@ -313,7 +332,7 @@ func guardLog(in guardInput, out *guardOutput, query string, atom *source.Atom) 
 		"tool":     in.ToolName,
 		"mode":     os.Getenv(guardModeEnvVar),
 		"decision": decision,
-		"query":    query,
+		"query":    redactSecrets(query),
 	}
 	if atom != nil {
 		rec["score"] = atom.Score

@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -73,7 +74,13 @@ func serveHTTP(port int) error {
 
 	fmt.Fprintf(os.Stderr, "lema-mcp: workspace API on http://%s  (repo %q)\n", addr, repoName)
 	fmt.Fprintf(os.Stderr, "lema-mcp: token %s  (Authorization: Bearer <token>, or ?token=)\n", token)
-	return http.Serve(ln, handler)
+	srv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	return srv.Serve(ln)
 }
 
 // httpInit runs lema-mcp's capture setup (init.go) in the engine's CWD — the repo
@@ -328,7 +335,12 @@ func httpList(w http.ResponseWriter, r *http.Request) {
 }
 
 func httpGet(w http.ResponseWriter, r *http.Request) {
-	d, err := src.Get(r.Context(), queryInt(r, "number", 0))
+	n := queryInt(r, "number", 0)
+	if n <= 0 {
+		http.Error(w, "number is required and must be positive", http.StatusBadRequest)
+		return
+	}
+	d, err := src.Get(r.Context(), n)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -337,7 +349,12 @@ func httpGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func httpGraph(w http.ResponseWriter, r *http.Request) {
-	g, err := src.Graph(r.Context(), queryInt(r, "number", 0), queryInt(r, "depth", 1))
+	n := queryInt(r, "number", 0)
+	if n <= 0 {
+		http.Error(w, "number is required and must be positive", http.StatusBadRequest)
+		return
+	}
+	g, err := src.Graph(r.Context(), n, queryInt(r, "depth", 1))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -375,8 +392,14 @@ func httpRecord(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "capture store unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var in source.DecisionRecord
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
 		return
 	}

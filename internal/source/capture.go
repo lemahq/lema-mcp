@@ -51,6 +51,12 @@ type CaptureStore struct {
 	records []DecisionRecord
 	byID    map[string]int
 
+	// cachedAtoms is the last projection of records → Atom slice, populated by
+	// loadLocked and invalidated (set to nil) at the top of every loadLocked call.
+	// atoms() returns it directly when non-nil, avoiding a full rebuild on every
+	// Search/ClosedAtoms call.
+	cachedAtoms []Atom
+
 	// loadedMod/loadedSize fingerprint the file as of the last load so reads can
 	// cheaply detect when another process has appended and reload. Without this a
 	// long-lived `serve --http` store (the GUI backend) would never see a stdio
@@ -74,6 +80,9 @@ func NewCaptureStore(path string) (*CaptureStore, error) {
 // records the file's fingerprint. A missing file is not an error — it yields an
 // empty store. Caller holds s.mu (the constructor holds the store exclusively).
 func (s *CaptureStore) loadLocked() error {
+	// Invalidate the atom cache; it will be rebuilt at the end of a successful load.
+	s.cachedAtoms = nil
+
 	f, err := os.Open(s.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -109,6 +118,9 @@ func (s *CaptureStore) loadLocked() error {
 	}
 	s.records, s.byID = reduce(lines)
 	s.loadedMod, s.loadedSize = fi.ModTime(), fi.Size()
+	// Pre-populate the atom cache so subsequent Search/ClosedAtoms calls pay no
+	// rebuild cost.
+	s.cachedAtoms = s.buildAtoms()
 	return nil
 }
 
@@ -183,8 +195,13 @@ func (s *CaptureStore) Record(in DecisionRecord) (DecisionRecord, error) {
 	// Reload from disk so memory reflects this append AND any records another
 	// process appended since our last load; reduce() re-derives superseded status
 	// from the full log. The on-disk append is the source of truth.
+	//
+	// If the reload fails the write is still durable — log the error and return
+	// the atom we just persisted rather than signalling failure. Returning an
+	// error here would cause the caller to retry, creating a duplicate atom on
+	// disk (the write already succeeded).
 	if err := s.loadLocked(); err != nil {
-		return DecisionRecord{}, err
+		fmt.Fprintf(os.Stderr, "lema-mcp: capture: reload after write failed: %v\n", err)
 	}
 	return in, nil
 }
@@ -210,10 +227,20 @@ func (s *CaptureStore) appendLine(r DecisionRecord) error {
 	return err
 }
 
-// atoms projects the captured decisions into the Atom shape search serves,
+// atoms returns the cached Atom projection when available, falling back to a
+// full rebuild. Caller holds s.mu.
+func (s *CaptureStore) atoms() []Atom {
+	if s.cachedAtoms != nil {
+		return s.cachedAtoms
+	}
+	s.cachedAtoms = s.buildAtoms()
+	return s.cachedAtoms
+}
+
+// buildAtoms projects the captured decisions into the Atom shape search serves,
 // computing the CLOSED enforcement note for any rejected alternative and for any
 // chosen option whose decision has been superseded. Caller holds s.mu.
-func (s *CaptureStore) atoms() []Atom {
+func (s *CaptureStore) buildAtoms() []Atom {
 	out := []Atom{}
 	for _, r := range s.records {
 		chosenText := r.Title + " — chose " + r.Chosen

@@ -10,6 +10,19 @@ import (
 	"sync"
 )
 
+// Version is the running binary's version string, set by -ldflags -X at build time.
+var Version = "0.0.0"
+
+// versionOrLatest returns Version for use in npx hook commands. When the binary
+// was not built with -ldflags (Version=="0.0.0"), it falls back to "latest" so
+// dev and CI builds don't write an unpublished version string into user config.
+func versionOrLatest() string {
+	if Version == "0.0.0" {
+		return "latest"
+	}
+	return Version
+}
+
 // configWriteMu serializes the read-modify-write cycle on the repo config files
 // (.mcp.json, .claude/settings.json) so two rapid Plugins-panel toggles
 // (ADR-0043/0044) cannot lose-update each other: each toggle reads, mutates, and
@@ -83,6 +96,9 @@ func initRepo(dir string) ([]string, error) {
 			wrote = append(wrote, st.label)
 		}
 	}
+	if len(wrote) > 0 {
+		fmt.Fprintf(os.Stderr, "lema-mcp: hooks pinned to lema-mcp@%s — re-run lema-mcp init after each verified upgrade\n", versionOrLatest())
+	}
 	return wrote, nil
 }
 
@@ -102,7 +118,7 @@ func ensureMCPJSON(path string) (bool, error) {
 	}
 	servers["lema"] = map[string]any{
 		"command": "npx",
-		"args":    []any{"-y", "lema-mcp@latest"},
+		"args":    []any{"-y", "lema-mcp@" + versionOrLatest()},
 	}
 	root["mcpServers"] = servers
 	return true, writeJSON(path, root)
@@ -141,7 +157,10 @@ func ensureClaudeHook(path string) (bool, error) {
 	return true, writeJSON(path, root)
 }
 
-const guardMarker = "lema-mcp@latest guard"
+// guardMarker returns the command substring used to detect and remove the guard
+// hook. It includes the resolved version so that the idempotency check matches
+// what was actually written; upgrading the binary installs a fresh pinned hook.
+func guardMarker() string { return "lema-mcp@" + versionOrLatest() + " guard" }
 
 // ensurePreToolUseHook installs the never-reopen guard: a PreToolUse hook that runs
 // `lema-mcp guard` before every Edit/Write, surfacing a CLOSED decision the change
@@ -152,7 +171,7 @@ func ensurePreToolUseHook(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if b, err := json.Marshal(root); err == nil && strings.Contains(string(b), guardMarker) {
+	if b, err := json.Marshal(root); err == nil && strings.Contains(string(b), guardMarker()) {
 		return false, nil
 	}
 	hooks, _ := root["hooks"].(map[string]any)
@@ -164,7 +183,7 @@ func ensurePreToolUseHook(path string) (bool, error) {
 		"matcher": "Edit|Write",
 		"hooks": []any{map[string]any{
 			"type":    "command",
-			"command": "npx -y lema-mcp@latest guard",
+			"command": "npx -y " + guardMarker(),
 		}},
 	}
 	hooks["PreToolUse"] = append(preToolUse, guard)
@@ -172,7 +191,9 @@ func ensurePreToolUseHook(path string) (bool, error) {
 	return true, writeJSON(path, root)
 }
 
-const captureNudgeMarker = "lema-mcp@latest nudge"
+// captureNudgeMarker returns the command substring used to detect and remove the
+// capture-nudge hook. Same version-resolution logic as guardMarker.
+func captureNudgeMarker() string { return "lema-mcp@" + versionOrLatest() + " nudge" }
 
 // ensureCaptureNudgeHook installs the capture nudge: a PostToolUse hook that runs
 // `lema-mcp nudge` after Edit/Write/MultiEdit and reminds the agent to
@@ -183,7 +204,7 @@ func ensureCaptureNudgeHook(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if b, err := json.Marshal(root); err == nil && strings.Contains(string(b), captureNudgeMarker) {
+	if b, err := json.Marshal(root); err == nil && strings.Contains(string(b), captureNudgeMarker()) {
 		return false, nil
 	}
 	hooks, _ := root["hooks"].(map[string]any)
@@ -195,7 +216,7 @@ func ensureCaptureNudgeHook(path string) (bool, error) {
 		"matcher": "Edit|Write|MultiEdit",
 		"hooks": []any{map[string]any{
 			"type":    "command",
-			"command": "npx -y lema-mcp@latest nudge",
+			"command": "npx -y " + captureNudgeMarker(),
 		}},
 	}
 	hooks["PostToolUse"] = append(postToolUse, nudge)
@@ -228,7 +249,7 @@ func removeCaptureNudgeHook(path string) (bool, error) {
 		for _, h := range entries {
 			entry, _ := h.(map[string]any)
 			command, _ := entry["command"].(string)
-			if strings.Contains(command, captureNudgeMarker) {
+			if strings.Contains(command, captureNudgeMarker()) {
 				changed = true
 				continue // drop the lema-managed capture-nudge hook
 			}
@@ -391,7 +412,7 @@ func removeGuardHook(path string) (bool, error) {
 		for _, h := range entries {
 			entry, _ := h.(map[string]any)
 			command, _ := entry["command"].(string)
-			if strings.Contains(command, guardMarker) {
+			if strings.Contains(command, guardMarker()) {
 				changed = true
 				continue // drop the lema-managed guard hook
 			}
@@ -465,7 +486,7 @@ func ensureAgentsBlock(path string) (bool, error) {
 			if updated == existing {
 				return false, nil
 			}
-			return true, os.WriteFile(path, []byte(updated), 0o644)
+			return true, writeFileAtomic(path, []byte(updated), 0o644)
 		}
 	}
 
@@ -479,7 +500,7 @@ func ensureAgentsBlock(path string) (bool, error) {
 	}
 	sb.WriteString(block)
 	sb.WriteString("\n")
-	return true, os.WriteFile(path, []byte(sb.String()), 0o644)
+	return true, writeFileAtomic(path, []byte(sb.String()), 0o644)
 }
 
 // readJSONObject reads a JSON object file into a map, treating a missing file as
@@ -500,6 +521,32 @@ func readJSONObject(path string) (map[string]any, error) {
 		}
 	}
 	return root, nil
+}
+
+// writeFileAtomic writes data to path via a sibling temp file + rename so that
+// a crash mid-write never leaves a truncated file. The temp file lives in the
+// same directory as path so os.Rename never crosses a filesystem boundary.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".lema-tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // writeJSON writes v as pretty JSON, creating the parent directory if needed.

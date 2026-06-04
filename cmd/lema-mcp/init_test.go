@@ -92,7 +92,7 @@ func TestEnsurePreToolUseHook(t *testing.T) {
 	}
 	b, _ := os.ReadFile(path)
 	if !strings.Contains(string(b), `"PreToolUse"`) ||
-		!strings.Contains(string(b), guardMarker) ||
+		!strings.Contains(string(b), guardMarker()) ||
 		!strings.Contains(string(b), `"Edit|Write"`) {
 		t.Fatalf("hook not written correctly: %s", b)
 	}
@@ -112,7 +112,7 @@ func TestInitRepoInstallsGuard(t *testing.T) {
 	}
 	b, _ := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
 	s := string(b)
-	if !strings.Contains(s, `"PreToolUse"`) || !strings.Contains(s, guardMarker) {
+	if !strings.Contains(s, `"PreToolUse"`) || !strings.Contains(s, guardMarker()) {
 		t.Fatalf("initRepo did not install the guard hook: %s", s)
 	}
 	// The existing commit reminder must survive alongside it.
@@ -120,7 +120,7 @@ func TestInitRepoInstallsGuard(t *testing.T) {
 		t.Fatalf("initRepo dropped the commit reminder: %s", s)
 	}
 	// And the capture nudge (ADR-0054) is installed too.
-	if !strings.Contains(s, captureNudgeMarker) {
+	if !strings.Contains(s, captureNudgeMarker()) {
 		t.Fatalf("initRepo did not install the capture-nudge hook: %s", s)
 	}
 }
@@ -136,7 +136,7 @@ func TestRemoveGuardHook(t *testing.T) {
 		t.Fatalf("remove: changed=%v err=%v", changed, err)
 	}
 	b, _ := os.ReadFile(path)
-	if strings.Contains(string(b), guardMarker) {
+	if strings.Contains(string(b), guardMarker()) {
 		t.Fatalf("guard hook not removed: %s", b)
 	}
 	// Idempotent: removing again is a no-op.
@@ -154,7 +154,7 @@ func TestEnsureCaptureNudgeHook(t *testing.T) {
 	}
 	b, _ := os.ReadFile(path)
 	if !strings.Contains(string(b), `"PostToolUse"`) ||
-		!strings.Contains(string(b), captureNudgeMarker) ||
+		!strings.Contains(string(b), captureNudgeMarker()) ||
 		!strings.Contains(string(b), `"Edit|Write|MultiEdit"`) {
 		t.Fatalf("nudge hook not written correctly: %s", b)
 	}
@@ -180,7 +180,7 @@ func TestRemoveCaptureNudgeHook(t *testing.T) {
 		t.Fatalf("remove: changed=%v err=%v", changed, err)
 	}
 	s := func() string { b, _ := os.ReadFile(path); return string(b) }()
-	if strings.Contains(s, captureNudgeMarker) {
+	if strings.Contains(s, captureNudgeMarker()) {
 		t.Fatalf("nudge hook not removed: %s", s)
 	}
 	// The commit reminder must survive — removeCaptureNudgeHook is surgical.

@@ -104,12 +104,19 @@ func scanFiles(root string, cfg Config) []string {
 	for _, f := range defaultFiles {
 		addFile(f)
 	}
+	absRoot, absRootErr := filepath.Abs(root)
 	for _, inc := range cfg.Docs.Include {
 		inc = strings.Trim(filepath.ToSlash(inc), "/")
 		if inc == "" {
 			continue
 		}
-		if info, err := os.Stat(filepath.Join(root, filepath.FromSlash(inc))); err == nil && info.IsDir() {
+		candidate := filepath.Join(root, filepath.FromSlash(inc))
+		absCandidate, absCandErr := filepath.Abs(candidate)
+		if absRootErr != nil || absCandErr != nil || !strings.HasPrefix(absCandidate+string(os.PathSeparator), absRoot+string(os.PathSeparator)) {
+			fmt.Fprintf(os.Stderr, "lema-mcp: docs: skipping out-of-tree path %q\n", inc)
+			continue
+		}
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 			walkDir(inc)
 		} else {
 			addFile(inc)

@@ -349,10 +349,11 @@ var stopwords = map[string]bool{
 }
 
 var (
-	mdImage    = regexp.MustCompile(`!\[[^\]]*\]\([^)]*\)`)  // ![alt](url) -> drop
-	mdLink     = regexp.MustCompile(`\[([^\]]+)\]\([^)]*\)`) // [text](url) -> text
-	mdListItem = regexp.MustCompile(`^(?:[-*+]|\d+\.)\s+`)   // leading list marker
-	wsRun      = regexp.MustCompile(`\s+`)
+	htmlCommentRe = regexp.MustCompile(`(?s)<!--.*?-->`)        // HTML comments — stripped first to block prompt injection
+	mdImage       = regexp.MustCompile(`!\[[^\]]*\]\([^)]*\)`)  // ![alt](url) -> drop
+	mdLink        = regexp.MustCompile(`\[([^\]]+)\]\([^)]*\)`) // [text](url) -> text
+	mdListItem    = regexp.MustCompile(`^(?:[-*+]|\d+\.)\s+`)   // leading list marker
+	wsRun         = regexp.MustCompile(`\s+`)
 )
 
 // splitBlocks breaks a section's text into ranking units: paragraphs (blank-line
@@ -390,10 +391,12 @@ func splitBlocks(sectionText string) []string {
 	return blocks
 }
 
-// cleanMarkdown reduces a block to readable plain text: drops images, unwraps
-// links to their text, removes backticks, and collapses whitespace. It leaves
-// '_' and '*' alone so identifiers like org_id survive intact.
+// cleanMarkdown reduces a block to readable plain text: strips HTML comments
+// first (prompt-injection defense), then drops images, unwraps links to their
+// text, removes backticks, and collapses whitespace. It leaves '_' and '*'
+// alone so identifiers like org_id survive intact.
 func cleanMarkdown(s string) string {
+	s = htmlCommentRe.ReplaceAllString(s, "")
 	s = mdImage.ReplaceAllString(s, "")
 	s = mdLink.ReplaceAllString(s, "$1")
 	s = strings.ReplaceAll(s, "`", "")
