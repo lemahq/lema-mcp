@@ -65,7 +65,14 @@ func checkDecided(_ context.Context, _ *mcp.CallToolRequest, in checkInput) (*mc
 	if capture == nil {
 		return nil, checkOutput{Topic: in.Topic}, nil
 	}
-	closed := capture.CheckDecided(in.Topic, 10)
+	// Enforce off BOTH the capture store and the repo's documented ADRs (ADR-0053),
+	// matched by the precise option-token matcher (ADR-0052) — not the old lexical
+	// search that folded rationale prose into the match.
+	merged := append([]source.Atom{}, capture.ClosedAtoms()...)
+	if cs, ok := src.(source.ClosedSource); ok {
+		merged = append(merged, cs.ClosedAtoms()...)
+	}
+	closed := guardMatch(merged, in.Topic)
 	out := checkOutput{Topic: in.Topic, Decided: len(closed) > 0, Closed: closed}
 	if out.Decided {
 		out.Note = "this topic touches decisions already CLOSED — do not re-propose the closed options; surface the prior decision instead"

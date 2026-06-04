@@ -24,6 +24,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/lemahq/lema-mcp/internal/adr"
+	"github.com/lemahq/lema-mcp/internal/docs"
 	"github.com/lemahq/lema-mcp/internal/openspec"
 	"github.com/lemahq/lema-mcp/internal/source"
 )
@@ -31,11 +32,16 @@ import (
 var (
 	src         source.DecisionSource // the four read tools go through this seam
 	capture     *source.CaptureStore  // local decision-capture store (ADR-0042): record_decision writes, search/check_decided enforce
+	docsStore   *docs.Store           // project-docs chunk index (ADR-0055); nil in hosted/remote runs
 	repoName    = "local"             // identifier shown in search results
 	usageLog    *os.File
 	questionLog *os.File
 )
 
+// secretPatterns / redactSecrets scrub credential-shaped substrings from a query
+// before it is written to the usage log. The query is the agent's prose, which can
+// inadvertently include a pasted token; defense-in-depth so a local log never
+// captures one. Set LEMA_DISABLE_QUERY_LOGGING=1 to drop the query text entirely.
 var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bbearer\s+[a-zA-Z0-9\-\._~+/]+`),
 	regexp.MustCompile(`(?i)(api[_\-]?key|secret|token|password)[=:'"]+\s*[a-zA-Z0-9\-\._~+/]+`),
@@ -109,6 +115,7 @@ type searchOutput struct {
 	TokensUsed int           `json:"tokens_used"`
 	Usage      localUsage    `json:"usage"`
 	Truncated  bool          `json:"truncated"`
+	Docs       []docs.Hit    `json:"docs,omitempty"` // chunk hits when scope includes docs (ADR-0055); omitted otherwise
 }
 
 type graphInput struct {
@@ -147,23 +154,9 @@ func searchDecisions(ctx context.Context, _ *mcp.CallToolRequest, in searchInput
 	if k <= 0 {
 		k = 8
 	}
-	atoms, err := src.Search(ctx, in.Query, k)
+	atoms, err := mergedSearch(ctx, in.Query, k)
 	if err != nil {
 		return nil, searchOutput{}, err
-	}
-	// Merge this repo's captured decisions (ADR-0042): CLOSED matches lead — an
-	// agent about to re-propose a killed or superseded option must see it first —
-	// then the ADR atoms, then any other captured decisions.
-	if capture != nil {
-		var closed, open []source.Atom
-		for _, a := range capture.Search(in.Query, k) {
-			if a.Closed {
-				closed = append(closed, a)
-			} else {
-				open = append(open, a)
-			}
-		}
-		atoms = append(append(closed, atoms...), open...)
 	}
 	budget := in.MaxTokens
 	if budget <= 0 {
@@ -224,9 +217,12 @@ func logQuestion(query string, atoms []source.Atom) {
 }
 
 func main() {
-	// Subcommands run and exit before the server flags are parsed:
-	//   init — wire a repo for capture (.mcp.json + AGENTS.md + commit hook)
-	//   demo — a 30-second never-reopen walkthrough (the instant hook)
+	// Subcommands run before the server flags are parsed:
+	//   init  — wire a repo for capture (.mcp.json + AGENTS.md + commit hook)
+	//   demo  — a 30-second never-reopen walkthrough (the instant hook)
+	//   serve — serve the engine over localhost HTTP for the lema Workspaces GUI
+	//           (ADR-0043/0044); shares the setup below, then branches to HTTP.
+	serveMode := false
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "init":
@@ -239,6 +235,21 @@ func main() {
 				log.Fatalf("lema-mcp demo: %v", err)
 			}
 			return
+		case "guard":
+			// PreToolUse hook body (ADR-0052): read the tool call on stdin, emit a
+			// never-reopen permission decision on stdout. Fail-open; always exit 0.
+			runGuard(os.Args[2:])
+			return
+		case "nudge":
+			// PostToolUse capture nudge (ADR-0054): on a dependency-manifest edit,
+			// remind the agent to record_decision. Fail-open; always exit 0.
+			runNudge(os.Args[2:])
+			return
+		case "serve":
+			// Drop "serve" so the flags below parse; the engine setup is shared,
+			// then the --http branch starts the HTTP server instead of stdio.
+			serveMode = true
+			os.Args = append(os.Args[:1], os.Args[2:]...)
 		}
 	}
 
@@ -248,6 +259,8 @@ func main() {
 	patternFlag := flag.String("pattern", `^\d{3,4}[-_].+\.md$`, "ADR filename regex (default matches NNNN-*.md / NNN_*.md); widen for other conventions")
 	openspecDir := flag.String("openspec-dir", "", "OpenSpec root (dir with specs/ and changes/) to ingest alongside ADRs; empty auto-detects ./openspec in local mode")
 	captureFile := flag.String("capture-file", ".lema/decisions.jsonl", "local decision-capture store: record_decision appends here; CLOSED decisions enforce never-reopen across searches")
+	httpFlag := flag.Bool("http", false, "serve the engine over localhost HTTP for the lema Workspaces GUI instead of stdio MCP (same as the `serve` subcommand)")
+	httpPort := flag.Int("port", 4321, "HTTP port for --http / serve mode")
 	flag.Parse()
 
 	pat, err := regexp.Compile(*patternFlag)
@@ -282,9 +295,10 @@ func main() {
 
 	if src == nil {
 		var (
-			adrs      []adr.ADR
-			srcDesc   string
-			localMode = true
+			adrs       []adr.ADR
+			srcDesc    string
+			localMode  = true
+			adrDirUsed string // discovered/explicit local ADR dir — the docs index's group seam (ADR-0055)
 		)
 		if owner, repo, ok := parseGitHubRepo(*repoFlag); ok {
 			// Remote: fetch the repo's ADRs from GitHub (no local checkout needed).
@@ -311,6 +325,7 @@ func main() {
 					log.Fatalf("lema-mcp: %v", perr)
 				}
 				srcDesc = dir
+				adrDirUsed = dir
 			}
 			if *repoFlag != "" {
 				repoName = *repoFlag
@@ -343,10 +358,34 @@ func main() {
 
 		records := append(adrs, osRecs...)
 		if len(records) == 0 {
-			log.Fatalf("lema-mcp: no decisions found (looked for ADRs in %s and an openspec/ tree); pass --adr-dir or --openspec-dir", strings.Join(adrDirCandidates, ", "))
+			// In serve mode (the lema Workspaces GUI, ADR-0043/0044) an empty corpus
+			// must NOT be fatal: the desktop app launches the engine before the user
+			// has pointed it at a repo (e.g. CWD='/' from Finder), and a live HTTP
+			// server returning empty lists is what lets the GUI come up and show a
+			// "open a repo" state instead of a dead port. Only the stdio/CLI paths,
+			// which are useless with no decisions, still hard-fail here.
+			if serveMode || *httpFlag {
+				fmt.Fprintf(os.Stderr, "lema-mcp: no decisions found yet (looked in %s and ./openspec); serving empty — point the app at a repo with docs/adr or .lema/decisions.jsonl\n", strings.Join(adrDirCandidates, ", "))
+			} else {
+				log.Fatalf("lema-mcp: no decisions found (looked for ADRs in %s and an openspec/ tree); pass --adr-dir or --openspec-dir", strings.Join(adrDirCandidates, ", "))
+			}
 		}
 		src = source.NewLocal(records)
 		fmt.Fprintf(os.Stderr, "lema-mcp: %d decisions (%d ADR, %d OpenSpec) from %s (repo %q); local lexical search, no account\n", len(records), len(adrs), len(osRecs), srcDesc, repoName)
+
+		// Project docs index (ADR-0055): chunk the repo's markdown so search_docs /
+		// get_doc and the workbench Docs tab retrieve sections, not whole files.
+		// Local mode only — remote/hosted runs have no local tree to scan. Failure
+		// is non-fatal: docs are additive context, never a reason to refuse to serve.
+		if localMode {
+			ds := docs.NewStore(".", adrDirUsed)
+			if n, derr := ds.Scan(); derr != nil {
+				fmt.Fprintf(os.Stderr, "lema-mcp: docs scan: %v\n", derr)
+			} else {
+				docsStore = ds
+				fmt.Fprintf(os.Stderr, "lema-mcp: %d project doc(s) chunk-indexed\n", n)
+			}
+		}
 	}
 
 	// Decision capture (ADR-0042) is local and mode-independent: record_decision
@@ -360,8 +399,17 @@ func main() {
 		fmt.Fprintf(os.Stderr, "lema-mcp: %d captured decision(s) in %s\n", n, *captureFile)
 	}
 
+	// HTTP mode (ADR-0043/0044): serve the same engine over localhost for the lema
+	// Workspaces GUI instead of the stdio MCP transport.
+	if serveMode || *httpFlag {
+		if err := serveHTTP(*httpPort); err != nil {
+			log.Fatalf("lema-mcp serve: %v", err)
+		}
+		return
+	}
+
 	ctx := context.Background()
-	server := mcp.NewServer(&mcp.Implementation{Name: "lema-mcp", Version: "0.4.0"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "lema-mcp", Version: "0.5.0"}, nil)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_decisions",
 		Description: "Search this repo's decisions and return the most relevant atomic claims (chosen/rejected/constraint/consequence) with their source ADR. Call this BEFORE writing or changing code to learn the constraints and what was already ruled out. Returns tight, sourced claims, not whole documents.",
@@ -387,6 +435,20 @@ func main() {
 		Name:        "check_decided",
 		Description: "Before proposing a direction (a library, an approach, a design), check whether it is already decided and CLOSED. Returns prior decisions that rule the option out; if anything comes back, do not re-propose it — surface the existing decision instead.",
 	}, checkDecided)
+
+	// Project-docs retrieval (ADR-0055) — registered only when a local tree was
+	// scanned. The descriptions carry the steering that realizes the token
+	// savings: prefer sectioned retrieval over raw full-file reads.
+	if docsStore != nil {
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        "search_docs",
+			Description: "Search this repo's project docs (specs, READMEs, agent instructions, ADR/openspec full text) and return the most relevant sections with their heading trail. PREFER this over reading whole markdown files with Read/cat — it returns only the sections that matter, under a token budget.",
+		}, searchDocs)
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        "get_doc",
+			Description: "Get one project doc — whole, or a single section by heading — under a token budget. Use after search_docs surfaces a relevant path, instead of reading the raw file.",
+		}, getDoc)
+	}
 
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		log.Fatalf("lema-mcp: %v", err)

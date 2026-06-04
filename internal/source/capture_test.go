@@ -121,6 +121,117 @@ func TestCheckDecidedOnlyReturnsClosed(t *testing.T) {
 	}
 }
 
+// TestCaptureReflectsExternalWrites reproduces the cross-process staleness bug:
+// the long-lived `serve --http` store (the GUI's backend) must see a decision a
+// SEPARATE process (a stdio lema-mcp the agent calls) wrote to the same
+// decisions.jsonl — without a restart — or never-reopen silently regresses.
+func TestCaptureReflectsExternalWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".lema", "decisions.jsonl")
+
+	// The long-lived reader loads first, while the file does not yet exist.
+	server, err := NewCaptureStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A separate process records a killed option against the same file.
+	writer, err := NewCaptureStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Record(DecisionRecord{
+		Title:    "Primary datastore",
+		Chosen:   "Postgres",
+		Rejected: []RejectedAlt{{Option: "MongoDB", Why: "we need multi-row transactions"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The long-lived reader must now enforce never-reopen without being recreated.
+	if got := server.CheckDecided("MongoDB", 10); len(got) == 0 {
+		t.Fatal("long-lived store did not see another process's CLOSED decision (stale in-memory cache)")
+	}
+}
+
+// TestCaptureReflectsExternalSupersede covers the append-after-load path: the
+// reader has already loaded a live choice, then another process supersedes it.
+// The reader must return the old choice CLOSED on its next read.
+func TestCaptureReflectsExternalSupersede(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "d.jsonl")
+
+	// Seed a live decision and load the long-lived reader from it.
+	seed, _ := NewCaptureStore(path)
+	old, _ := seed.Record(DecisionRecord{Title: "API transport", Chosen: "REST"})
+
+	server, err := NewCaptureStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live := server.CheckDecided("REST transport", 10); len(live) != 0 {
+		t.Fatalf("REST is the live choice; nothing should be CLOSED yet, got %+v", live)
+	}
+
+	// A separate process supersedes it.
+	writer, _ := NewCaptureStore(path)
+	if _, err := writer.Record(DecisionRecord{
+		Title: "API transport v2", Chosen: "gRPC", Supersedes: []string{old.ID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Without a restart, the long-lived reader must now flag REST CLOSED.
+	found := false
+	for _, a := range server.CheckDecided("REST transport", 10) {
+		if a.Type == "chosen" && a.Closed && strings.Contains(a.ClosedNote, "superseded") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("long-lived store did not see another process's superseding write (stale cache)")
+	}
+}
+
+// TestClosedAtomsReturnsAllClosed covers the no-query enforcement feed: every
+// currently-CLOSED atom (rejected alternatives + superseded choices) and nothing
+// live. This is what the cockpit's enforcement rail lists.
+func TestClosedAtomsReturnsAllClosed(t *testing.T) {
+	s, _ := NewCaptureStore(filepath.Join(t.TempDir(), "d.jsonl"))
+	// A rejected alternative (closed) alongside a live chosen (open).
+	s.Record(DecisionRecord{
+		Title: "Primary datastore", Chosen: "Postgres",
+		Rejected: []RejectedAlt{{Option: "MongoDB", Why: "need multi-row transactions"}},
+	})
+	// A superseded choice (closed): record REST, then supersede it with gRPC.
+	old, _ := s.Record(DecisionRecord{Title: "API transport", Chosen: "REST"})
+	s.Record(DecisionRecord{Title: "API transport v2", Chosen: "gRPC", Supersedes: []string{old.ID}})
+
+	var sawMongo, sawREST bool
+	for _, a := range s.ClosedAtoms() {
+		if !a.Closed {
+			t.Errorf("ClosedAtoms returned a non-closed atom: %+v", a)
+		}
+		if a.Type == "rejected_alternative" && strings.Contains(a.Text, "MongoDB") {
+			sawMongo = true
+		}
+		if a.Type == "chosen" && strings.Contains(a.Text, "REST") {
+			sawREST = true
+		}
+	}
+	if !sawMongo {
+		t.Error("expected the rejected MongoDB alternative in ClosedAtoms")
+	}
+	if !sawREST {
+		t.Error("expected the superseded REST choice in ClosedAtoms")
+	}
+}
+
+func TestClosedAtomsNilSafe(t *testing.T) {
+	var s *CaptureStore
+	if got := s.ClosedAtoms(); got != nil {
+		t.Errorf("nil store ClosedAtoms = %v, want nil", got)
+	}
+}
+
 func TestCaptureDedupByTitleAndChosen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "d.jsonl")
 	s, _ := NewCaptureStore(path)

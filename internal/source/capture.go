@@ -50,20 +50,45 @@ type CaptureStore struct {
 	path    string
 	records []DecisionRecord
 	byID    map[string]int
+
+	// loadedMod/loadedSize fingerprint the file as of the last load so reads can
+	// cheaply detect when another process has appended and reload. Without this a
+	// long-lived `serve --http` store (the GUI backend) would never see a stdio
+	// lema-mcp's newly-CLOSED decision, silently regressing never-reopen across
+	// processes.
+	loadedMod  time.Time
+	loadedSize int64
 }
 
 // NewCaptureStore loads an existing decisions.jsonl into memory. A missing file
 // is not an error — it yields an empty store that the first record creates.
 func NewCaptureStore(path string) (*CaptureStore, error) {
 	s := &CaptureStore{path: path, byID: map[string]int{}}
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return s, nil
-		}
+	if err := s.loadLocked(); err != nil {
 		return nil, err
 	}
+	return s, nil
+}
+
+// loadLocked reads the append log from disk into the in-memory reduction and
+// records the file's fingerprint. A missing file is not an error — it yields an
+// empty store. Caller holds s.mu (the constructor holds the store exclusively).
+func (s *CaptureStore) loadLocked() error {
+	f, err := os.Open(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.records, s.byID = nil, map[string]int{}
+			s.loadedMod, s.loadedSize = time.Time{}, 0
+			return nil
+		}
+		return err
+	}
 	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
 
 	var lines []DecisionRecord
 	sc := bufio.NewScanner(f)
@@ -80,10 +105,26 @@ func NewCaptureStore(path string) (*CaptureStore, error) {
 		lines = append(lines, r)
 	}
 	if err := sc.Err(); err != nil {
-		return nil, err
+		return err
 	}
 	s.records, s.byID = reduce(lines)
-	return s, nil
+	s.loadedMod, s.loadedSize = fi.ModTime(), fi.Size()
+	return nil
+}
+
+// refreshIfStale reloads from disk when the backing file changed since the last
+// load (different size or mtime), so a record another process appended becomes
+// visible without a restart. A stat error or transient read failure leaves the
+// last good state in place rather than wiping it. Caller holds s.mu.
+func (s *CaptureStore) refreshIfStale() {
+	fi, err := os.Stat(s.path)
+	if err != nil {
+		return
+	}
+	if fi.Size() == s.loadedSize && fi.ModTime().Equal(s.loadedMod) {
+		return
+	}
+	_ = s.loadLocked()
 }
 
 // reduce collapses the append log into current state: last record wins per id,
@@ -139,16 +180,11 @@ func (s *CaptureStore) Record(in DecisionRecord) (DecisionRecord, error) {
 	if err := s.appendLine(in); err != nil {
 		return DecisionRecord{}, err
 	}
-	if i, ok := s.byID[in.ID]; ok {
-		s.records[i] = in // re-recorded same decision: update in place
-	} else {
-		s.byID[in.ID] = len(s.records)
-		s.records = append(s.records, in)
-	}
-	for _, sid := range in.Supersedes {
-		if i, ok := s.byID[sid]; ok {
-			s.records[i].Status = "superseded"
-		}
+	// Reload from disk so memory reflects this append AND any records another
+	// process appended since our last load; reduce() re-derives superseded status
+	// from the full log. The on-disk append is the source of truth.
+	if err := s.loadLocked(); err != nil {
+		return DecisionRecord{}, err
 	}
 	return in, nil
 }
@@ -188,6 +224,7 @@ func (s *CaptureStore) atoms() []Atom {
 		if r.Status == "superseded" {
 			chosen.Closed = true
 			chosen.ClosedNote = fmt.Sprintf("superseded — do not reopen %q: the decision %q was overridden by a later one", r.Chosen, r.Title)
+			chosen.MatchKey = r.Title + " " + r.Chosen
 		}
 		out = append(out, chosen)
 
@@ -203,7 +240,7 @@ func (s *CaptureStore) atoms() []Atom {
 			}
 			out = append(out, Atom{
 				ID: fmt.Sprintf("%s-rej-%d", r.ID, i), Type: "rejected_alternative",
-				Text: text, Ref: r.ID, Closed: true, ClosedNote: note,
+				Text: text, Ref: r.ID, Closed: true, ClosedNote: note, MatchKey: alt.Option,
 			})
 		}
 		if r.Constraint != "" {
@@ -231,6 +268,7 @@ func (s *CaptureStore) Search(query string, k int) []Atom {
 		k = 8
 	}
 	s.mu.Lock()
+	s.refreshIfStale()
 	atoms := s.atoms()
 	s.mu.Unlock()
 
@@ -288,6 +326,29 @@ func (s *CaptureStore) CheckDecided(topic string, k int) []Atom {
 	return closed
 }
 
+// ClosedAtoms returns every currently-CLOSED atom — rejected alternatives and
+// superseded choices — across all captured decisions, most-recent decision first.
+// It is the never-reopen surface with no query: the GUI's enforcement rail lists
+// these so a killed or overridden option is visible the moment it is recorded
+// (including by another process, via the freshness reload in refreshIfStale).
+func (s *CaptureStore) ClosedAtoms() []Atom {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	s.refreshIfStale()
+	atoms := s.atoms()
+	s.mu.Unlock()
+
+	out := []Atom{}
+	for i := len(atoms) - 1; i >= 0; i-- {
+		if atoms[i].Closed {
+			out = append(out, atoms[i])
+		}
+	}
+	return out
+}
+
 // Len returns the number of captured decisions (for startup logging).
 func (s *CaptureStore) Len() int {
 	if s == nil {
@@ -295,5 +356,6 @@ func (s *CaptureStore) Len() int {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.refreshIfStale()
 	return len(s.records)
 }

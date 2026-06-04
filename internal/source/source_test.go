@@ -105,3 +105,21 @@ func TestBestSnippetMultiByteNoPanic(t *testing.T) {
 		t.Errorf("expected snippet to contain the matched term, got %q", got)
 	}
 }
+
+// A client asking for more than the cap must get the cap, not the default —
+// the workbench sidebar lists every decision via limit=300, and resetting an
+// over-cap ask to 50 silently hides the newest ADRs from the Docs tab.
+func TestListOverCapLimitClampsToCapNotDefault(t *testing.T) {
+	many := make([]adr.ADR, 60)
+	for i := range many {
+		many[i] = adr.ADR{Number: i + 1, Title: "T", Status: "accepted", Body: "## Decision\nx."}
+	}
+	l := NewLocal(many)
+	out, err := l.List(context.Background(), "", 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 60 {
+		t.Fatalf("limit=300 over 60 decisions: got %d, want all 60 (over-cap ask must clamp to the cap, not reset to the default 50)", len(out))
+	}
+}

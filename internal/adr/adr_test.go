@@ -31,7 +31,7 @@ tags: [data, foundational]
 
 We chose Postgres because of ACID guarantees.
 `)
-	adrs, err := ParseDirMatching(dir, fileRe)
+	adrs, err := ParseDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ related_to: []
 ---
 body
 `)
-	adrs, err := ParseDirMatching(dir, fileRe)
+	adrs, err := ParseDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ body
 func TestParseFile_NullSupersededByIsNil(t *testing.T) {
 	dir := t.TempDir()
 	writeADR(t, dir, "0001-x.md", "---\ntitle: X\nstatus: proposed\nsuperseded_by: null\n---\nbody")
-	adrs, _ := ParseDirMatching(dir, fileRe)
+	adrs, _ := ParseDir(dir)
 	if adrs[0].SupersededBy != nil {
 		t.Errorf("SupersededBy = %v, want nil", adrs[0].SupersededBy)
 	}
@@ -103,16 +103,16 @@ func TestParseFile_NullSupersededByIsNil(t *testing.T) {
 
 // TestParseFile_SupersededByAcceptsSequence pins the leniency that lets a
 // real dogfood ADR (0001 uses `superseded_by: [2]`) parse instead of crashing
-// ParseDirMatching for the whole directory. The list form resolves to its first
+// ParseDir for the whole directory. The list form resolves to its first
 // element, and the octal-safety of the scalar path must hold through the
 // sequence path too (a zero-padded `[0009]` is 9, not 11).
 func TestParseFile_SupersededByAcceptsSequence(t *testing.T) {
 	dir := t.TempDir()
 	writeADR(t, dir, "0001-x.md", "---\ntitle: X\nstatus: superseded\nsuperseded_by: [2]\n---\nbody")
 	writeADR(t, dir, "0002-y.md", "---\ntitle: Y\nstatus: superseded\nsuperseded_by: [0009]\n---\nbody")
-	adrs, err := ParseDirMatching(dir, fileRe)
+	adrs, err := ParseDir(dir)
 	if err != nil {
-		t.Fatalf("ParseDirMatching must not fail on a list-form superseded_by: %v", err)
+		t.Fatalf("ParseDir must not fail on a list-form superseded_by: %v", err)
 	}
 	if adrs[0].SupersededBy == nil || *adrs[0].SupersededBy != 2 {
 		t.Errorf("0001 SupersededBy = %v, want 2", adrs[0].SupersededBy)
@@ -125,7 +125,7 @@ func TestParseFile_SupersededByAcceptsSequence(t *testing.T) {
 func TestParseFile_NoFrontmatterFallsBackToFirstH1(t *testing.T) {
 	dir := t.TempDir()
 	writeADR(t, dir, "0001-no-fm.md", "# Just a heading\n\nsome text\n")
-	adrs, _ := ParseDirMatching(dir, fileRe)
+	adrs, _ := ParseDir(dir)
 	if adrs[0].Title != "Just a heading" {
 		t.Errorf("Title = %q, want 'Just a heading'", adrs[0].Title)
 	}
@@ -147,7 +147,7 @@ Intro paragraph.
 
 After a horizontal rule.
 `)
-	adrs, _ := ParseDirMatching(dir, fileRe)
+	adrs, _ := ParseDir(dir)
 	a := adrs[0]
 	if a.Title != "HR test" {
 		t.Errorf("Title = %q", a.Title)
@@ -157,13 +157,13 @@ After a horizontal rule.
 	}
 }
 
-func TestParseDirMatching_SkipsNonADRFilesAndSortsByNumber(t *testing.T) {
+func TestParseDir_SkipsNonADRFilesAndSortsByNumber(t *testing.T) {
 	dir := t.TempDir()
 	writeADR(t, dir, "0005-five.md", "---\ntitle: Five\nstatus: proposed\n---\nx")
 	writeADR(t, dir, "0002-two.md", "---\ntitle: Two\nstatus: proposed\n---\nx")
 	writeADR(t, dir, "README.md", "# Readme\nnot an adr")
 	writeADR(t, dir, "template.md", "---\ntitle: Template\n---\nx")
-	adrs, err := ParseDirMatching(dir, fileRe)
+	adrs, err := ParseDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestParseFile_BOMStripped(t *testing.T) {
 	dir := t.TempDir()
 	bom := string([]byte{0xEF, 0xBB, 0xBF})
 	writeADR(t, dir, "0003-bom.md", bom+"---\ntitle: BOM\nstatus: accepted\n---\nbody")
-	adrs, _ := ParseDirMatching(dir, fileRe)
+	adrs, _ := ParseDir(dir)
 	if adrs[0].Title != "BOM" {
 		t.Errorf("BOM not stripped — Title = %q, want BOM", adrs[0].Title)
 	}
@@ -187,20 +187,20 @@ func TestParseFile_BOMStripped(t *testing.T) {
 
 // ParseDirMatching with a looser pattern indexes non-canonical ADR names (the
 // local wedge pointed at MADR/adr-tools-style repos): the number falls back to
-// the first digit-run and the slug to the extension-less name. Strict ParseDirMatching
+// the first digit-run and the slug to the extension-less name. Strict ParseDir
 // must still skip them, so the hosted/import path is unchanged.
 func TestParseDirMatching_LooserPatternAndNumberFallback(t *testing.T) {
 	dir := t.TempDir()
 	writeADR(t, dir, "001-use-madr.md", "# Use MADR\nWe will use MADR.")                                  // 3-digit, non-canonical
 	writeADR(t, dir, "0007-event-sourcing.md", "---\ntitle: Event sourcing\nstatus: accepted\n---\nbody") // canonical
 
-	// Strict ParseDirMatching skips the 3-digit file — the hosted matcher is unchanged.
-	strict, err := ParseDirMatching(dir, fileRe)
+	// Strict ParseDir skips the 3-digit file — the hosted matcher is unchanged.
+	strict, err := ParseDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(strict) != 1 || strict[0].Number != 7 {
-		t.Fatalf("strict ParseDirMatching got %d adrs (want 1, ADR-7) — strict matcher changed?", len(strict))
+		t.Fatalf("strict ParseDir got %d adrs (want 1, ADR-7) — strict matcher changed?", len(strict))
 	}
 
 	// Looser pattern picks up both; the 3-digit number is recovered via fallback.

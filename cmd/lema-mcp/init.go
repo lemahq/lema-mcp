@@ -7,7 +7,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
+
+// configWriteMu serializes the read-modify-write cycle on the repo config files
+// (.mcp.json, .claude/settings.json) so two rapid Plugins-panel toggles
+// (ADR-0043/0044) cannot lose-update each other: each toggle reads, mutates, and
+// writes, and without serialization the second writer would clobber the first
+// toggle's change. The surface is a handful of files, so one process-wide lock is
+// simpler and sufficient compared with a per-path lock. Callers that read+modify
+// (toggleMCP, toggleLemaHook, ensure*/remove* via writeJSON) run while holding it.
+var configWriteMu sync.Mutex
 
 // runInit wires a repo for lema decision capture in one command (ADR-0042): it
 // registers the MCP server (.mcp.json), writes the capture protocol that drives
@@ -20,24 +30,9 @@ func runInit(args []string) error {
 		dir = args[0]
 	}
 
-	var wrote []string
-	steps := []struct {
-		label string
-		fn    func(string) (bool, error)
-		path  string
-	}{
-		{".mcp.json (registered lema-mcp server)", ensureMCPJSON, filepath.Join(dir, ".mcp.json")},
-		{"AGENTS.md (decision-capture protocol)", ensureAgentsBlock, filepath.Join(dir, "AGENTS.md")},
-		{".claude/settings.json (commit reminder hook)", ensureClaudeHook, filepath.Join(dir, ".claude", "settings.json")},
-	}
-	for _, st := range steps {
-		changed, err := st.fn(st.path)
-		if err != nil {
-			return err
-		}
-		if changed {
-			wrote = append(wrote, st.label)
-		}
+	wrote, err := initRepo(dir)
+	if err != nil {
+		return err
 	}
 
 	if len(wrote) == 0 {
@@ -55,6 +50,40 @@ func runInit(args []string) error {
 	fmt.Println("decision you already killed, it gets \"CLOSED — do not propose X\" and surfaces")
 	fmt.Println("the prior decision instead. See it in 30 seconds:  npx lema-mcp demo")
 	return nil
+}
+
+// initRepo runs the capture-setup steps for dir and returns the labels of what it
+// wrote (empty if already set up). Shared by the `init` CLI command (runInit) and
+// the serve --http POST /api/init endpoint (the GUI's "enable capture" button), so
+// the GUI and the CLI register lema identically.
+func initRepo(dir string) ([]string, error) {
+	// Serialize against the Plugins-panel toggles, which mutate the same config
+	// files, so a concurrent init and toggle cannot lose-update each other
+	// (ADR-0043/0044). Held across all steps' read-modify-write.
+	configWriteMu.Lock()
+	defer configWriteMu.Unlock()
+	var wrote []string
+	steps := []struct {
+		label string
+		fn    func(string) (bool, error)
+		path  string
+	}{
+		{".mcp.json (registered lema-mcp server)", ensureMCPJSON, filepath.Join(dir, ".mcp.json")},
+		{"AGENTS.md (decision-capture protocol)", ensureAgentsBlock, filepath.Join(dir, "AGENTS.md")},
+		{".claude/settings.json (commit reminder hook)", ensureClaudeHook, filepath.Join(dir, ".claude", "settings.json")},
+		{".claude/settings.json (never-reopen guard hook)", ensurePreToolUseHook, filepath.Join(dir, ".claude", "settings.json")},
+		{".claude/settings.json (capture-nudge hook)", ensureCaptureNudgeHook, filepath.Join(dir, ".claude", "settings.json")},
+	}
+	for _, st := range steps {
+		changed, err := st.fn(st.path)
+		if err != nil {
+			return nil, err
+		}
+		if changed {
+			wrote = append(wrote, st.label)
+		}
+	}
+	return wrote, nil
 }
 
 // ensureMCPJSON registers the lema server in .mcp.json, preserving any servers
@@ -109,6 +138,285 @@ func ensureClaudeHook(path string) (bool, error) {
 	}
 	hooks["PostToolUse"] = append(postToolUse, reminder)
 	root["hooks"] = hooks
+	return true, writeJSON(path, root)
+}
+
+const guardMarker = "lema-mcp@latest guard"
+
+// ensurePreToolUseHook installs the never-reopen guard: a PreToolUse hook that runs
+// `lema-mcp guard` before every Edit/Write, surfacing a CLOSED decision the change
+// would re-litigate (ADR-0052). Mirrors ensureClaudeHook — idempotent via
+// guardMarker, preserves existing hooks.
+func ensurePreToolUseHook(path string) (bool, error) {
+	root, err := readJSONObject(path)
+	if err != nil {
+		return false, err
+	}
+	if b, err := json.Marshal(root); err == nil && strings.Contains(string(b), guardMarker) {
+		return false, nil
+	}
+	hooks, _ := root["hooks"].(map[string]any)
+	if hooks == nil {
+		hooks = map[string]any{}
+	}
+	preToolUse, _ := hooks["PreToolUse"].([]any)
+	guard := map[string]any{
+		"matcher": "Edit|Write",
+		"hooks": []any{map[string]any{
+			"type":    "command",
+			"command": "npx -y lema-mcp@latest guard",
+		}},
+	}
+	hooks["PreToolUse"] = append(preToolUse, guard)
+	root["hooks"] = hooks
+	return true, writeJSON(path, root)
+}
+
+const captureNudgeMarker = "lema-mcp@latest nudge"
+
+// ensureCaptureNudgeHook installs the capture nudge: a PostToolUse hook that runs
+// `lema-mcp nudge` after Edit/Write/MultiEdit and reminds the agent to
+// record_decision when it edits a dependency manifest (ADR-0054). Additive to the
+// commit reminder; idempotent via captureNudgeMarker; preserves existing hooks.
+func ensureCaptureNudgeHook(path string) (bool, error) {
+	root, err := readJSONObject(path)
+	if err != nil {
+		return false, err
+	}
+	if b, err := json.Marshal(root); err == nil && strings.Contains(string(b), captureNudgeMarker) {
+		return false, nil
+	}
+	hooks, _ := root["hooks"].(map[string]any)
+	if hooks == nil {
+		hooks = map[string]any{}
+	}
+	postToolUse, _ := hooks["PostToolUse"].([]any)
+	nudge := map[string]any{
+		"matcher": "Edit|Write|MultiEdit",
+		"hooks": []any{map[string]any{
+			"type":    "command",
+			"command": "npx -y lema-mcp@latest nudge",
+		}},
+	}
+	hooks["PostToolUse"] = append(postToolUse, nudge)
+	root["hooks"] = hooks
+	return true, writeJSON(path, root)
+}
+
+// removeCaptureNudgeHook deletes ONLY the capture-nudge PostToolUse entry (whose
+// command contains captureNudgeMarker), leaving the commit reminder and every other
+// hook untouched — the inverse of ensureCaptureNudgeHook for the Plugins panel "off"
+// (ADR-0054). Empty groups and the PostToolUse/hooks keys are pruned when they go
+// empty. Reports whether it changed the file.
+func removeCaptureNudgeHook(path string) (bool, error) {
+	root, err := readJSONObject(path)
+	if err != nil {
+		return false, err
+	}
+	hooks, _ := root["hooks"].(map[string]any)
+	groups, _ := hooks["PostToolUse"].([]any)
+	if len(groups) == 0 {
+		return false, nil
+	}
+
+	keptGroups := make([]any, 0, len(groups))
+	changed := false
+	for _, g := range groups {
+		group, _ := g.(map[string]any)
+		entries, _ := group["hooks"].([]any)
+		keptEntries := make([]any, 0, len(entries))
+		for _, h := range entries {
+			entry, _ := h.(map[string]any)
+			command, _ := entry["command"].(string)
+			if strings.Contains(command, captureNudgeMarker) {
+				changed = true
+				continue // drop the lema-managed capture-nudge hook
+			}
+			keptEntries = append(keptEntries, h)
+		}
+		if len(keptEntries) == 0 {
+			continue
+		}
+		group["hooks"] = keptEntries
+		keptGroups = append(keptGroups, group)
+	}
+	if !changed {
+		return false, nil
+	}
+
+	if len(keptGroups) == 0 {
+		delete(hooks, "PostToolUse")
+	} else {
+		hooks["PostToolUse"] = keptGroups
+	}
+	if len(hooks) == 0 {
+		delete(root, "hooks")
+	} else {
+		root["hooks"] = hooks
+	}
+	return true, writeJSON(path, root)
+}
+
+// disableMcpServer adds name to the disabledMcpjsonServers array in the repo
+// settings.json without removing the server from .mcp.json — the non-destructive
+// "off" used by the Plugins panel (ADR-0043/0044). Idempotent: a name already
+// listed leaves the file unchanged. Creates the key (and file) if absent.
+func disableMcpServer(path, name string) error {
+	root, err := readJSONObject(path)
+	if err != nil {
+		return err
+	}
+	current, _ := root["disabledMcpjsonServers"].([]any)
+	for _, v := range current {
+		if s, ok := v.(string); ok && s == name {
+			return nil // already disabled
+		}
+	}
+	root["disabledMcpjsonServers"] = append(current, name)
+	return writeJSON(path, root)
+}
+
+// enableMcpServer removes name from disabledMcpjsonServers in the repo
+// settings.json — the inverse of disableMcpServer. Idempotent and
+// non-destructive: it never touches .mcp.json, and drops the key entirely once
+// the last disabled name is removed so the file stays clean. A missing key or
+// file is a no-op.
+func enableMcpServer(path, name string) error {
+	root, err := readJSONObject(path)
+	if err != nil {
+		return err
+	}
+	current, ok := root["disabledMcpjsonServers"].([]any)
+	if !ok || len(current) == 0 {
+		return nil
+	}
+	kept := make([]any, 0, len(current))
+	changed := false
+	for _, v := range current {
+		if s, ok := v.(string); ok && s == name {
+			changed = true
+			continue
+		}
+		kept = append(kept, v)
+	}
+	if !changed {
+		return nil
+	}
+	if len(kept) == 0 {
+		delete(root, "disabledMcpjsonServers")
+	} else {
+		root["disabledMcpjsonServers"] = kept
+	}
+	return writeJSON(path, root)
+}
+
+// removeLemaHook deletes ONLY the lema commit-reminder hook (the PostToolUse
+// entry whose command contains reminderMarker) from the repo settings.json,
+// leaving every other hook untouched — the non-destructive inverse of
+// ensureClaudeHook used by the Plugins panel (ADR-0043/0044). Empty hook groups
+// and the PostToolUse/hooks keys are pruned when they go empty so the file does
+// not accumulate dead structure. Reports whether it changed the file.
+func removeLemaHook(path string) (bool, error) {
+	root, err := readJSONObject(path)
+	if err != nil {
+		return false, err
+	}
+	hooks, _ := root["hooks"].(map[string]any)
+	groups, _ := hooks["PostToolUse"].([]any)
+	if len(groups) == 0 {
+		return false, nil
+	}
+
+	keptGroups := make([]any, 0, len(groups))
+	changed := false
+	for _, g := range groups {
+		group, _ := g.(map[string]any)
+		entries, _ := group["hooks"].([]any)
+		keptEntries := make([]any, 0, len(entries))
+		for _, h := range entries {
+			entry, _ := h.(map[string]any)
+			command, _ := entry["command"].(string)
+			if strings.Contains(command, reminderMarker) {
+				changed = true
+				continue // drop the lema-managed hook
+			}
+			keptEntries = append(keptEntries, h)
+		}
+		if len(keptEntries) == 0 {
+			// Every entry in this group was the lema hook; drop the now-empty group.
+			continue
+		}
+		group["hooks"] = keptEntries
+		keptGroups = append(keptGroups, group)
+	}
+	if !changed {
+		return false, nil
+	}
+
+	if len(keptGroups) == 0 {
+		delete(hooks, "PostToolUse")
+	} else {
+		hooks["PostToolUse"] = keptGroups
+	}
+	if len(hooks) == 0 {
+		delete(root, "hooks")
+	} else {
+		root["hooks"] = hooks
+	}
+	return true, writeJSON(path, root)
+}
+
+// removeGuardHook deletes ONLY the lema never-reopen guard (the PreToolUse entry
+// whose command contains guardMarker), leaving every other hook untouched — the
+// inverse of ensurePreToolUseHook for the Plugins panel "off" (ADR-0043/0044,
+// ADR-0052). Empty groups and the PreToolUse/hooks keys are pruned when they go
+// empty. Reports whether it changed the file.
+func removeGuardHook(path string) (bool, error) {
+	root, err := readJSONObject(path)
+	if err != nil {
+		return false, err
+	}
+	hooks, _ := root["hooks"].(map[string]any)
+	groups, _ := hooks["PreToolUse"].([]any)
+	if len(groups) == 0 {
+		return false, nil
+	}
+
+	keptGroups := make([]any, 0, len(groups))
+	changed := false
+	for _, g := range groups {
+		group, _ := g.(map[string]any)
+		entries, _ := group["hooks"].([]any)
+		keptEntries := make([]any, 0, len(entries))
+		for _, h := range entries {
+			entry, _ := h.(map[string]any)
+			command, _ := entry["command"].(string)
+			if strings.Contains(command, guardMarker) {
+				changed = true
+				continue // drop the lema-managed guard hook
+			}
+			keptEntries = append(keptEntries, h)
+		}
+		if len(keptEntries) == 0 {
+			continue
+		}
+		group["hooks"] = keptEntries
+		keptGroups = append(keptGroups, group)
+	}
+	if !changed {
+		return false, nil
+	}
+
+	if len(keptGroups) == 0 {
+		delete(hooks, "PreToolUse")
+	} else {
+		hooks["PreToolUse"] = keptGroups
+	}
+	if len(hooks) == 0 {
+		delete(root, "hooks")
+	} else {
+		root["hooks"] = hooks
+	}
 	return true, writeJSON(path, root)
 }
 
@@ -197,6 +505,12 @@ func readJSONObject(path string) (map[string]any, error) {
 // writeJSON writes v as pretty JSON, creating the parent directory if needed.
 // HTML escaping is disabled so shell operators in hook commands (>, &) stay
 // readable in the file rather than rendering as > / &.
+//
+// The write is atomic: v is encoded into a sibling temp file and then renamed
+// into place, so a crash mid-write can never leave a truncated, unparseable
+// config that would brick the Plugins panel on the next read (ADR-0043/0044).
+// os.Rename is atomic within a filesystem on macOS/Linux, and the temp file lives
+// in the same directory as path so the rename never crosses a filesystem.
 func writeJSON(path string, v any) error {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -210,5 +524,13 @@ func writeJSON(path string, v any) error {
 	if err := enc.Encode(v); err != nil {
 		return err
 	}
-	return os.WriteFile(path, buf.Bytes(), 0o644)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp) // best-effort cleanup; the original file is untouched
+		return err
+	}
+	return nil
 }

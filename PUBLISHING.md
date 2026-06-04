@@ -8,6 +8,12 @@ public npm packages is **free** — no per-download or per-run cost.
 ## One-time
 
 - `npm login` with the account that will own `lema-mcp`.
+- **2FA + scripted publish:** if the account has 2FA (it should), `npm publish` from a
+  script fails with `E403 … Two-factor authentication or granular access token with
+  bypass 2fa … required`, because it can't prompt for an OTP mid-loop. Create an
+  **automation token** (npmjs.com → Access Tokens → Generate New → Classic → Automation;
+  or a Granular token with Read+Write on all packages + bypass-2FA) and point npm at it:
+  `npm config set //registry.npmjs.org/:_authToken=<TOKEN>`. Automation tokens bypass 2FA.
 - Confirm the name is free: `npm view lema-mcp` → a 404 means it's available.
 
 ## Each release

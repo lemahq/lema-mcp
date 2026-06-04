@@ -85,6 +85,11 @@ type Atom struct {
 	Closed     bool    `json:"closed,omitempty"`
 	ClosedNote string  `json:"closed_note,omitempty"`
 	Score      float64 `json:"-"`
+	// MatchKey is the killed option's name — a rejected alternative's option, or a
+	// superseded decision's title+chosen — used by the never-reopen guard to match
+	// edits against the option ONLY, never the free-text rationale (ADR-0052). Not
+	// serialized: it is a matching aid, not part of the MCP wire contract.
+	MatchKey string `json:"-"`
 }
 
 // DecisionSource is the interface the four MCP tools call. Swapping the
@@ -138,8 +143,11 @@ func edgesOf(a adr.ADR) []Edge {
 
 // List returns decisions, optionally filtered by status, sorted by number.
 func (l *Local) List(_ context.Context, status string, limit int) ([]Summary, error) {
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 {
 		limit = 50
+	}
+	if limit > 200 {
+		limit = 200 // clamp, don't reset — an over-cap ask must not return less than the cap
 	}
 	out := []Summary{}
 	for _, n := range l.order {
@@ -264,7 +272,10 @@ func (l *Local) Search(_ context.Context, query string, k int) ([]Atom, error) {
 	return out, nil
 }
 
-type section struct{ heading, text string }
+type section struct {
+	heading, text string
+	level         int // 2 for ##, 3 for ### — lets the alternatives parser scope ### options to their ## section (ADR-0053)
+}
 
 // splitSections breaks an ADR body into ## / ### sections (heading + text).
 // Content before the first heading becomes a preamble section with no heading.
@@ -279,9 +290,14 @@ func splitSections(body string) []section {
 	}
 	for ln := range strings.SplitSeq(body, "\n") {
 		t := strings.TrimSpace(ln)
-		if strings.HasPrefix(t, "## ") || strings.HasPrefix(t, "### ") {
+		if strings.HasPrefix(t, "### ") {
 			flush()
-			cur = section{heading: strings.TrimSpace(strings.TrimLeft(t, "# "))}
+			cur = section{heading: strings.TrimSpace(strings.TrimLeft(t, "# ")), level: 3}
+			continue
+		}
+		if strings.HasPrefix(t, "## ") {
+			flush()
+			cur = section{heading: strings.TrimSpace(strings.TrimLeft(t, "# ")), level: 2}
 			continue
 		}
 		cur.text += ln + "\n"
@@ -460,6 +476,31 @@ func statusWeight(status string) float64 {
 	default: // proposed / unknown
 		return 0.85
 	}
+}
+
+// ── Exported scorer facade ───────────────────────────────────────────────────
+// internal/docs reuses the exact lexical scorer the decision search uses
+// (ADR-0055): same query-term extraction, snippet windowing, and density
+// re-rank, so a docs chunk and a decision atom rank by the same physics.
+// Thin wrappers, not renames — the unexported forms are called throughout
+// this package and capture.go.
+
+// QueryTerms exposes queryTerms: lowercased, punctuation-stripped, stopword-
+// filtered meaningful terms of a query.
+func QueryTerms(q string) []string { return queryTerms(q) }
+
+// CleanMarkdown exposes cleanMarkdown: a block reduced to readable plain text.
+func CleanMarkdown(s string) string { return cleanMarkdown(s) }
+
+// BestSnippet exposes bestSnippet: a tight, query-centered window of clean text.
+func BestSnippet(clean string, terms []string, maxLen int) string {
+	return bestSnippet(clean, terms, maxLen)
+}
+
+// Rerank exposes rerank: the ADR-0025 §7 density re-rank (length norm × status
+// weight) on top of a raw lexical score.
+func Rerank(base float64, runes int, status string) float64 {
+	return rerank(base, runes, status)
 }
 
 // Graph does a bounded BFS over typed frontmatter edges from a decision.

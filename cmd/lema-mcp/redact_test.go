@@ -28,7 +28,7 @@ func TestRedactSecrets(t *testing.T) {
 		{
 			name:     "API key with quotes",
 			input:    `we used api_key="12345" for this`,
-			expected: `we used [REDACTED]" for this`, // The trailing quote is not matched by \s*...
+			expected: `we used [REDACTED]" for this`, // the trailing quote is not matched by \s*...
 		},
 		{
 			name:     "GitHub token",

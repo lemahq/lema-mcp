@@ -82,3 +82,113 @@ func TestRunInitRejectsMalformedJSON(t *testing.T) {
 		t.Error("expected init to refuse a malformed .mcp.json rather than discard it")
 	}
 }
+
+func TestEnsurePreToolUseHook(t *testing.T) {
+	path := t.TempDir() + "/settings.json"
+
+	changed, err := ensurePreToolUseHook(path)
+	if err != nil || !changed {
+		t.Fatalf("first install: changed=%v err=%v", changed, err)
+	}
+	b, _ := os.ReadFile(path)
+	if !strings.Contains(string(b), `"PreToolUse"`) ||
+		!strings.Contains(string(b), guardMarker) ||
+		!strings.Contains(string(b), `"Edit|Write"`) {
+		t.Fatalf("hook not written correctly: %s", b)
+	}
+
+	// Idempotent: second call changes nothing.
+	if changed, _ := ensurePreToolUseHook(path); changed {
+		t.Fatal("second install should be a no-op")
+	}
+}
+
+// TestInitRepoInstallsGuard confirms initRepo wires the guard end to end — the
+// guard hook lands in .claude/settings.json alongside the existing commit reminder.
+func TestInitRepoInstallsGuard(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := initRepo(dir); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+	s := string(b)
+	if !strings.Contains(s, `"PreToolUse"`) || !strings.Contains(s, guardMarker) {
+		t.Fatalf("initRepo did not install the guard hook: %s", s)
+	}
+	// The existing commit reminder must survive alongside it.
+	if !strings.Contains(s, `"PostToolUse"`) || !strings.Contains(s, reminderMarker) {
+		t.Fatalf("initRepo dropped the commit reminder: %s", s)
+	}
+	// And the capture nudge (ADR-0054) is installed too.
+	if !strings.Contains(s, captureNudgeMarker) {
+		t.Fatalf("initRepo did not install the capture-nudge hook: %s", s)
+	}
+}
+
+func TestRemoveGuardHook(t *testing.T) {
+	path := t.TempDir() + "/settings.json"
+	if _, err := ensurePreToolUseHook(path); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := removeGuardHook(path)
+	if err != nil || !changed {
+		t.Fatalf("remove: changed=%v err=%v", changed, err)
+	}
+	b, _ := os.ReadFile(path)
+	if strings.Contains(string(b), guardMarker) {
+		t.Fatalf("guard hook not removed: %s", b)
+	}
+	// Idempotent: removing again is a no-op.
+	if changed, _ := removeGuardHook(path); changed {
+		t.Fatal("second remove should be a no-op")
+	}
+}
+
+func TestEnsureCaptureNudgeHook(t *testing.T) {
+	path := t.TempDir() + "/settings.json"
+
+	changed, err := ensureCaptureNudgeHook(path)
+	if err != nil || !changed {
+		t.Fatalf("first install: changed=%v err=%v", changed, err)
+	}
+	b, _ := os.ReadFile(path)
+	if !strings.Contains(string(b), `"PostToolUse"`) ||
+		!strings.Contains(string(b), captureNudgeMarker) ||
+		!strings.Contains(string(b), `"Edit|Write|MultiEdit"`) {
+		t.Fatalf("nudge hook not written correctly: %s", b)
+	}
+	// Idempotent: second call changes nothing.
+	if changed, _ := ensureCaptureNudgeHook(path); changed {
+		t.Fatal("second install should be a no-op")
+	}
+}
+
+func TestRemoveCaptureNudgeHook(t *testing.T) {
+	path := t.TempDir() + "/settings.json"
+	// Install BOTH the commit reminder and the nudge (both PostToolUse) — remove
+	// must drop ONLY the nudge.
+	if _, err := ensureClaudeHook(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureCaptureNudgeHook(path); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := removeCaptureNudgeHook(path)
+	if err != nil || !changed {
+		t.Fatalf("remove: changed=%v err=%v", changed, err)
+	}
+	s := func() string { b, _ := os.ReadFile(path); return string(b) }()
+	if strings.Contains(s, captureNudgeMarker) {
+		t.Fatalf("nudge hook not removed: %s", s)
+	}
+	// The commit reminder must survive — removeCaptureNudgeHook is surgical.
+	if !strings.Contains(s, reminderMarker) {
+		t.Fatalf("removeCaptureNudgeHook clobbered the commit reminder: %s", s)
+	}
+	// Idempotent: removing again is a no-op.
+	if changed, _ := removeCaptureNudgeHook(path); changed {
+		t.Fatal("second remove should be a no-op")
+	}
+}
