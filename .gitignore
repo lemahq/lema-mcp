@@ -37,5 +37,10 @@ npm/*/bin/lema-mcp
 npm/*/bin/lema-mcp.exe
 node_modules/
 
+# npm: the launcher's README + LICENSE are copied from the repo root at pack
+# time by the prepack script (so npm shows the README) — generated, not committed.
+npm/lema-mcp/README.md
+npm/lema-mcp/LICENSE
+
 # agent-tooling artifacts — not for the public repo
 .jules/

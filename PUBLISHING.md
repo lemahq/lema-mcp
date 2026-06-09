@@ -51,6 +51,10 @@ Verify with `npx lema-mcp@latest demo`.
 - **Windows:** the launcher already maps `win32-x64`; add a `npm/win32-x64`
   package + a `build` line when there's demand.
 - The binaries are gitignored (built at publish time), so the repo stays small.
+- **README on npm:** the launcher's `package.json` has a `prepack` that copies the
+  root `README.md` + `LICENSE` into `npm/lema-mcp/` so the npm page renders them
+  (npm only reads a README that sits in the published package dir). Both copies are
+  gitignored — edit the **root** `README.md`, never `npm/lema-mcp/README.md`.
 - The Go source under `cmd/` + `internal/` is mechanically synced from the
   monorepo by `scripts/extract-lema-mcp.sh`; do not hand-edit it here. The npm
   packaging and README are dist-native and ARE maintained here.
