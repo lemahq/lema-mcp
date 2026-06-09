@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // RejectedAlt is one killed option and why it was killed — the enforcement
@@ -241,17 +242,72 @@ func (s *CaptureStore) atoms() []Atom {
 	return s.cachedAtoms
 }
 
+// maxRefs caps the number of provenance refs served per atom; maxRefRunes caps
+// each ref's length. Both bound an untrusted, agent-supplied wire surface.
+const (
+	maxRefs     = 8
+	maxRefRunes = 200
+)
+
+// sanitizeRefs bounds agent-supplied refs before they are served on the
+// MCP wire (search_decisions / check_decided receive them without a trust
+// prefix): trims whitespace, drops empties, strips control characters and
+// newlines (wire/log-line injection), caps each ref at 200 runes and the
+// slice at 8, and de-duplicates preserving first occurrence.
+func sanitizeRefs(refs []string) []string {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(refs))
+	seen := make(map[string]struct{}, len(refs))
+	for _, raw := range refs {
+		// Strip control characters (including newlines and tabs) outright rather
+		// than replacing them, so wire/log-line injection markers leave no trace.
+		var b strings.Builder
+		b.Grow(len(raw))
+		for _, r := range raw {
+			if unicode.IsControl(r) {
+				continue
+			}
+			b.WriteRune(r)
+		}
+		ref := strings.TrimSpace(b.String())
+		if ref == "" {
+			continue
+		}
+		if rs := []rune(ref); len(rs) > maxRefRunes {
+			ref = string(rs[:maxRefRunes]) // hard cut, no ellipsis
+		}
+		if _, dup := seen[ref]; dup {
+			continue
+		}
+		seen[ref] = struct{}{}
+		out = append(out, ref)
+		if len(out) >= maxRefs {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // buildAtoms projects the captured decisions into the Atom shape search serves,
 // computing the CLOSED enforcement note for any rejected alternative and for any
 // chosen option whose decision has been superseded. Caller holds s.mu.
 func (s *CaptureStore) buildAtoms() []Atom {
 	out := []Atom{}
 	for _, r := range s.records {
+		// Sanitize the agent-supplied provenance once per record; it rides onto the
+		// chosen and rejected atoms (the followable, decision-level claims) but not
+		// the constraint/consequence atoms, which stay payload-tight.
+		refs := sanitizeRefs(r.Refs)
 		chosenText := r.Title + " — chose " + r.Chosen
 		if r.Rationale != "" {
 			chosenText += " (" + r.Rationale + ")"
 		}
-		chosen := Atom{ID: r.ID + "-chosen", Type: "chosen", Text: chosenText, Ref: r.ID}
+		chosen := Atom{ID: r.ID + "-chosen", Type: "chosen", Text: chosenText, Ref: r.ID, Refs: refs}
 		if r.Status == "superseded" {
 			chosen.Closed = true
 			chosen.ClosedNote = fmt.Sprintf("superseded — do not reopen %q: the decision %q was overridden by a later one", r.Chosen, r.Title)
@@ -271,7 +327,7 @@ func (s *CaptureStore) buildAtoms() []Atom {
 			}
 			out = append(out, Atom{
 				ID: fmt.Sprintf("%s-rej-%d", r.ID, i), Type: "rejected_alternative",
-				Text: text, Ref: r.ID, Closed: true, ClosedNote: note, MatchKey: alt.Option,
+				Text: text, Ref: r.ID, Refs: refs, Closed: true, ClosedNote: note, MatchKey: alt.Option,
 			})
 		}
 		if r.Constraint != "" {

@@ -52,10 +52,13 @@ type checkInput struct {
 }
 
 type checkOutput struct {
-	Topic   string        `json:"topic"`
-	Decided bool          `json:"decided"`
-	Closed  []source.Atom `json:"closed"`
-	Note    string        `json:"note,omitempty"`
+	Topic   string `json:"topic"`
+	Decided bool   `json:"decided"`
+	// source.Atom is embedded directly, so additive Atom fields (locator, refs)
+	// ride through check_decided automatically. These atoms get NO trust prefix,
+	// so their refs are sanitized at capture time (source.sanitizeRefs).
+	Closed []source.Atom `json:"closed"`
+	Note   string        `json:"note,omitempty"`
 }
 
 // checkDecided is the never-reopen gate: before proposing a direction, an agent
@@ -66,13 +69,19 @@ func checkDecided(_ context.Context, _ *mcp.CallToolRequest, in checkInput) (*mc
 		return nil, checkOutput{Topic: in.Topic}, nil
 	}
 	// Enforce off BOTH the capture store and the repo's documented ADRs (ADR-0053),
-	// matched by the precise option-token matcher (ADR-0052) — not the old lexical
-	// search that folded rationale prose into the match.
+	// matched by the distinctiveness-weighted matcher (ADR-0053 recall calibration):
+	// the old all-tokens-AND rule required a query to contain an option's entire
+	// (often full-sentence) name, so recall on natural-language topics was ~zero.
+	// The weighted matcher fires when the query names the option's distinctive
+	// terms, holding precision via the stopword prior (generic words never anchor a
+	// match). NB: this is the natural-language check_decided path; the PreToolUse
+	// guard hook still uses the token matcher (guardMatch) over code-edit text,
+	// which is a different input distribution awaiting its own eval.
 	merged := append([]source.Atom{}, capture.ClosedAtoms()...)
 	if cs, ok := src.(source.ClosedSource); ok {
 		merged = append(merged, cs.ClosedAtoms()...)
 	}
-	closed := guardMatch(merged, in.Topic)
+	closed := weightedGuardMatch(merged, in.Topic, guardMatchThreshold)
 	out := checkOutput{Topic: in.Topic, Decided: len(closed) > 0, Closed: closed}
 	if out.Decided {
 		out.Note = "this topic touches decisions already CLOSED — do not re-propose the closed options; surface the prior decision instead"
