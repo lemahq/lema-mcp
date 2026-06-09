@@ -36,20 +36,20 @@ func serveHTTP(port int) error {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSONResp(w, map[string]any{"ok": true, "repo": repoName})
 	})
-	mux.HandleFunc("/api/search", httpSearch)     // GET ?q=&k=&max_tokens=
-	mux.HandleFunc("/api/decisions", httpList)     // GET ?status=&limit=
-	mux.HandleFunc("/api/decision", httpGet)       // GET ?number=
-	mux.HandleFunc("/api/graph", httpGraph)        // GET ?number=&depth=
-	mux.HandleFunc("/api/check", httpCheck)        // GET ?topic=
-	mux.HandleFunc("/api/decided", httpDecided)    // GET — all currently-CLOSED captures (enforcement feed)
-	mux.HandleFunc("/api/record", httpRecord)      // POST DecisionRecord
-	mux.HandleFunc("/api/init", httpInit)          // POST — register lema-mcp in the repo
-	mux.HandleFunc("/api/plugins", httpPlugins)        // GET — Plugins panel snapshot (ADR-0043/0044)
+	mux.HandleFunc("/api/search", httpSearch)                // GET ?q=&k=&max_tokens=
+	mux.HandleFunc("/api/decisions", httpList)               // GET ?status=&limit=
+	mux.HandleFunc("/api/decision", httpGet)                 // GET ?number=
+	mux.HandleFunc("/api/graph", httpGraph)                  // GET ?number=&depth=
+	mux.HandleFunc("/api/check", httpCheck)                  // GET ?topic=
+	mux.HandleFunc("/api/decided", httpDecided)              // GET — all currently-CLOSED captures (enforcement feed)
+	mux.HandleFunc("/api/record", httpRecord)                // POST DecisionRecord
+	mux.HandleFunc("/api/init", httpInit)                    // POST — register lema-mcp in the repo
+	mux.HandleFunc("/api/plugins", httpPlugins)              // GET — Plugins panel snapshot (ADR-0043/0044)
 	mux.HandleFunc("/api/plugins/toggle", httpPluginsToggle) // POST {kind,name,enabled} — toggle mcp server or lema hook
-	mux.HandleFunc("/api/sessions", httpSessions) // GET ?limit — session list (ADR-0046/0049)
-	mux.HandleFunc("/api/session", httpSession)   // GET ?id=&prompts= — one session in full
-	mux.HandleFunc("/api/docs", httpDocs)         // GET — project-docs listing (ADR-0055)
-	mux.HandleFunc("/api/doc", httpDoc)           // GET ?path=&section=&max_tokens= — one doc or section
+	mux.HandleFunc("/api/sessions", httpSessions)            // GET ?limit — session list (ADR-0046/0049)
+	mux.HandleFunc("/api/session", httpSession)              // GET ?id=&prompts= — one session in full
+	mux.HandleFunc("/api/docs", httpDocs)                    // GET — project-docs listing (ADR-0055)
+	mux.HandleFunc("/api/doc", httpDoc)                      // GET ?path=&section=&max_tokens= — one doc or section
 
 	handler := withCORS(withToken(token, mux))
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
@@ -188,17 +188,54 @@ func withToken(token string, next http.Handler) http.Handler {
 }
 
 // withCORS allows the local GUI origin (localhost:3000 by default) to call the
-// API from a browser.
+// API from a browser. It validates the request Origin against LEMA_HTTP_ORIGIN
+// (which can be a comma-separated list) to prevent overly permissive CORS.
 func withCORS(next http.Handler) http.Handler {
-	origin := strings.TrimSpace(os.Getenv("LEMA_HTTP_ORIGIN"))
-	if origin == "" {
-		origin = "http://localhost:3000"
+	envOrigin := strings.TrimSpace(os.Getenv("LEMA_HTTP_ORIGIN"))
+	if envOrigin == "" {
+		envOrigin = "http://localhost:3000"
 	}
+	allowedOrigins := strings.Split(envOrigin, ",")
+	for i := range allowedOrigins {
+		allowedOrigins[i] = strings.TrimSpace(allowedOrigins[i])
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		reqOrigin := r.Header.Get("Origin")
+		allowed := false
+
+		// For requests without an Origin header (e.g., cURL, same-origin), we don't
+		// enforce CORS origin restrictions but we still allow the request to proceed.
+		if reqOrigin == "" {
+			allowed = true
+		} else {
+			for _, o := range allowedOrigins {
+				if o == "*" || o == reqOrigin {
+					allowed = true
+					// Echo the validated origin back
+					w.Header().Set("Access-Control-Allow-Origin", reqOrigin)
+					break
+				}
+			}
+		}
+
+		if reqOrigin != "" {
+			w.Header().Set("Vary", "Origin")
+		}
+
+		// If it's a CORS preflight request and origin is not allowed, reject it.
+		// If it's not allowed but it's a standard request, we just omit the CORS
+		// headers and let the browser block the response.
+		if allowed || reqOrigin == "" {
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		}
+
 		if r.Method == http.MethodOptions {
+			if !allowed {
+				http.Error(w, "CORS origin not allowed", http.StatusForbidden)
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
