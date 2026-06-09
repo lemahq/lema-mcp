@@ -8,6 +8,9 @@
   "files": [
     "bin"
   ],
+  "scripts": {
+    "prepack": "cp ../../README.md ./README.md && cp ../../LICENSE ./LICENSE"
+  },
   "optionalDependencies": {
     "lema-mcp-darwin-arm64": "0.6.0",
     "lema-mcp-darwin-x64": "0.6.0",
