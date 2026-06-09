@@ -23,18 +23,27 @@ var manifestFiles = map[string]bool{
 	"pom.xml":          true,
 }
 
+// isManifestDecisionEdit is the shared decision-moment classifier: an
+// Edit/Write/MultiEdit touching a dependency manifest. It is used by BOTH the
+// capture nudge (to remind) and the capture-rate gauge (to count the
+// denominator), so the gauge measures exactly what the nudge classifies and
+// the two can never drift apart.
+func isManifestDecisionEdit(toolName, filePath string) bool {
+	switch toolName {
+	case "Edit", "Write", "MultiEdit":
+	default:
+		return false
+	}
+	return filePath != "" && manifestFiles[strings.ToLower(filepath.Base(filePath))]
+}
+
 // nudgeReminder returns the capture reminder to surface for a tool call, or "" when
 // the call is not a decision-shaped moment. v1 fires only on an Edit/Write/MultiEdit
 // to a dependency manifest — the canonical record_decision moment — and stays silent
 // otherwise so it never becomes naggy (ADR-0054).
 func nudgeReminder(in guardInput) string {
-	switch in.ToolName {
-	case "Edit", "Write", "MultiEdit":
-	default:
-		return ""
-	}
 	p, _ := in.ToolInput["file_path"].(string)
-	if p == "" || !manifestFiles[strings.ToLower(filepath.Base(p))] {
+	if !isManifestDecisionEdit(in.ToolName, p) {
 		return ""
 	}
 	return "lema: you changed dependencies in " + filepath.Base(p) +

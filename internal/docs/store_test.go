@@ -35,7 +35,7 @@ func TestStoreListGroups(t *testing.T) {
 		"docs/adr/0001-x.md":                            "adr",
 		"openspec/specs/auth/spec.md":                   "openspec",
 		"docs/superpowers/specs/2026-01-01-y-design.md": "spec",
-		"README.md": "doc",
+		"README.md":                                     "doc",
 	}
 	for p, g := range want {
 		if groups[p] != g {

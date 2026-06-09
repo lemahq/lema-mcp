@@ -73,11 +73,26 @@ type Graph struct {
 // table. It is attached after ranking and omits when empty, so it never affects
 // the order search_decisions returns.
 type Atom struct {
-	ID    string `json:"id"`
-	Type  string `json:"type"`
-	Text  string `json:"text"`
-	Ref   string `json:"ref"`
-	Edges []Edge `json:"edges,omitempty"`
+	ID   string `json:"id"`
+	Type string `json:"type"`
+	Text string `json:"text"`
+	Ref  string `json:"ref"`
+	// Locator is the raw, followable source provenance (PR/commit) served by the
+	// hosted backend (ADR-0056). The local-parse and capture paths leave it empty
+	// by design — an ADR section carries no repo@sha, and `.lema/decisions.jsonl`
+	// has no locator; only hosted-served atoms populate it. Omits when empty.
+	Locator string `json:"locator,omitempty"`
+	// Refs is the additive, agent-supplied provenance captured alongside a
+	// record_decision call — file paths, PR/commit URLs, doc links the recording
+	// agent attached to justify the choice (ADR-0042). It is distinct from Ref
+	// (singular): Ref stays the opaque identity key "d_xxxxxx" used for ROI
+	// accounting and the never-reopen guard's audit log, and is unchanged on
+	// capture atoms; Refs is the followable evidence served so a CLOSED verdict
+	// points at an artifact the agent/human can open. Sanitized and bounded
+	// before it reaches the wire (sanitizeRefs). Omits when empty, so ADR-path
+	// and hosted atoms are unaffected.
+	Refs  []string `json:"refs,omitempty"`
+	Edges []Edge   `json:"edges,omitempty"`
 	// Closed marks an atom an agent must not act on as a live option: a captured
 	// rejected alternative, or a chosen option whose decision was superseded
 	// (ADR-0042). ClosedNote carries the "do not propose X: …" directive. Both
@@ -90,6 +105,13 @@ type Atom struct {
 	// edits against the option ONLY, never the free-text rationale (ADR-0052). Not
 	// serialized: it is a matching aid, not part of the MCP wire contract.
 	MatchKey string `json:"-"`
+	// MatchKeyDerived is the tight, distinctive key computed at capture time
+	// (ADR-0053): the salient option terms with the descriptive prose stripped, so
+	// the recall matcher keys off "chunk-rag" rather than the whole "Embed code or
+	// document chunks for retrieval (chunk-RAG)" sentence. Empty for atoms recorded
+	// before derivation existed (and for ADR-parsed atoms); the matcher falls back
+	// to MatchKey then. Not serialized — a matching aid.
+	MatchKeyDerived string `json:"-"`
 }
 
 // DecisionSource is the interface the four MCP tools call. Swapping the

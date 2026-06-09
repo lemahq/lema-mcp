@@ -642,12 +642,12 @@ func scanSession(path string, mtime time.Time, collectPrompts bool) (SessionMeta
 // pulls out its title/ref. The substring gate is necessary but NOT sufficient —
 // "record_decision" appears in Edit/Write/Bash inputs, assistant text, and
 // tool_result bodies because the repo authors its own tooling — so a candidate
-// counts ONLY if it structurally matches one of the two real shapes. (Validated:
-// in the local corpus, 98 lines pass the Form-A substring gate yet ZERO have an
-// actual tool_use block named record_decision; structural validation rejects all
-// of them. There are currently zero genuine record_decision invocations anywhere
-// in the corpus — capture is new — so this legitimately returns nothing today and
-// is built to be correct WHEN real calls appear.)
+// counts ONLY if it structurally matches one of the two real shapes. (Validated
+// when built — 2026-06-02: 98 lines passed the Form-A substring gate yet ZERO had
+// an actual tool_use block named record_decision; structural validation rejected
+// all of them, and the corpus then held zero genuine invocations. Dated claim:
+// by 2026-06-07 the corpus holds real captures — `lema-mcp capture-rate` is the
+// living count; this validator is what it trusts.)
 func extractDecision(rec jsonlRecord) (SessionDecision, bool) {
 	// FORM A — assistant tool_use (primary).
 	if rec.Type == "assistant" && len(rec.Message) > 0 {
