@@ -336,6 +336,13 @@ func main() {
 				log.Fatalf("lema-mcp capture-rate: %v", err)
 			}
 			return
+		case "push":
+			// Local→hosted bridge (ADR-0064 in lemahq/lema): push the capture
+			// store's reduced view to a hosted team workspace. Idempotent.
+			if err := runPush(os.Args[2:]); err != nil {
+				log.Fatalf("lema-mcp push: %v", err)
+			}
+			return
 		case "serve":
 			// Drop "serve" so the flags below parse; the engine setup is shared,
 			// then the --http branch starts the HTTP server instead of stdio.

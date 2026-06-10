@@ -227,6 +227,12 @@ it's a side benefit. The reason to run lema is never-reopen, above.
 - **`serve`** (≡ the `--http` flag) — serve the same engine over localhost HTTP
   (default `:4321`, `--port`) for the lema Workbench desktop GUI instead of stdio
   MCP.
+- **`push`** — push your locally captured decisions to a hosted lema team
+  workspace (`--workspace <id>`, `LEMA_API_TOKEN` from your lema dashboard).
+  Idempotent: re-running reports `skipped` for everything unchanged, so it's
+  safe from cron, CI, or any teammate's checkout of the same repo. `--dry-run`
+  previews. Requires a lema account (free); the local store keeps working
+  without one.
 
 ## Configuration & privacy
 

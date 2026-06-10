@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -70,7 +71,7 @@ func TestPushClientBatchesAndAggregates(t *testing.T) {
 	defer srv.Close()
 
 	records := makeTestRecords(3)
-	agg, err := pushRecords(srv.URL, "tok123", "ws-uuid", records, 2, false)
+	agg, err := pushRecords(context.Background(), srv.URL, "tok123", "ws-uuid", records, 2, false)
 	if err != nil {
 		t.Fatalf("pushRecords: %v", err)
 	}
@@ -113,7 +114,7 @@ func TestPushClientSurfacesHTTPErrors(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := pushRecords(srv.URL, "tok123", "ws-uuid", makeTestRecords(1), 500, false)
+	_, err := pushRecords(context.Background(), srv.URL, "tok123", "ws-uuid", makeTestRecords(1), 500, false)
 	if err == nil {
 		t.Fatal("pushRecords: want error, got nil")
 	}
@@ -140,10 +141,10 @@ func TestPushClientDryRunFlag(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := pushRecords(srv.URL, "tok", "ws", makeTestRecords(1), 500, true); err != nil {
+	if _, err := pushRecords(context.Background(), srv.URL, "tok", "ws", makeTestRecords(1), 500, true); err != nil {
 		t.Fatalf("pushRecords dry-run: %v", err)
 	}
-	if _, err := pushRecords(srv.URL, "tok", "ws", makeTestRecords(1), 500, false); err != nil {
+	if _, err := pushRecords(context.Background(), srv.URL, "tok", "ws", makeTestRecords(1), 500, false); err != nil {
 		t.Fatalf("pushRecords real: %v", err)
 	}
 	if len(bodies) != 2 {
@@ -188,5 +189,195 @@ func TestPushConfigRoundTripAndNoToken(t *testing.T) {
 	}
 	if empty != (pushConfig{}) {
 		t.Errorf("missing file config = %+v, want zero value", empty)
+	}
+}
+
+// The clamp in pushRecords is a backstop for non-CLI callers: an out-of-range
+// batch size (0, or absurdly large) must clamp to the 500 cap and still push —
+// never panic or loop. User-facing validation lives in runPush instead.
+func TestPushClientClampsBatchSize(t *testing.T) {
+	for _, batchSize := range []int{0, 9999} {
+		var batchSizes []int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				Records []source.DecisionRecord `json:"records"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode request: %v", err)
+			}
+			batchSizes = append(batchSizes, len(req.Records))
+			_, _ = w.Write([]byte(`{"created":0,"results":[]}`))
+		}))
+
+		_, err := pushRecords(context.Background(), srv.URL, "tok", "ws", makeTestRecords(3), batchSize, false)
+		srv.Close()
+		if err != nil {
+			t.Fatalf("batchSize=%d: pushRecords: %v", batchSize, err)
+		}
+		if len(batchSizes) != 1 || batchSizes[0] != 3 {
+			t.Errorf("batchSize=%d: recorded batches = %v, want [3] (clamped to the %d cap)", batchSize, batchSizes, pushMaxBatch)
+		}
+	}
+}
+
+// seedTestStore creates a capture store at dir/.lema/decisions.jsonl with n
+// records (via the real Record path, so ids/timestamps are genuine) and
+// returns the store path.
+func seedTestStore(t *testing.T, dir string, n int) string {
+	t.Helper()
+	path := filepath.Join(dir, ".lema", "decisions.jsonl")
+	store, err := source.NewCaptureStore(path)
+	if err != nil {
+		t.Fatalf("NewCaptureStore: %v", err)
+	}
+	for i := 0; i < n; i++ {
+		_, err := store.Record(source.DecisionRecord{
+			Title:  fmt.Sprintf("Use option A for thing %d", i+1),
+			Chosen: fmt.Sprintf("option A%d", i+1),
+		})
+		if err != nil {
+			t.Fatalf("Record %d: %v", i+1, err)
+		}
+	}
+	return path
+}
+
+// importFakeServer answers like the hosted import endpoint: every record comes
+// back "created", counts match. Returns the server and a pointer to the
+// request count.
+func importFakeServer(t *testing.T) (*httptest.Server, *int) {
+	t.Helper()
+	requests := new(int)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*requests++
+		var req struct {
+			Records []source.DecisionRecord `json:"records"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		results := make([]map[string]any, len(req.Records))
+		for i, rec := range req.Records {
+			results[i] = map[string]any{"local_id": rec.ID, "title": rec.Title, "status": "created"}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"created": len(req.Records), "results": results})
+	}))
+	t.Cleanup(srv.Close)
+	return srv, requests
+}
+
+// The full first-run → second-run story: push with explicit flags succeeds,
+// the workspace+url pair is remembered (never the token), and a bare re-run
+// with no flags works off the remembered config alone.
+func TestRunPushEndToEndAgainstFakeServer(t *testing.T) {
+	dir := t.TempDir()
+	captureFile := seedTestStore(t, dir, 2)
+	srv, requests := importFakeServer(t)
+	t.Setenv("LEMA_API_TOKEN", "tok-e2e")
+	t.Setenv("LEMA_API_URL", "") // the remembered config, not a leaked env var, must carry run two
+
+	if err := runPush([]string{"--capture-file", captureFile, "--workspace", "ws-e2e", "--api-url", srv.URL}); err != nil {
+		t.Fatalf("first runPush: %v", err)
+	}
+	if *requests != 1 {
+		t.Errorf("server saw %d requests after first run, want 1", *requests)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, ".lema", "push.json"))
+	if err != nil {
+		t.Fatalf("config not persisted: %v", err)
+	}
+	var cfg pushConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("parse persisted config: %v", err)
+	}
+	if cfg.Workspace != "ws-e2e" || cfg.APIURL != srv.URL {
+		t.Errorf("persisted config = %+v, want workspace ws-e2e + api url %s", cfg, srv.URL)
+	}
+	if strings.Contains(string(raw), "tok-e2e") || strings.Contains(strings.ToLower(string(raw)), "token") {
+		t.Errorf("persisted config leaks the token: %s", raw)
+	}
+
+	// Second run: no --workspace, no --api-url — remembered config only.
+	if err := runPush([]string{"--capture-file", captureFile}); err != nil {
+		t.Fatalf("second runPush (remembered config): %v", err)
+	}
+	if *requests != 2 {
+		t.Errorf("server saw %d requests after second run, want 2", *requests)
+	}
+}
+
+// Every missing prerequisite must name its fix: the env var to export, the
+// flag to pass, the valid range. A bare error would strand a first-time user.
+func TestRunPushActionableErrors(t *testing.T) {
+	dir := t.TempDir()
+	captureFile := seedTestStore(t, dir, 1)
+	t.Setenv("LEMA_API_TOKEN", "")
+	t.Setenv("LEMA_API_URL", "")
+
+	err := runPush([]string{"--capture-file", captureFile, "--workspace", "ws", "--api-url", "http://127.0.0.1:1"})
+	if err == nil || !strings.Contains(err.Error(), "LEMA_API_TOKEN") {
+		t.Errorf("missing token error = %v, want a mention of LEMA_API_TOKEN", err)
+	}
+
+	err = runPush([]string{"--capture-file", captureFile})
+	if err == nil || !strings.Contains(err.Error(), "--workspace") {
+		t.Errorf("missing workspace error = %v, want a mention of --workspace", err)
+	}
+
+	for _, size := range []string{"0", "501"} {
+		err = runPush([]string{"--capture-file", captureFile, "--batch-size", size})
+		if err == nil || !strings.Contains(err.Error(), "between 1 and 500") {
+			t.Errorf("--batch-size %s error = %v, want the valid range named", size, err)
+		}
+	}
+}
+
+// An empty (or never-created) store is a normal state, not a failure — push
+// reports there is nothing to do and never contacts the server.
+func TestRunPushEmptyStoreIsNotAnError(t *testing.T) {
+	srv, requests := importFakeServer(t)
+	t.Setenv("LEMA_API_TOKEN", "tok")
+
+	captureFile := filepath.Join(t.TempDir(), ".lema", "decisions.jsonl")
+	err := runPush([]string{"--capture-file", captureFile, "--workspace", "ws", "--api-url", srv.URL})
+	if err != nil {
+		t.Fatalf("runPush on empty store: %v", err)
+	}
+	if *requests != 0 {
+		t.Errorf("server saw %d requests, want 0 — nothing to push must mean no network call", *requests)
+	}
+}
+
+// Server-reported per-record failures must surface as a nonzero exit (an
+// error), not vanish inside a "pushed" summary — cron and CI key off it.
+func TestRunPushFailedRecordsExitNonzero(t *testing.T) {
+	dir := t.TempDir()
+	captureFile := seedTestStore(t, dir, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"created":0,"failed":1,"results":[{"local_id":"d_1","title":"t","status":"failed","reason":"invalid status"}]}`))
+	}))
+	defer srv.Close()
+	t.Setenv("LEMA_API_TOKEN", "tok")
+
+	err := runPush([]string{"--capture-file", captureFile, "--workspace", "ws", "--api-url", srv.URL})
+	if err == nil || !strings.Contains(err.Error(), "1 record(s) failed") {
+		t.Errorf("runPush with a failed record = %v, want '1 record(s) failed'", err)
+	}
+}
+
+// A dry run must leave no trace: remembering the workspace/url pair is the
+// reward for a real push, not for a preview that wrote nothing server-side.
+func TestRunPushDryRunDoesNotSaveConfig(t *testing.T) {
+	dir := t.TempDir()
+	captureFile := seedTestStore(t, dir, 1)
+	srv, _ := importFakeServer(t)
+	t.Setenv("LEMA_API_TOKEN", "tok")
+
+	if err := runPush([]string{"--capture-file", captureFile, "--workspace", "ws", "--api-url", srv.URL, "--dry-run"}); err != nil {
+		t.Fatalf("runPush --dry-run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".lema", "push.json")); !os.IsNotExist(err) {
+		t.Errorf("dry run created push.json (stat err = %v); config must only persist after a real push", err)
 	}
 }
