@@ -446,3 +446,20 @@ func (s *CaptureStore) Len() int {
 	s.refreshIfStale()
 	return len(s.records)
 }
+
+// Records returns the store's reduced view — one record per id, last write
+// wins, superseded status derived from supersedes edges — as a copy. This is
+// the push payload: the reduction, not the raw append log. Elements share
+// underlying slice fields (Rejected, Refs, Supersedes), matching the shallow
+// copy depth of other read accessors in this package.
+func (s *CaptureStore) Records() []DecisionRecord {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refreshIfStale()
+	out := make([]DecisionRecord, len(s.records))
+	copy(out, s.records)
+	return out
+}

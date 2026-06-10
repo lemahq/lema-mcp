@@ -511,6 +511,42 @@ func assertRefsEqual(t *testing.T, label string, a Atom, want []string) {
 	}
 }
 
+// Records exposes the reduced view — one record per id, last write wins,
+// superseded derived — which is exactly what push must send: pushing raw
+// lines would re-send stale revisions and never carry superseded status.
+func TestRecordsReturnsReducedView(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".lema", "decisions.jsonl")
+	s, _ := NewCaptureStore(path)
+	old, _ := s.Record(DecisionRecord{Title: "Old way", Chosen: "SWR"})
+	_, _ = s.Record(DecisionRecord{Title: "New way", Chosen: "TanStack Query",
+		Supersedes: []string{old.ID}})
+
+	recs := s.Records()
+	if len(recs) != 2 {
+		t.Fatalf("len = %d, want 2", len(recs))
+	}
+	byID := map[string]DecisionRecord{}
+	for _, r := range recs {
+		byID[r.ID] = r
+	}
+	if byID[old.ID].Status != "superseded" {
+		t.Fatalf("old record status = %q, want superseded (derived)", byID[old.ID].Status)
+	}
+
+	// Mutating the returned slice must not corrupt the store.
+	recs[0].Title = "mutated"
+	if s.Records()[0].Title == "mutated" {
+		t.Fatal("Records must return a copy")
+	}
+
+	// A store opened fresh on the same file sees the same reduced view
+	// (push runs as a separate process from the MCP server).
+	s2, _ := NewCaptureStore(path)
+	if len(s2.Records()) != 2 {
+		t.Fatal("fresh store must see both records")
+	}
+}
+
 func TestCaptureDedupByTitleAndChosen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "d.jsonl")
 	s, _ := NewCaptureStore(path)
