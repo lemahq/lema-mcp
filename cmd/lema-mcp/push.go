@@ -259,9 +259,11 @@ func runPush(args []string) error {
 	}
 
 	// Remember the working pair for the next bare `lema-mcp push` — only after
-	// a real push proved them out (a dry run must leave no trace). Best-effort:
-	// the push itself succeeded, so a config write failure is a warning.
-	if !*dryRun {
+	// a real push where at least one record was accepted. A fully-failed push
+	// has not proven the workspace/url pair works, so we must not persist it:
+	// doing so would silently cache a bad config and break every subsequent bare
+	// `lema-mcp push`. Dry runs also leave no trace by design.
+	if !*dryRun && resp.Created+resp.Updated+resp.Skipped > 0 {
 		if err := savePushConfig(filepath.Dir(*captureFile), pushConfig{Workspace: workspace, APIURL: apiURL}); err != nil {
 			fmt.Fprintf(os.Stderr, "lema-mcp push: could not save config for next time: %v\n", err)
 		}

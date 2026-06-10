@@ -358,6 +358,8 @@ func TestRunPushEmptyStoreIsNotAnError(t *testing.T) {
 
 // Server-reported per-record failures must surface as a nonzero exit (an
 // error), not vanish inside a "pushed" summary — cron and CI key off it.
+// A fully-failed push must also leave no push.json behind: that workspace/url
+// pair is unproven and must not become the default for subsequent runs.
 func TestRunPushFailedRecordsExitNonzero(t *testing.T) {
 	dir := t.TempDir()
 	captureFile := seedTestStore(t, dir, 1)
@@ -370,6 +372,43 @@ func TestRunPushFailedRecordsExitNonzero(t *testing.T) {
 	err := runPush([]string{"--capture-file", captureFile, "--workspace", "ws", "--api-url", srv.URL})
 	if err == nil || !strings.Contains(err.Error(), "1 record(s) failed") {
 		t.Errorf("runPush with a failed record = %v, want '1 record(s) failed'", err)
+	}
+
+	// A fully-failed push must not persist push.json — the pair is unproven.
+	if _, statErr := os.Stat(filepath.Join(dir, ".lema", "push.json")); !os.IsNotExist(statErr) {
+		t.Errorf("fully-failed push created push.json (stat err = %v); config must not be saved when every record fails", statErr)
+	}
+}
+
+// A push where at least one record succeeds (even alongside failures) must
+// persist push.json — that workspace/url pair has been proven to reach the
+// server and should become the default for subsequent runs.
+func TestRunPushPartialSuccessSavesConfig(t *testing.T) {
+	dir := t.TempDir()
+	captureFile := seedTestStore(t, dir, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// One record created, one failed — partial success.
+		_, _ = w.Write([]byte(`{"created":1,"failed":1,"results":[` +
+			`{"local_id":"d_1","title":"t1","status":"created"},` +
+			`{"local_id":"d_2","title":"t2","status":"failed","reason":"schema drift"}` +
+			`]}`))
+	}))
+	defer srv.Close()
+	t.Setenv("LEMA_API_TOKEN", "tok")
+
+	// Partial push still returns an error (failed > 0), but config must be saved.
+	_ = runPush([]string{"--capture-file", captureFile, "--workspace", "ws-partial", "--api-url", srv.URL})
+
+	raw, err := os.ReadFile(filepath.Join(dir, ".lema", "push.json"))
+	if err != nil {
+		t.Fatalf("push.json not written after partial success: %v", err)
+	}
+	var cfg pushConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("parse push.json: %v", err)
+	}
+	if cfg.Workspace != "ws-partial" || cfg.APIURL != srv.URL {
+		t.Errorf("persisted config = %+v, want workspace ws-partial + api url %s", cfg, srv.URL)
 	}
 }
 

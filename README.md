@@ -237,7 +237,8 @@ it's a side benefit. The reason to run lema is never-reopen, above.
   previews. Requires a lema account (free); the local store keeps working
   without one. The first run also needs `--api-url <url>` (or `LEMA_API_URL`);
   both workspace and URL are remembered in `.lema/push.json` for subsequent
-  runs.
+  runs. `.lema/push.json` stores only the workspace id and API URL (never the
+  token) and is safe to commit so teammates inherit the defaults.
 
 ## Configuration & privacy
 
