@@ -337,8 +337,8 @@ func main() {
 			}
 			return
 		case "push":
-			// Local→hosted bridge (ADR-0064 in lemahq/lema): push the capture
-			// store's reduced view to a hosted team workspace. Idempotent.
+			// Local→hosted bridge: push the capture store's reduced view to a
+			// hosted team workspace. Idempotent by server contract.
 			if err := runPush(os.Args[2:]); err != nil {
 				log.Fatalf("lema-mcp push: %v", err)
 			}
