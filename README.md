@@ -224,6 +224,9 @@ it's a side benefit. The reason to run lema is never-reopen, above.
   dependency manifest (`go.mod`, `package.json`, `cargo.toml`, `pyproject.toml`,
   `requirements.txt`, `gemfile`, `build.gradle`, `pom.xml`), emits a non-blocking
   reminder to `record_decision`. Fail-open. Installed by `init`.
+- **`capture-rate`** — the capture-rate gauge: genuine `record_decision` calls
+  vs the decision-shaped moments the nudge classifies, over local agent
+  transcripts.
 - **`serve`** (≡ the `--http` flag) — serve the same engine over localhost HTTP
   (default `:4321`, `--port`) for the lema Workbench desktop GUI instead of stdio
   MCP.
@@ -232,7 +235,9 @@ it's a side benefit. The reason to run lema is never-reopen, above.
   Idempotent: re-running reports `skipped` for everything unchanged, so it's
   safe from cron, CI, or any teammate's checkout of the same repo. `--dry-run`
   previews. Requires a lema account (free); the local store keeps working
-  without one.
+  without one. The first run also needs `--api-url <url>` (or `LEMA_API_URL`);
+  both workspace and URL are remembered in `.lema/push.json` for subsequent
+  runs.
 
 ## Configuration & privacy
 

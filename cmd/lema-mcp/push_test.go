@@ -325,6 +325,13 @@ func TestRunPushActionableErrors(t *testing.T) {
 		t.Errorf("missing workspace error = %v, want a mention of --workspace", err)
 	}
 
+	t.Setenv("LEMA_API_TOKEN", "tok")
+	t.Setenv("LEMA_API_URL", "")
+	err = runPush([]string{"--capture-file", captureFile, "--workspace", "ws"})
+	if err == nil || !strings.Contains(err.Error(), "--api-url") {
+		t.Errorf("missing api-url error = %v, want a mention of --api-url", err)
+	}
+
 	for _, size := range []string{"0", "501"} {
 		err = runPush([]string{"--capture-file", captureFile, "--batch-size", size})
 		if err == nil || !strings.Contains(err.Error(), "between 1 and 500") {
