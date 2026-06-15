@@ -1,0 +1,87 @@
+# Release automation for lema-mcp (the public OSS MCP server).
+#
+# Cut a release: bump versions per PUBLISHING.md, commit, then
+#   git tag vX.Y.Z && git push origin vX.Y.Z
+# On the tag push this workflow:
+#   1. builds + tests the extracted Go module, and
+#   2. creates a GitHub Release with auto-generated notes — the Releases page is
+#      the public changelog (no hand-maintained CHANGELOG.md).
+#
+# npm publish is OFF until you opt in: set repo variable NPM_PUBLISH_ENABLED=true
+# and add the NPM_TOKEN secret (an npm *automation* token — bypasses 2FA, see
+# PUBLISHING.md). The publish job reuses scripts/publish.sh, which self-guards
+# via check-extract-sync.sh (won't publish a dist that's drifted from the
+# monorepo) and publishes platform packages before the launcher.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # create GitHub Releases
+
+jobs:
+  build-release:
+    name: build + test + GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+      - uses: actions/setup-go@v5
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Create GitHub Release (auto-notes = the changelog)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes --verify-tag
+
+  # Gated follow-on: publishes the npm launcher + per-platform binary packages.
+  # Inert until NPM_PUBLISH_ENABLED=true AND the NPM_TOKEN secret is set.
+  npm-publish:
+    name: publish to npm
+    needs: build-release
+    if: ${{ vars.NPM_PUBLISH_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+      - uses: actions/setup-go@v5
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+        with:
+          node-version: 'lts/*'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Guard — tag matches launcher package.json version
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          got="$(node -p "require('./npm/lema-mcp/package.json').version")"
+          if [ "$want" != "$got" ]; then
+            echo "tag v${want} != npm/lema-mcp/package.json ${got} — bump versions per PUBLISHING.md before tagging" >&2
+            exit 1
+          fi
+
+      - name: Publish (platform packages first, launcher last)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: bash scripts/publish.sh
