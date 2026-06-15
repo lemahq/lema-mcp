@@ -1,6 +1,6 @@
 {
   "name": "lema-mcp-darwin-x64",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Prebuilt lema-mcp binary for macOS x64.",
   "os": [
     "darwin"

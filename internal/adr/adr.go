@@ -33,19 +33,23 @@ type ADR struct {
 	SupersededBy *int
 	DependsOn    []int
 	RelatedTo    []int
-	Body         string
+	// Project is the optional project slug (ADR-0061 §8 Phase 1b): resolved to
+	// a project_id at ingest, skip-on-miss; empty when absent.
+	Project string
+	Body    string
 }
 
 type frontmatter struct {
-	Title        string   `yaml:"title"`
-	Status       string   `yaml:"status"`
-	Date         string   `yaml:"date"`
-	Authors      []string `yaml:"authors"`
-	Tags         []string `yaml:"tags"`
-	Supersedes   []string `yaml:"supersedes"`
-	SupersededBy flexRef  `yaml:"superseded_by"`
-	DependsOn    []string `yaml:"depends_on"`
-	RelatedTo    []string `yaml:"related_to"`
+	Title        string     `yaml:"title"`
+	Status       string     `yaml:"status"`
+	Date         string     `yaml:"date"`
+	Authors      []string   `yaml:"authors"`
+	Tags         []string   `yaml:"tags"`
+	Supersedes   []string   `yaml:"supersedes"`
+	SupersededBy flexRef    `yaml:"superseded_by"`
+	DependsOn    []string   `yaml:"depends_on"`
+	RelatedTo    []string   `yaml:"related_to"`
+	Project      flexString `yaml:"project"`
 }
 
 // flexRef accepts `superseded_by` written as a scalar (`superseded_by: 9` or
@@ -84,6 +88,39 @@ func (f *flexRef) UnmarshalYAML(node *yaml.Node) error {
 	default:
 		return fmt.Errorf("superseded_by: unsupported YAML node kind %v", node.Kind)
 	}
+}
+
+// flexString accepts an optional string field (`project:`) written as a scalar
+// (the canonical form), as null, OR as a single-element sequence
+// (`project: [payments-replatform]`) — a natural authoring mistake, since the
+// sibling tags/supersedes fields ARE lists. The field is optional with
+// skip-on-miss semantics (ADR-0061 §8 Phase 1b), so unlike flexRef it never
+// returns an error from any node kind: a typed `Project string` would make
+// yaml.Unmarshal fail the whole file on the list form, which crashes ParseDir
+// for the entire directory and 502s the hosted import for any repo with one
+// such file — the exact hazard flexRef exists to prevent for ref fields. A
+// malformed value (mapping, empty list, null) degrades to "" — a miss, never
+// an error.
+type flexString struct {
+	value string // "" when absent, null, or an unsupported shape
+}
+
+func (f *flexString) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		if node.Tag == "!!null" {
+			return nil
+		}
+		f.value = node.Value
+	case yaml.SequenceNode:
+		// First scalar element only; a multi-element list is malformed but the
+		// first entry is what the author meant.
+		if len(node.Content) > 0 && node.Content[0].Kind == yaml.ScalarNode && node.Content[0].Tag != "!!null" {
+			f.value = node.Content[0].Value
+		}
+	}
+	// Mapping/alias/anything else: leave "" — a miss, never an error.
+	return nil
 }
 
 // fileRe matches the canonical docs/adr/NNNN-anything.md naming. Files that
@@ -186,6 +223,7 @@ func ParseBytes(raw []byte, filename, sourcePath string) (ADR, error) {
 		SupersededBy: toNum(fm.SupersededBy.value),
 		DependsOn:    toNums(fm.DependsOn),
 		RelatedTo:    toNums(fm.RelatedTo),
+		Project:      strings.TrimSpace(fm.Project.value),
 		Body:         strings.TrimSpace(body),
 	}
 
@@ -205,7 +243,87 @@ func ParseBytes(raw []byte, filename, sourcePath string) (ADR, error) {
 	if a.Title == "" {
 		a.Title = firstH1(body)
 	}
+	if a.Status == "" {
+		a.Status = statusFromBody(body)
+	}
 	return a, nil
+}
+
+// statusBulletRe matches MADR 2.x's metadata bullet (`- Status: accepted`,
+// `* Status: REJECTED`), valid only in the metadata block between the H1 and
+// the first section heading — a "Status:" line inside later prose is not a
+// status marker.
+var statusBulletRe = regexp.MustCompile(`(?i)^\s*[-*]\s*\**status\**\s*:\s*(.+)$`)
+
+// statusHeadingRe matches a Nygard/adr-tools `## Status` section heading (any
+// level); the status text is the first non-empty line of the section.
+var statusHeadingRe = regexp.MustCompile(`(?i)^\s*#{1,6}\s+status\s*$`)
+
+// sectionHeadingRe marks the end of the MADR metadata block (any level-2+
+// heading).
+var sectionHeadingRe = regexp.MustCompile(`^\s*#{2,6}\s`)
+
+// statusKeywordRe extracts canonical status words from a sniffed status text.
+var statusKeywordRe = regexp.MustCompile(`(?i)\b(proposed|accepted|superseded|deprecated|rejected)\b`)
+
+// statusFromBody sniffs a decision status from markdown that carries no
+// frontmatter status — the norm for foreign repos (MADR 2.x metadata bullets,
+// Nygard `## Status` sections). Without it every imported foreign ADR landed
+// as a proposal: 48/49 "in deliberation" on the 2026-06-12 fxa stranger walk.
+// Returns a canonical lowercase status word, or "" when no marker is present
+// or the marker is ambiguous — callers decide the default (the hosted import
+// treats "" as a record in force).
+func statusFromBody(body string) string {
+	inMetadataBlock := true
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		if statusHeadingRe.MatchString(line) {
+			for _, next := range lines[i+1:] {
+				next = strings.TrimSpace(next)
+				if next == "" {
+					continue
+				}
+				if strings.HasPrefix(next, "#") {
+					return "" // empty section
+				}
+				return canonicalStatus(next)
+			}
+			return ""
+		}
+		if sectionHeadingRe.MatchString(line) {
+			inMetadataBlock = false
+			continue
+		}
+		if inMetadataBlock {
+			if m := statusBulletRe.FindStringSubmatch(line); m != nil {
+				return canonicalStatus(m[1])
+			}
+		}
+	}
+	return ""
+}
+
+// canonicalStatus reduces a sniffed status text to one canonical word.
+// "Superseded by [ADR-0017](...)" → "superseded"; exactly one DISTINCT
+// keyword is required — a text naming several (like a template's
+// "[proposed | rejected | accepted | …]" placeholder) is no signal at all.
+func canonicalStatus(text string) string {
+	distinct := map[string]bool{}
+	first := ""
+	for _, m := range statusKeywordRe.FindAllString(text, -1) {
+		w := strings.ToLower(m)
+		if !distinct[w] {
+			distinct[w] = true
+			if first == "" {
+				first = w
+			}
+		}
+	}
+	if len(distinct) == 1 {
+		return first
+	}
+	return ""
 }
 
 // splitFrontmatter separates a leading `---`-fenced YAML block from the body.

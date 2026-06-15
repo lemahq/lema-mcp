@@ -153,3 +153,63 @@ func TestHostedAskErrorsOnNon200(t *testing.T) {
 		t.Error("Ask should error on a non-200 response")
 	}
 }
+
+// TestHostedFetchClosedAtoms pins the hosted check_decided leg (build-plan
+// D.1): GET /closed-atoms with the bearer token, and the served match_key
+// lands on Atom.MatchKey — the field the weighted never-reopen matcher keys
+// on — alongside closed/closed_note/ref/locator.
+func TestHostedFetchClosedAtoms(t *testing.T) {
+	var gotAuth, gotPath, gotMethod string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"atoms": []map[string]any{
+				{
+					"id": "c1", "type": "rejected_alternative",
+					"text":        "Kafka — rejected: ops burden",
+					"ref":         "ADR-0012",
+					"locator":     "owner/repo#34",
+					"closed":      true,
+					"closed_note": `do not propose "Kafka": ops burden (ADR-0012 · "Event transport")`,
+					"match_key":   "Kafka",
+				},
+			},
+		})
+	}))
+	defer ts.Close()
+
+	h := NewHosted(ts.URL, "lema_live_tok", ts.Client())
+	atoms, err := h.FetchClosedAtoms(context.Background())
+	if err != nil {
+		t.Fatalf("FetchClosedAtoms: %v", err)
+	}
+	if gotAuth != "Bearer lema_live_tok" || gotPath != "/closed-atoms" || gotMethod != http.MethodGet {
+		t.Errorf("request = %s %s auth %q", gotMethod, gotPath, gotAuth)
+	}
+	if len(atoms) != 1 {
+		t.Fatalf("got %d atoms, want 1", len(atoms))
+	}
+	a := atoms[0]
+	if !a.Closed || a.MatchKey != "Kafka" {
+		t.Errorf("closed/match_key not mapped: %+v", a)
+	}
+	if a.ClosedNote == "" || a.Ref != "ADR-0012" || a.Locator != "owner/repo#34" {
+		t.Errorf("provenance not mapped: %+v", a)
+	}
+}
+
+// TestHostedFetchClosedAtomsErrors: a non-200 surfaces as an error — the
+// caller (check_decided) must fail loud, never treat it as "nothing closed".
+func TestHostedFetchClosedAtomsErrors(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer ts.Close()
+
+	h := NewHosted(ts.URL, "bad", ts.Client())
+	if _, err := h.FetchClosedAtoms(context.Background()); err == nil {
+		t.Fatal("FetchClosedAtoms returned nil error on 401 — a silent empty no-go set is the bug this leg fixes")
+	}
+}

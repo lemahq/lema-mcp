@@ -64,7 +64,7 @@ type checkOutput struct {
 // checkDecided is the never-reopen gate: before proposing a direction, an agent
 // calls this and, if anything comes back CLOSED, surfaces the prior decision
 // instead of re-proposing the dead option.
-func checkDecided(_ context.Context, _ *mcp.CallToolRequest, in checkInput) (*mcp.CallToolResult, checkOutput, error) {
+func checkDecided(ctx context.Context, _ *mcp.CallToolRequest, in checkInput) (*mcp.CallToolResult, checkOutput, error) {
 	if capture == nil {
 		return nil, checkOutput{Topic: in.Topic}, nil
 	}
@@ -80,6 +80,19 @@ func checkDecided(_ context.Context, _ *mcp.CallToolRequest, in checkInput) (*mc
 	merged := append([]source.Atom{}, capture.ClosedAtoms()...)
 	if cs, ok := src.(source.ClosedSource); ok {
 		merged = append(merged, cs.ClosedAtoms()...)
+	}
+	// Hosted mode (build-plan D.1): pull the org's CLOSED set from the hosted
+	// graph — rejected alternatives of accepted, non-superseded decisions —
+	// so check_decided enforces the TEAM's record, not just this machine's
+	// capture file. A fetch failure FAILS the tool call: before this leg,
+	// hosted check_decided silently checked local capture only, and a silent
+	// degrade back to that is worse than a visible, retryable error.
+	if cf, ok := src.(source.ClosedFetcher); ok {
+		hostedClosed, err := cf.FetchClosedAtoms(ctx)
+		if err != nil {
+			return nil, checkOutput{}, fmt.Errorf("check_decided: hosted closed-decision fetch failed (refusing to answer from local capture alone): %w", err)
+		}
+		merged = append(merged, hostedClosed...)
 	}
 	closed := weightedGuardMatch(merged, in.Topic, guardMatchThreshold)
 	out := checkOutput{Topic: in.Topic, Decided: len(closed) > 0, Closed: closed}
