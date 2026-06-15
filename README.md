@@ -28,6 +28,34 @@ npx lema-mcp init     # wire this repo for capture + enforcement (idempotent)
 Then open the repo in your agent and ask *"why did we choose X?"* — or just let it
 work, and watch it record decisions and get nudged off the ones you settled.
 
+## Try it on React, Kubernetes, or Rust — no account
+
+Before it knows *your* repo, `lema-mcp` can already answer **why a popular project
+decided something** — over the recorded RFC/KEP decisions of React, Kubernetes,
+and Rust, served from lema's public demo. No account, no token:
+
+```bash
+npx lema-mcp try react        # or: kubernetes · rust
+```
+
+That writes a **read-only** `lema-try` server to `.mcp.json` (it coexists with a
+captured `lema` server — it doesn't touch your repo). Reload your agent's MCP
+servers and ask:
+
+> *"why did React adopt Hooks over mixins?"* — or, before you reach for a pattern,
+> *"was a global event bus ever ruled out in Kubernetes?"*
+
+You get **one synthesized, cited answer** — each `[n]` links to its GitHub source
+(the RFC/PR) where available — and an honest **"no recorded ruling"** when the
+record is silent, instead of a confident guess. Two tools light up (`public_ask`,
+`why_not_public`); nothing local is registered. Ready for the same on *your own*
+repo? `npx lema-mcp init` adds capture + enforcement.
+
+Grounded only in recorded decisions; claims are **summarized, not verbatim**;
+there are **no** relitigation/blast lenses (a cold import writes no
+decision→decision edges) and no source-authored date. It's a curated three-repo
+demo corpus, not analytics over your own graph.
+
 ## What never-reopen looks like
 
 Your agent settles a choice and calls `record_decision` with the chosen option
@@ -153,9 +181,10 @@ regex), `--openspec-dir`, `--capture-file` (override the JSONL path), and
 
 ## The tools
 
-Your agent calls these over MCP. Six are always on; two more
-(`search_docs` / `get_doc`) register automatically in local mode once a markdown
-tree is indexed.
+Your agent calls these over MCP. In the standard server **eight are always on**;
+`search_docs` / `get_doc` also register in local mode once a markdown tree is
+indexed. (The `npx lema-mcp try` public-demo server runs a public-only subset —
+just `public_ask` / `why_not_public`.)
 
 **Enforce + capture (the part read-only tools don't have):**
 
@@ -182,6 +211,17 @@ tree is indexed.
   sectioned, budgeted retrieval over the repo's project markdown (specs, READMEs,
   agent instructions, ADR/openspec full text) so the agent reads the sections that
   matter instead of whole files.
+
+**Public demo (no account — `npx lema-mcp try <repo>`):**
+
+- **`public_ask`** — ask why **React / Kubernetes / Rust** made a decision; one
+  cited answer over their recorded RFC/KEP decisions, surfacing status and the
+  ruled-out alternatives, with an honest abstain when the record is silent.
+  Tokenless, over the public demo.
+- **`why_not_public`** — before you propose a library / pattern / approach, check
+  whether one of those projects already ruled it out: a cited answer, or a plain
+  "no recorded decision against it" — which means *not on the record*, **not
+  *approved***.
 
 ```
 > search_decisions "why did we choose an MCP-first architecture?"
@@ -217,6 +257,11 @@ it's a side benefit. The reason to run lema is never-reopen, above.
 - **`demo`** — a ~30-second never-reopen walkthrough using the real capture +
   enforce path against a throwaway temp dir that's deleted afterward. Nothing is
   written to your repo. This is the fastest way to see the CLOSED behavior.
+- **`try <react|kubernetes|rust>`** — wire a **read-only public-demo** server
+  (`lema-try` in `.mcp.json`, public mode) so your agent can ask why those
+  projects decided things, no account. Distinct from `init` (which sets up
+  capture for *your* repo); the two coexist. Reload your agent's MCP servers
+  afterward.
 - **`guard`** — the PreToolUse hook body: reads the tool-call payload on stdin,
   emits a never-reopen permission decision on stdout. Advisory, fail-open, always
   exits 0. `init` installs it; you don't call it directly.

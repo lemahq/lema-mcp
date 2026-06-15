@@ -36,6 +36,18 @@ func TestRedactSecrets(t *testing.T) {
 			expected: "my [REDACTED]",
 		},
 		{
+			// Literal string only (ADR-0060): the key FORMAT lives in the
+			// proprietary internal/apikey and must never enter this file.
+			name:     "lema live key",
+			input:    "use lema_live_abcd1234_0123456789abcdefghijklmnopqrstuvwxyzABCDEFwXYZ12 for hosted",
+			expected: "use [REDACTED] for hosted",
+		},
+		{
+			name:     "lema test key",
+			input:    "sandbox lema_test_abcd1234_0123456789abcdefghij here",
+			expected: "sandbox [REDACTED] here",
+		},
+		{
 			name:     "Stripe key",
 			input:    "stripe key sk-1234567890abcdefghij123456",
 			expected: "stripe key [REDACTED]",

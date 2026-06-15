@@ -93,6 +93,12 @@ type AskSource struct {
 	URL       string `json:"url,omitempty"`
 	Status    string `json:"status,omitempty"`
 	Workspace string `json:"workspace,omitempty"`
+	// RejectedAlternatives + Relevance are served by the api (ask.go askSource)
+	// and were dropped at decode before WP1. Relevance is a *float64 cosine
+	// similarity in [0,1] — the same axis the 0.38 floor compares — NOT a
+	// confidence; nil when the atom has no dense distance (fts-only).
+	RejectedAlternatives []string `json:"rejected_alternatives,omitempty"`
+	Relevance            *float64 `json:"relevance,omitempty"`
 }
 
 // AskUsage is the token meter the hosted /ask returns: the saving side (claims
@@ -189,3 +195,70 @@ func (h *Hosted) Graph(context.Context, int, int) (Graph, error) {
 }
 
 var _ DecisionSource = (*Hosted)(nil)
+
+// ClosedFetcher is the context-aware, fallible sibling of ClosedSource: the
+// capability a network-backed DecisionSource exposes when it can fetch the
+// org's CLOSED no-go atoms from the hosted graph (GET /closed-atoms,
+// build-plan D.1). It is a separate interface — not a ClosedSource
+// implementation — because a network fetch can fail, and check_decided must
+// surface that failure rather than silently degrade to local-only checking
+// (the exact bug the hosted leg exists to fix).
+type ClosedFetcher interface {
+	FetchClosedAtoms(ctx context.Context) ([]Atom, error)
+}
+
+type hostedClosedResp struct {
+	Atoms []struct {
+		ID         string `json:"id"`
+		Type       string `json:"type"`
+		Text       string `json:"text"`
+		Ref        string `json:"ref"`
+		Locator    string `json:"locator"`
+		Closed     bool   `json:"closed"`
+		ClosedNote string `json:"closed_note"`
+		MatchKey   string `json:"match_key"`
+	} `json:"atoms"`
+	Truncated bool `json:"truncated"`
+}
+
+// FetchClosedAtoms GETs the hosted never-reopen feed: the org's rejected
+// alternatives from accepted, non-superseded decisions (ADR-0053 semantics
+// served server-side). The served match_key lands on Atom.MatchKey so the
+// client-side weighted matcher treats hosted closures exactly like locally
+// captured ones.
+func (h *Hosted) FetchClosedAtoms(ctx context.Context) ([]Atom, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.baseURL+"/closed-atoms", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+h.token)
+
+	resp, err := h.hc.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("hosted closed-atoms: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("hosted closed-atoms: status %d", resp.StatusCode)
+	}
+	var out hostedClosedResp
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("hosted closed-atoms decode: %w", err)
+	}
+	atoms := make([]Atom, len(out.Atoms))
+	for i, a := range out.Atoms {
+		atoms[i] = Atom{
+			ID:         a.ID,
+			Type:       a.Type,
+			Text:       a.Text,
+			Ref:        a.Ref,
+			Locator:    a.Locator,
+			Closed:     a.Closed,
+			ClosedNote: a.ClosedNote,
+			MatchKey:   a.MatchKey,
+		}
+	}
+	return atoms, nil
+}
+
+var _ ClosedFetcher = (*Hosted)(nil)

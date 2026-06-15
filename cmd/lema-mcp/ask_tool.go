@@ -24,20 +24,36 @@ type askInput struct {
 // already carries the additive locator/url (ADR-0056), so an agent can follow a
 // citation straight to the artifact.
 type askSourceOut struct {
-	N         int    `json:"n"`
-	Ref       string `json:"ref"`
-	Type      string `json:"type"`
-	Text      string `json:"text"`
-	Locator   string `json:"locator,omitempty"`
-	URL       string `json:"url,omitempty"`
-	Workspace string `json:"workspace,omitempty"`
+	N                    int      `json:"n"`
+	Ref                  string   `json:"ref"`
+	Type                 string   `json:"type"`
+	Text                 string   `json:"text"`
+	Locator              string   `json:"locator,omitempty"`
+	URL                  string   `json:"url,omitempty"`
+	Status               string   `json:"status,omitempty"`
+	Workspace            string   `json:"workspace,omitempty"`
+	RejectedAlternatives []string `json:"rejected_alternatives,omitempty"`
+	Relevance            *float64 `json:"relevance,omitempty"`
+	Receipt              string   `json:"receipt,omitempty"`
+}
+
+// toAskSourceOut maps a wire AskSource into the tool output, attaching the
+// derived one-line honesty receipt. Shared by the authed `ask` and public_ask.
+func toAskSourceOut(s source.AskSource) askSourceOut {
+	return askSourceOut{
+		N: s.N, Ref: s.Ref, Type: s.Type, Text: s.Text,
+		Locator: s.Locator, URL: s.URL, Status: s.Status, Workspace: s.Workspace,
+		RejectedAlternatives: s.RejectedAlternatives, Relevance: s.Relevance,
+		Receipt: sourceReceipt(s),
+	}
 }
 
 type askOutput struct {
-	Scope   string         `json:"scope"`
-	Answer  string         `json:"answer"`
-	Sources []askSourceOut `json:"sources"`
+	Scope   string          `json:"scope"`
+	Answer  string          `json:"answer"`
+	Sources []askSourceOut  `json:"sources"`
 	Usage   source.AskUsage `json:"usage"`
+	ROINote string          `json:"roi_note,omitempty"`
 }
 
 // askHosted handles the `ask` tool. It is only registered in hosted mode, so
@@ -52,12 +68,12 @@ func askHosted(ctx context.Context, _ *mcp.CallToolRequest, in askInput) (*mcp.C
 	}
 	sources := make([]askSourceOut, len(res.Sources))
 	for i, s := range res.Sources {
-		sources[i] = askSourceOut{
-			N: s.N, Ref: s.Ref, Type: s.Type, Text: s.Text,
-			Locator: s.Locator, URL: s.URL, Workspace: s.Workspace,
-		}
+		sources[i] = toAskSourceOut(s)
 	}
-	out := askOutput{Scope: res.Scope, Answer: res.Answer, Sources: sources, Usage: res.Usage}
+	out := askOutput{
+		Scope: res.Scope, Answer: res.Answer, Sources: sources, Usage: res.Usage,
+		ROINote: roiNote(res.Usage, len(res.Sources) == 0),
+	}
 	logUsage("ask", in.Query, len(sources), out)
 	return nil, out, nil
 }

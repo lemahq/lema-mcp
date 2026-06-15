@@ -59,6 +59,87 @@ We chose Postgres because of ACID guarantees.
 	}
 }
 
+// TestParseFile_ProjectSlug pins the optional `project:` frontmatter key
+// (ADR-0061 §8 Phase 1b): present → carried through so the hosted import can
+// resolve it to a project_id at ingest (skip-on-miss); absent → empty string,
+// never an error. This is the leg that feeds hosted project timelines from
+// repo ADR files.
+//
+// The malformed-form cases (list, mapping, number) pin the flexString
+// leniency: `project:` is an optional enrichment field with skip-on-miss
+// semantics, so a malformed value must degrade to a miss ("") — a parse error
+// here would propagate through ListAndParseADRs and 502 the ENTIRE repo
+// import, the same hazard flexRef prevents for superseded_by.
+func TestParseFile_ProjectSlug(t *testing.T) {
+	dir := t.TempDir()
+	writeADR(t, dir, "0030-with-project.md", `---
+title: With project
+status: accepted
+project: payments-replatform
+---
+body
+`)
+	writeADR(t, dir, "0031-without-project.md", `---
+title: Without project
+status: accepted
+---
+body
+`)
+	writeADR(t, dir, "0032-list-project.md", `---
+title: List project
+status: accepted
+project: [payments-replatform]
+---
+body
+`)
+	writeADR(t, dir, "0033-null-project.md", `---
+title: Null project
+status: accepted
+project: null
+---
+body
+`)
+	writeADR(t, dir, "0034-mapping-project.md", `---
+title: Mapping project
+status: accepted
+project: {slug: payments-replatform}
+---
+body
+`)
+	writeADR(t, dir, "0035-number-project.md", `---
+title: Number project
+status: accepted
+project: 12
+---
+body
+`)
+	adrs, err := ParseDir(dir)
+	if err != nil {
+		t.Fatalf("ParseDir must not fail on any project: form — an optional enrichment field must never block a whole repo's import: %v", err)
+	}
+	if len(adrs) != 6 {
+		t.Fatalf("got %d adrs, want 6", len(adrs))
+	}
+	if adrs[0].Project != "payments-replatform" {
+		t.Errorf("scalar Project = %q, want payments-replatform", adrs[0].Project)
+	}
+	if adrs[1].Project != "" {
+		t.Errorf("Project = %q, want empty when frontmatter has no project key", adrs[1].Project)
+	}
+	if adrs[2].Project != "payments-replatform" {
+		t.Errorf("list-form Project = %q, want payments-replatform (natural authoring mistake — siblings tags/supersedes ARE lists — must resolve, not error)", adrs[2].Project)
+	}
+	if adrs[3].Project != "" {
+		t.Errorf("null Project = %q, want empty (explicit null is a miss, not an error)", adrs[3].Project)
+	}
+	if adrs[4].Project != "" {
+		t.Errorf("mapping Project = %q, want empty (unsupported shape degrades to a miss so the import stays safe)", adrs[4].Project)
+	}
+	if adrs[5].Project != "12" {
+		t.Errorf("number Project = %q, want \"12\" (yaml coerces the scalar; a harmless miss at resolution time)", adrs[5].Project)
+	}
+}
+
 // TestParseFile_ZeroPaddedRefsAreDecimalNotOctal pins the bug that running the
 // spike surfaced: YAML resolves a zero-padded scalar like 0012 as OCTAL (= 10),
 // which would silently point ADR edges at the wrong decisions. References must
@@ -213,5 +294,54 @@ func TestParseDirMatching_LooserPatternAndNumberFallback(t *testing.T) {
 	}
 	if all[0].Number != 1 || all[0].Slug != "001-use-madr" || all[0].Title != "Use MADR" {
 		t.Errorf("non-canonical parse = #%d %q %q, want #1 001-use-madr \"Use MADR\"", all[0].Number, all[0].Slug, all[0].Title)
+	}
+}
+
+// Foreign repos rarely use lema's YAML frontmatter — MADR 2.x puts status in a
+// metadata bullet under the H1 (`- Status: accepted`), Nygard/adr-tools in a
+// `## Status` section. Without sniffing those, every imported foreign ADR
+// landed status="" → proposed → "in deliberation" in the UI (48/49 on the
+// 2026-06-12 fxa stranger walk). Frontmatter, when present, always wins.
+func TestParseBytes_StatusSniffedFromBody(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"madr dash bullet", "# T\n\n- Status: accepted\n- Deciders: a, b\n\n## Context\n", "accepted"},
+		{"madr star bullet uppercase", "# T\n\n* Status: REJECTED\n\n## Context\n", "rejected"},
+		{"madr superseded by link", "# T\n\n- Status: superseded by [ADR-0017](0017-switch.md)\n\n## Context\n", "superseded"},
+		{"nygard status section", "# T\n\n## Status\n\nAccepted\n\n## Context\n\ntext\n", "accepted"},
+		{"nygard section superseded link", "# T\n\n## Status\n\nSuperseded by [2. New](0002-new.md)\n\n## Context\n", "superseded"},
+		{"template placeholder is ambiguous", "# T\n\n* Status: [proposed | rejected | accepted | deprecated | superseded by [ADR-0005](0005-example.md)] <!-- optional -->\n\n## Context\n", ""},
+		{"unrecognized value abstains", "# T\n\n- Status: Final\n\n## Context\n", ""},
+		{"bullet after first section ignored", "# T\n\n## Context\n\n- Status: rejected was the old state\n", ""},
+		{"prose status line ignored", "# T\n\n## Context\n\nStatus: the proposal was rejected upstream.\n", ""},
+		{"no marker at all", "# T\n\n## Context\n\nWe decided things.\n", ""},
+		{"empty status section", "# T\n\n## Status\n\n## Context\n", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a, err := ParseBytes([]byte(c.raw), "0001-x.md", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if a.Status != c.want {
+				t.Errorf("Status = %q, want %q", a.Status, c.want)
+			}
+		})
+	}
+}
+
+// Explicit frontmatter status is authoritative — body sniffing only fills the
+// gap when frontmatter says nothing.
+func TestParseBytes_FrontmatterStatusBeatsBodySniff(t *testing.T) {
+	raw := "---\ntitle: T\nstatus: proposed\n---\n\n- Status: accepted\n\n## Status\n\nAccepted\n"
+	a, err := ParseBytes([]byte(raw), "0002-x.md", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Status != "proposed" {
+		t.Errorf("Status = %q, want frontmatter's 'proposed'", a.Status)
 	}
 }

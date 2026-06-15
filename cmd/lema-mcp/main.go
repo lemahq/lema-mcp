@@ -43,6 +43,13 @@ var (
 	corpusSize  int        // number of indexed decisions; 0 means empty corpus
 )
 
+// defaultPublicAPIURL is the compiled-in public lema-api root for public_ask:
+// api.lema.sh — a Cloud Run domain mapping onto the prod lema-api (ADR-0088).
+// LEMA_PUBLIC_API_URL always overrides it (stage / CI / self-host). So a fresh
+// `npx lema-mcp` (and `npx lema-mcp try <repo>`) reaches the public demo with
+// zero config out of the box.
+const defaultPublicAPIURL = "https://api.lema.sh"
+
 // secretPatterns / redactSecrets scrub credential-shaped substrings from a query
 // before it is written to the usage log. The query is the agent's prose, which can
 // inadvertently include a pasted token; defense-in-depth so a local log never
@@ -53,6 +60,9 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(api[_\-]?key|secret|token|password)\s+is\s+[a-zA-Z0-9\-\._~+/]+`),
 	regexp.MustCompile(`\bgh[pousr]_[a-zA-Z0-9_]{36,255}\b`),
 	regexp.MustCompile(`\bsk-[a-zA-Z0-9]{20,}\b`),
+	// lema_live_/lema_test_ API keys (ADR-0060). Literal pattern only — the
+	// format definition stays in the proprietary internal/apikey, never here.
+	regexp.MustCompile(`\blema_(live|test)_[A-Za-z0-9_]{20,}\b`),
 }
 
 func redactSecrets(s string) string {
@@ -336,6 +346,11 @@ func main() {
 				log.Fatalf("lema-mcp capture-rate: %v", err)
 			}
 			return
+		case "try":
+			if err := runTry(os.Args[2:]); err != nil {
+				log.Fatalf("lema-mcp try: %v", err)
+			}
+			return
 		case "serve":
 			// Drop "serve" so the flags below parse; the engine setup is shared,
 			// then the --http branch starts the HTTP server instead of stdio.
@@ -380,18 +395,48 @@ func main() {
 		}
 	}
 
-	// Hosted mode (ADR-0040): when LEMA_API_URL is set, search_decisions runs
-	// against the hosted atom layer via POST /retrieve instead of the local
-	// lexical index, and the local ADR discovery below is skipped entirely.
-	if apiURL := os.Getenv("LEMA_API_URL"); apiURL != "" {
-		token := os.Getenv("LEMA_API_TOKEN")
+	// Public demo mode (the `try` install, LEMA_MCP_MODE=public): skip ALL local
+	// setup and serve only the tokenless public tools. Short-circuits here.
+	if os.Getenv("LEMA_MCP_MODE") == "public" {
+		if err := runPublicOnlyServer(); err != nil {
+			log.Fatalf("lema-mcp public mode: %v", err)
+		}
+		return
+	}
+
+	// Hosted mode (ADR-0040): when a hosted URL is configured, search_decisions
+	// runs against the hosted atom layer via POST /retrieve instead of the
+	// local lexical index, and the local ADR discovery below is skipped
+	// entirely. Configuration comes from LEMA_API_URL/LEMA_API_TOKEN env, with
+	// the per-user ~/.config/lema/credentials file filling whatever env leaves
+	// unset (ADR-0060 resolved question 1 — the channel for GUI-launched
+	// editors whose MCP child doesn't inherit shell env). Env always wins.
+	if apiURL, token, usedFile := resolveHostedConfig(); apiURL != "" {
 		if token == "" {
-			log.Fatal("lema-mcp: LEMA_API_TOKEN is required when LEMA_API_URL is set")
+			log.Fatal("lema-mcp: LEMA_API_TOKEN is required when LEMA_API_URL is set (env, or ~/.config/lema/credentials)")
 		}
 		hostedSrc = source.NewHosted(apiURL, token, nil)
 		src = hostedSrc
 		corpusSize = -1 // hosted: remote corpus size is unknown
-		fmt.Fprintf(os.Stderr, "lema-mcp: hosted atom search + ask via %s\n", apiURL)
+		via := ""
+		if usedFile {
+			via = " (credentials file)"
+		}
+		fmt.Fprintf(os.Stderr, "lema-mcp: hosted atom search + ask via %s%s\n", apiURL, via)
+	}
+
+	// Public demo graphs (React/k8s/Rust): the tokenless read path into the seeded
+	// public store at no-auth POST /ask-public. Independent of hosted/local mode —
+	// public_ask is registered unconditionally — so an agent gets cited upstream
+	// context with no account. LEMA_PUBLIC_API_URL overrides the baked default.
+	publicAPI := os.Getenv("LEMA_PUBLIC_API_URL")
+	if publicAPI == "" {
+		publicAPI = defaultPublicAPIURL
+	}
+	if publicAPI != "" {
+		publicSrc = source.NewPublic(publicAPI, nil)
+	} else {
+		fmt.Fprintln(os.Stderr, "lema-mcp: public_ask disabled — set LEMA_PUBLIC_API_URL to the public lema-api root")
 	}
 
 	if src == nil {
@@ -542,6 +587,23 @@ func main() {
 		Name:        "check_decided",
 		Description: "Before proposing a direction (a library, an approach, a design), check whether it is already decided and CLOSED. Returns prior decisions that rule the option out; if anything comes back, do not re-propose it — surface the existing decision instead.",
 	}, checkDecided)
+
+	// Public demo read path (tokenless) — registered UNCONDITIONALLY, unlike the
+	// authed `ask`: no account needed, so the no-account wedge pulls cited upstream
+	// context (React/k8s/Rust) in the agent loop. Honesty boundary is pinned in the
+	// description: cites recorded decisions, abstains when silent, summarizes (not
+	// verbatim), no relitigation/blast lenses on imports, no source date.
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "public_ask",
+		Description: publicAskDescription,
+	}, publicAsk)
+	// Pull-based pre-decision check (the honest residue of the killed edit-path
+	// guard) — registered unconditionally. Steering lives in the description: call
+	// it BEFORE proposing a direction.
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "why_not_public",
+		Description: whyNotPublicDescription,
+	}, whyNotPublic)
 
 	// Hosted-only `ask` (ADR-0059 shape A) — a synthesized, cited answer over the
 	// hosted graph. Registered only in hosted mode (LEMA_API_URL set): the local
