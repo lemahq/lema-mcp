@@ -55,8 +55,8 @@ func runPublicOnlyServer() error {
 		fmt.Fprintln(os.Stderr, "lema-mcp: public mode but no LEMA_PUBLIC_API_URL / baked default — public_ask will error until set")
 	}
 	server := mcp.NewServer(&mcp.Implementation{Name: "lema-mcp", Version: "0.7.0"}, nil)
-	mcp.AddTool(server, &mcp.Tool{Name: "public_ask", Description: publicAskDescription}, publicAsk)
-	mcp.AddTool(server, &mcp.Tool{Name: "why_not_public", Description: whyNotPublicDescription}, whyNotPublic)
+	mcp.AddTool(server, publicAskTool, publicAsk)
+	mcp.AddTool(server, whyNotPublicTool, whyNotPublic)
 	fmt.Fprintln(os.Stderr, "lema-mcp: public demo mode — public_ask + why_not_public over React/k8s/Rust, no account")
 	return server.Run(context.Background(), &mcp.StdioTransport{})
 }

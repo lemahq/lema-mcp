@@ -455,6 +455,8 @@ const captureProtocol = `## lema decision capture
 This repo runs the **lema** MCP server. Keep decisions durable and avoid
 re-litigating settled ones:
 
+- **Before you write or change code**, search the existing decisions for the
+  relevant constraints and what was already ruled out with ` + "`search_decisions`" + `.
 - **When you settle a non-trivial decision** (a library, a pattern, an
   architecture or policy choice — not a rename or a bug fix), call ` + "`record_decision`" + `
   with the option you ` + "`chose`" + ` **and** the ` + "`rejected`" + ` alternatives and *why* each was
