@@ -45,6 +45,28 @@ Verify with `npx lema-mcp@latest demo`.
    ```
    then point a coding agent at the repo and ask "why did we choose X?".
 
+## MCP registry (discovery)
+
+Listing `lema-mcp` in the public [MCP registry](https://registry.modelcontextprotocol.io)
+makes it discoverable by coding agents and federates to PulseMCP / Glama / Smithery.
+It is **discovery only** — the server still runs from npm / your own host. `server.json`
+(repo root) is the manifest; the `mcp-registry-publish` job in `release.yml` publishes it
+on a `v*` tag.
+
+It is **off until you opt in** (mirrors the npm-publish gate):
+
+1. **Namespace.** We use `io.github.lemahq/lema-mcp`, which GitHub OIDC from this repo
+   authenticates automatically — no secret to add.
+2. **Regenerate against the current schema.** Schemas drift; run once locally:
+   `mcp-publisher init` (overwrites `server.json` with the current `$schema`), re-apply
+   our name/description/package fields, then `mcp-publisher validate ./server.json`.
+3. **Verify the CI install/login lines** in `release.yml` against the current
+   [registry release](https://github.com/modelcontextprotocol/registry/releases).
+4. **Flip it on:** set repo variable `MCP_REGISTRY_PUBLISH_ENABLED=true`. The next
+   `v*` tag pins `server.json`'s version to the tag, validates, logs in via OIDC, and
+   publishes. Verify discovery:
+   `curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=lema" | jq '.servers[].name'`.
+
 ## Notes
 
 - Pure-Go, CGO-free → cross-compiled from any host; no platform build machines.

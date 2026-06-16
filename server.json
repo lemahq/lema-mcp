@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.lemahq/lema-mcp",
+  "description": "Local, database-less MCP server that makes your repo's decisions — and what it ruled out — queryable by your coding agent, and lets the agent record new ones with enforced never-reopen.",
+  "version": "0.8.2",
+  "repository": {
+    "url": "https://github.com/lemahq/lema-mcp",
+    "source": "github"
+  },
+  "websiteUrl": "https://lema.sh",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "lema-mcp",
+      "version": "0.8.2",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

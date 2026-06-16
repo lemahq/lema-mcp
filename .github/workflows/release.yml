@@ -85,3 +85,54 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: bash scripts/publish.sh
+
+  # Gated follow-on: registers the server in the public MCP registry
+  # (registry.modelcontextprotocol.io) so coding agents can DISCOVER lema-mcp —
+  # today `lema` returns zero registry results. Discovery only: the server still
+  # runs from npm / your own host; the registry just lists it (and federates to
+  # PulseMCP / Glama / Smithery).
+  #
+  # Inert until repo variable MCP_REGISTRY_PUBLISH_ENABLED=true. One-time setup
+  # before enabling (see PUBLISHING.md → "MCP registry"):
+  #   1. Namespace: io.github.lemahq/* is authenticated by GitHub OIDC from this
+  #      repo automatically — no secret needed.
+  #   2. Run `mcp-publisher init` locally once to regenerate server.json against
+  #      the CURRENT schema, then `mcp-publisher validate ./server.json`.
+  #   3. Verify the install + login commands below against the current
+  #      github.com/modelcontextprotocol/registry release, then flip the var.
+  mcp-registry-publish:
+    name: publish to MCP registry
+    needs: build-release
+    if: ${{ vars.MCP_REGISTRY_PUBLISH_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # GitHub OIDC authenticates the io.github.lemahq/* namespace
+    steps:
+      - uses: actions/checkout@v4
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+      - name: Install mcp-publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo modelcontextprotocol/registry \
+            --pattern "mcp-publisher_*_$(uname -s | tr '[:upper:]' '[:lower:]')_amd64.tar.gz" \
+            --output mcp-publisher.tgz
+          tar xzf mcp-publisher.tgz mcp-publisher
+          chmod +x mcp-publisher
+
+      - name: Pin server.json version to the tag (single source of truth = the tag)
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          tmp="$(mktemp)"
+          jq --arg v "$v" '.version=$v | .packages[0].version=$v' server.json > "$tmp" && mv "$tmp" server.json
+
+      - name: Validate server.json
+        run: ./mcp-publisher validate ./server.json
+
+      - name: Login (GitHub OIDC) + publish
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish ./server.json
