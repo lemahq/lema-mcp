@@ -93,3 +93,57 @@ func (p *Public) PublicAsk(ctx context.Context, slug, query string) (AskResult, 
 		},
 	}, nil
 }
+
+// SettledDecision is one governing decision surfaced by /settled.
+type SettledDecision struct {
+	Ref    string `json:"ref"`
+	Reason string `json:"reason"`
+}
+
+// SettledResult is the typed public verdict: state + the recorded reasoning.
+type SettledResult struct {
+	Repo      string            `json:"repo"`
+	Topic     string            `json:"topic"`
+	Settled   string            `json:"settled"`
+	Decisions []SettledDecision `json:"decisions"`
+	Note      string            `json:"note"`
+}
+
+type settledReq struct {
+	Slug  string `json:"slug"`
+	Topic string `json:"topic"`
+}
+
+// Settled POSTs {slug, topic} to the no-auth POST /settled and returns the typed
+// "is this already decided, and why?" result. 404 -> ErrPublicGraphNotLoaded,
+// 429 -> ErrPublicRateLimited (same honest degradation as PublicAsk).
+func (p *Public) Settled(ctx context.Context, slug, topic string) (SettledResult, error) {
+	body, err := json.Marshal(settledReq{Slug: slug, Topic: topic})
+	if err != nil {
+		return SettledResult{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/settled", bytes.NewReader(body))
+	if err != nil {
+		return SettledResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := p.hc.Do(req)
+	if err != nil {
+		return SettledResult{}, fmt.Errorf("settled: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return SettledResult{}, ErrPublicGraphNotLoaded
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return SettledResult{}, ErrPublicRateLimited
+	}
+	if resp.StatusCode != http.StatusOK {
+		return SettledResult{}, fmt.Errorf("settled: status %d", resp.StatusCode)
+	}
+	var out SettledResult
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return SettledResult{}, fmt.Errorf("settled decode: %w", err)
+	}
+	return out, nil
+}

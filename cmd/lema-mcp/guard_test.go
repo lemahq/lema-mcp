@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/lemahq/lema-mcp/internal/source"
+	"github.com/lemahq/lema-mcp/internal/verdict"
 )
 
 func newTestStore(t *testing.T) *source.CaptureStore {
@@ -61,7 +62,7 @@ func TestGuardQuery(t *testing.T) {
 }
 
 func TestTokenizeSplitsIdentifiers(t *testing.T) {
-	got := strings.Join(tokenize("kafka.NewProducer() + KafkaBrokers"), ",")
+	got := strings.Join(verdict.Tokenize("kafka.NewProducer() + KafkaBrokers"), ",")
 	for _, w := range []string{"kafka", "new", "producer", "brokers"} {
 		if !strings.Contains(got, w) {
 			t.Errorf("tokenize missing %q in %q", w, got)

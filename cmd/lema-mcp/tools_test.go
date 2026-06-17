@@ -36,6 +36,7 @@ func TestToolsMeetDirectoryCriteria(t *testing.T) {
 	mcp.AddTool(server, recordDecisionTool, recordDecision)
 	mcp.AddTool(server, checkDecidedTool, checkDecided)
 	mcp.AddTool(server, publicAskTool, publicAsk)
+	mcp.AddTool(server, settledTool, settled)
 	mcp.AddTool(server, whyNotPublicTool, whyNotPublic)
 	mcp.AddTool(server, askTool, askHosted)
 	mcp.AddTool(server, searchDocsTool, searchDocs)

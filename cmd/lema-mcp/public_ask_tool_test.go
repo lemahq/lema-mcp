@@ -129,3 +129,89 @@ func TestPublicAskAbstainHasNoGroundingNote(t *testing.T) {
 		t.Errorf("abstain must NOT carry a grounding note: %q", out.GroundingNote)
 	}
 }
+
+// TestPublicAskGroundedCarriesCaveats (ADR-0097 WP4): a grounded answer must carry
+// the absent-capability caveats as structured data and report record_silent=false.
+// The caveats are the overclaim guardrail — a cited public answer must not read as
+// if the full decision graph (edges, relitigation history, dated sources) were
+// behind it. If they silently drop, the public surface overstates what it knows.
+func TestPublicAskGroundedCarriesCaveats(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"scope": "react-rfcs", "answer": "Mixins were rejected [1].",
+			"sources": []map[string]any{{"n": 1, "ref": "reactjs/rfcs#68", "type": "rejected", "text": "x"}},
+			"usage":   map[string]any{"atoms_tokens": 10, "source_tokens": 100, "compression_ratio": 10.0},
+		})
+	}))
+	defer ts.Close()
+	prev := publicSrc
+	publicSrc = source.NewPublic(ts.URL, ts.Client())
+	defer func() { publicSrc = prev }()
+
+	_, out, err := publicAsk(context.Background(), nil, publicAskInput{Repo: "react", Query: "x"})
+	if err != nil {
+		t.Fatalf("publicAsk: %v", err)
+	}
+	if out.RecordSilent {
+		t.Error("a grounded answer must report record_silent=false")
+	}
+	if len(out.Caveats) == 0 {
+		t.Fatal("grounded answer must carry the absent-capability caveats")
+	}
+	joined := strings.ToLower(strings.Join(out.Caveats, " "))
+	for _, want := range []string{"graph", "relitigation", "dated"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("caveats must name the absent capability %q: %v", want, out.Caveats)
+		}
+	}
+}
+
+// TestPublicAskAbstainIsRecordSilent (ADR-0097 WP4): the genuine abstain (loaded
+// graph, no ruling) must set record_silent=true so an agent can branch on "unknown"
+// without parsing prose — and must NOT carry caveats (there is no grounded claim to
+// qualify). This is the machine-readable half of "silent ≠ approved".
+func TestPublicAskAbstainIsRecordSilent(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"scope": "react-rfcs", "answer": "No recorded decision matched.",
+			"sources": []any{}, "usage": map[string]any{},
+		})
+	}))
+	defer ts.Close()
+	prev := publicSrc
+	publicSrc = source.NewPublic(ts.URL, ts.Client())
+	defer func() { publicSrc = prev }()
+
+	_, out, err := publicAsk(context.Background(), nil, publicAskInput{Repo: "react", Query: "x"})
+	if err != nil {
+		t.Fatalf("publicAsk: %v", err)
+	}
+	if !out.RecordSilent {
+		t.Error("abstain must set record_silent=true (silent ≠ approved)")
+	}
+	if len(out.Caveats) != 0 {
+		t.Errorf("abstain has no grounded claim to qualify; caveats must be empty: %v", out.Caveats)
+	}
+}
+
+// TestPublicAskDegradeIsNotRecordSilent (ADR-0097 WP4): the operational degrade
+// path (graph not loaded) returns zero sources but must NOT claim record_silent —
+// we never consulted a loaded record, so "the record is silent on this" would be a
+// false claim. record_silent is reserved for a real consultation that found nothing.
+func TestPublicAskDegradeIsNotRecordSilent(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+	prev := publicSrc
+	publicSrc = source.NewPublic(ts.URL, ts.Client())
+	defer func() { publicSrc = prev }()
+
+	_, out, err := publicAsk(context.Background(), nil, publicAskInput{Repo: "rust", Query: "q"})
+	if err != nil {
+		t.Fatalf("publicAsk should degrade, not error: %v", err)
+	}
+	if out.RecordSilent {
+		t.Error("graph-not-loaded degrade must NOT report record_silent (it never consulted the record)")
+	}
+}

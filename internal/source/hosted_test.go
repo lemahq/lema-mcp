@@ -160,10 +160,12 @@ func TestHostedAskErrorsOnNon200(t *testing.T) {
 // on — alongside closed/closed_note/ref/locator.
 func TestHostedFetchClosedAtoms(t *testing.T) {
 	var gotAuth, gotPath, gotMethod string
+	var gotScope []string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		gotPath = r.URL.Path
 		gotMethod = r.Method
+		gotScope = r.URL.Query()["workspace_ids"]
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"atoms": []map[string]any{
 				{
@@ -181,12 +183,15 @@ func TestHostedFetchClosedAtoms(t *testing.T) {
 	defer ts.Close()
 
 	h := NewHosted(ts.URL, "lema_live_tok", ts.Client())
-	atoms, err := h.FetchClosedAtoms(context.Background())
+	atoms, err := h.FetchClosedAtoms(context.Background(), []string{"ws-1", "ws-2"})
 	if err != nil {
 		t.Fatalf("FetchClosedAtoms: %v", err)
 	}
 	if gotAuth != "Bearer lema_live_tok" || gotPath != "/closed-atoms" || gotMethod != http.MethodGet {
 		t.Errorf("request = %s %s auth %q", gotMethod, gotPath, gotAuth)
+	}
+	if len(gotScope) != 2 || gotScope[0] != "ws-1" || gotScope[1] != "ws-2" {
+		t.Errorf("workspace_ids forwarded = %v, want [ws-1 ws-2] (scope kills cross-repo false ruled_out)", gotScope)
 	}
 	if len(atoms) != 1 {
 		t.Fatalf("got %d atoms, want 1", len(atoms))
@@ -209,7 +214,7 @@ func TestHostedFetchClosedAtomsErrors(t *testing.T) {
 	defer ts.Close()
 
 	h := NewHosted(ts.URL, "bad", ts.Client())
-	if _, err := h.FetchClosedAtoms(context.Background()); err == nil {
+	if _, err := h.FetchClosedAtoms(context.Background(), nil); err == nil {
 		t.Fatal("FetchClosedAtoms returned nil error on 401 — a silent empty no-go set is the bug this leg fixes")
 	}
 }

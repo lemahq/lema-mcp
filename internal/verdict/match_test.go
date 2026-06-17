@@ -1,4 +1,4 @@
-package main
+package verdict
 
 import (
 	"testing"
@@ -40,8 +40,8 @@ func TestGuardMatchRecall(t *testing.T) {
 	corpus := evalCorpus()
 
 	positives := []struct {
-		topic    string
-		wantKey  string // the MatchKey the top hit must carry
+		topic   string
+		wantKey string // the MatchKey the top hit must carry
 	}{
 		{"should we use MongoDB for the vector store?", "MongoDB Atlas Vector Search"},
 		{"let's switch the index to Pinecone", "Pinecone / dedicated vector database"},
@@ -54,7 +54,7 @@ func TestGuardMatchRecall(t *testing.T) {
 	}
 	for _, tt := range positives {
 		t.Run("hit/"+tt.wantKey, func(t *testing.T) {
-			hits := weightedGuardMatch(corpus, tt.topic, guardMatchThreshold)
+			hits := Match(corpus, tt.topic, MatchThreshold)
 			if len(hits) == 0 {
 				t.Fatalf("topic %q matched NOTHING, want top hit %q (recall miss)", tt.topic, tt.wantKey)
 			}
@@ -72,15 +72,15 @@ func TestGuardMatchPrecision(t *testing.T) {
 	// nothing at all. A false never-reopen here is an uninstall, so these MUST
 	// return empty.
 	negatives := []string{
-		"store the user config in the database",      // "store"/"database" are generic, not the option
-		"add request logging to the API middleware",  // shares nothing distinctive
-		"rename a variable in the parser",            // unrelated
-		"improve CI pipeline speed",                  // unrelated
-		"add a retry to the vector embedding call",   // "vector"/"embedding" generic, not "MongoDB"/"Pinecone"
+		"store the user config in the database",     // "store"/"database" are generic, not the option
+		"add request logging to the API middleware", // shares nothing distinctive
+		"rename a variable in the parser",           // unrelated
+		"improve CI pipeline speed",                 // unrelated
+		"add a retry to the vector embedding call",  // "vector"/"embedding" generic, not "MongoDB"/"Pinecone"
 	}
 	for _, topic := range negatives {
 		t.Run("miss/"+topic, func(t *testing.T) {
-			hits := weightedGuardMatch(corpus, topic, guardMatchThreshold)
+			hits := Match(corpus, topic, MatchThreshold)
 			if len(hits) != 0 {
 				t.Errorf("topic %q FALSE-matched %q (false never-reopen = uninstall)", topic, hits[0].MatchKey)
 			}

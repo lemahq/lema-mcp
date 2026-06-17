@@ -38,17 +38,18 @@ and Rust, served from lema's public demo. No account, no token:
 npx lema-mcp try react        # or: kubernetes · rust
 ```
 
-That writes a **read-only** `lema-try` server to `.mcp.json` (it coexists with a
-captured `lema` server — it doesn't touch your repo). Reload your agent's MCP
-servers and ask:
+That writes a **read-only** `lema` server (public mode) to `.mcp.json` — and if
+you already have the authed `lema` server from `init`, it's left untouched (that
+server already serves these public tools). Reload your agent's MCP servers and
+ask:
 
 > *"why did React adopt Hooks over mixins?"* — or, before you reach for a pattern,
 > *"was a global event bus ever ruled out in Kubernetes?"*
 
 You get **one synthesized, cited answer** — each `[n]` links to its GitHub source
 (the RFC/PR) where available — and an honest **"no recorded ruling"** when the
-record is silent, instead of a confident guess. Two tools light up (`public_ask`,
-`why_not_public`); nothing local is registered. Ready for the same on *your own*
+record is silent, instead of a confident guess. Two tools light up (`why_decided`,
+`settled`); nothing local is registered. Ready for the same on *your own*
 repo? `npx lema-mcp init` adds capture + enforcement.
 
 Grounded only in recorded decisions; claims are **summarized, not verbatim**;
@@ -184,7 +185,7 @@ regex), `--openspec-dir`, `--capture-file` (override the JSONL path), and
 Your agent calls these over MCP. In the standard server **eight are always on**;
 `search_docs` / `get_doc` also register in local mode once a markdown tree is
 indexed. (The `npx lema-mcp try` public-demo server runs a public-only subset —
-just `public_ask` / `why_not_public`.)
+just `why_decided` / `settled`.)
 
 **Enforce + capture (the part read-only tools don't have):**
 
@@ -214,14 +215,16 @@ just `public_ask` / `why_not_public`.)
 
 **Public demo (no account — `npx lema-mcp try <repo>`):**
 
-- **`public_ask`** — ask why **React / Kubernetes / Rust** made a decision; one
+- **`why_decided`** — ask why **React / Kubernetes / Rust** made a decision; one
   cited answer over their recorded RFC/KEP decisions, surfacing status and the
-  ruled-out alternatives, with an honest abstain when the record is silent.
-  Tokenless, over the public demo.
-- **`why_not_public`** — before you propose a library / pattern / approach, check
-  whether one of those projects already ruled it out: a cited answer, or a plain
-  "no recorded decision against it" — which means *not on the record*, **not
-  *approved***.
+  ruled-out alternatives, with an honest abstain when the record is silent. The
+  abstain is also machine-readable (`record_silent: true`), and a grounded answer
+  carries `caveats` naming what the public demo does *not* cover. Tokenless.
+- **`settled`** — before you propose a library / pattern / approach, check whether
+  one of those projects already ruled it out. Returns a typed `state`
+  (`settled` / `not_settled` / `unsure`) plus each governing decision's ref and
+  recorded reasoning; `not_settled` means *not on the record*, **not *approved***.
+  (`why_not_public` remains as a deprecated alias.)
 
 ```
 > search_decisions "why did we choose an MCP-first architecture?"

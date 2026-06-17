@@ -11,20 +11,25 @@ import (
 	"github.com/lemahq/lema-mcp/internal/source"
 )
 
-func TestWhyNotPublicAppliesRuledOutTemplate(t *testing.T) {
-	var gotAuth, gotQuery string
+// why_not_public is now a deprecated thin alias for settled — both call runSettled
+// and return a settledOutput. These tests verify the alias wires up correctly and
+// that the /settled endpoint is called (no query template, no Authorization header).
+
+func TestWhyNotPublicCallsSettledEndpoint(t *testing.T) {
+	var gotPath string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		var req map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		gotQuery, _ = req["query"].(string)
+		gotPath = r.URL.Path
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("must send no Authorization header, got %q", r.Header.Get("Authorization"))
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"scope": "react-rfcs", "answer": "Yes — mixins were ruled out in favor of Hooks [1].",
-			"sources": []map[string]any{{
-				"n": 1, "ref": "reactjs/rfcs#68", "type": "rejected", "text": "mixins ruled out",
-				"status": "accepted", "rejected_alternatives": []string{"mixins"}, "relevance": 0.82,
+			"repo": "react-rfcs", "topic": "mixins",
+			"settled": "settled",
+			"decisions": []map[string]any{{
+				"ref":    "reactjs/rfcs#68",
+				"reason": "Mixins introduce implicit dependencies and name collisions; Hooks were chosen instead.",
 			}},
-			"usage": map[string]any{"atoms_tokens": 150, "source_tokens": 3000, "compression_ratio": 20.0},
+			"note": "",
 		})
 	}))
 	defer ts.Close()
@@ -36,18 +41,17 @@ func TestWhyNotPublicAppliesRuledOutTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("whyNotPublic: %v", err)
 	}
-	if gotAuth != "" {
-		t.Errorf("must send no Authorization header, got %q", gotAuth)
+	if !strings.HasSuffix(gotPath, "/settled") {
+		t.Errorf("expected /settled endpoint, got path %q", gotPath)
 	}
-	if !strings.Contains(gotQuery, "mixins") {
-		t.Errorf("query must contain the option; got %q", gotQuery)
+	if out.State != "settled" {
+		t.Errorf("expected state=settled, got %q", out.State)
 	}
-	low := strings.ToLower(gotQuery)
-	if !strings.Contains(low, "ruled out") && !strings.Contains(low, "rejected") && !strings.Contains(low, "discouraged") {
-		t.Errorf("query must be framed as a ruled-out check; got %q", gotQuery)
+	if len(out.Decisions) != 1 || out.Decisions[0].Ref != "reactjs/rfcs#68" {
+		t.Errorf("expected one decision with ref reactjs/rfcs#68, got %+v", out.Decisions)
 	}
-	if len(out.Sources) != 1 || !strings.Contains(out.Sources[0].Receipt, "ruled out: mixins") {
-		t.Errorf("expected the cited ruled-out receipt; got %+v", out.Sources)
+	if !strings.Contains(out.Decisions[0].Reason, "Mixins") {
+		t.Errorf("reason should mention Mixins, got %q", out.Decisions[0].Reason)
 	}
 }
 
