@@ -7,6 +7,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/lemahq/lema-mcp/internal/source"
+	"github.com/lemahq/lema-mcp/internal/verdict"
 )
 
 type recordInput struct {
@@ -49,6 +50,10 @@ func recordDecision(_ context.Context, _ *mcp.CallToolRequest, in recordInput) (
 
 type checkInput struct {
 	Topic string `json:"topic" jsonschema:"the direction or option you are about to propose — checked against decisions already settled and closed"`
+	// WorkspaceIDs optionally scopes the check to specific workspaces. Omit to
+	// check every workspace you can see; pass the repo's own workspace so a check
+	// never trips on an unrelated repo's rejected option (cross-repo false ruled_out).
+	WorkspaceIDs []string `json:"workspace_ids,omitempty" jsonschema:"optional workspace ids to scope the check to; omit to check every workspace you can see"`
 }
 
 type checkOutput struct {
@@ -59,6 +64,13 @@ type checkOutput struct {
 	// so their refs are sanitized at capture time (source.sanitizeRefs).
 	Closed []source.Atom `json:"closed"`
 	Note   string        `json:"note,omitempty"`
+	// Verdict envelope (ADR-0094) — additive. New callers read these; `decided`
+	// and `closed` stay for back-compat and may differ from `verdict` (decided =
+	// any closed match; verdict = the refined judgment — ruled_out only on a
+	// binding match, incomplete/error when the closed set can't be trusted).
+	Verdict            string                      `json:"verdict"`
+	GoverningDecisions []verdict.GoverningDecision `json:"governing_decisions"`
+	Reason             string                      `json:"reason"`
 }
 
 // checkDecided is the never-reopen gate: before proposing a direction, an agent
@@ -88,17 +100,37 @@ func checkDecided(ctx context.Context, _ *mcp.CallToolRequest, in checkInput) (*
 	// hosted check_decided silently checked local capture only, and a silent
 	// degrade back to that is worse than a visible, retryable error.
 	if cf, ok := src.(source.ClosedFetcher); ok {
-		hostedClosed, err := cf.FetchClosedAtoms(ctx)
+		hostedClosed, err := cf.FetchClosedAtoms(ctx, in.WorkspaceIDs)
 		if err != nil {
-			return nil, checkOutput{}, fmt.Errorf("check_decided: hosted closed-decision fetch failed (refusing to answer from local capture alone): %w", err)
+			// Fail loud: a fetch failure returns an ERROR verdict, never a confident
+			// answer from local capture alone (ADR-0094 / the pre-existing contract).
+			ev := verdict.NewErrored("hosted closed-decision fetch failed; not answering from local capture alone")
+			out := checkOutput{Topic: in.Topic, Verdict: string(ev.Verdict), GoverningDecisions: ev.GoverningDecisions, Reason: ev.Reason}
+			return nil, out, fmt.Errorf("check_decided: hosted closed-decision fetch failed: %w", err)
 		}
 		merged = append(merged, hostedClosed...)
 	}
-	closed := weightedGuardMatch(merged, in.Topic, guardMatchThreshold)
-	out := checkOutput{Topic: in.Topic, Decided: len(closed) > 0, Closed: closed}
+	out := buildCheckOutput(in.Topic, merged)
+	logUsage("check_decided", in.Topic, len(out.Closed), out)
+	return nil, out, nil
+}
+
+// buildCheckOutput is the pure happy-path builder: the legacy fields plus the
+// verdict envelope (ADR-0094), judged over an acquired CLOSED set by the shared
+// verdict.Build so the MCP and proposemode surfaces render the SAME judgment.
+func buildCheckOutput(topic string, merged []source.Atom) checkOutput {
+	v := verdict.Build(merged, topic)
+	closed := verdict.Match(merged, topic, verdict.MatchThreshold)
+	out := checkOutput{
+		Topic:              topic,
+		Decided:            len(closed) > 0,
+		Closed:             closed,
+		Verdict:            string(v.Verdict),
+		GoverningDecisions: v.GoverningDecisions,
+		Reason:             v.Reason,
+	}
 	if out.Decided {
 		out.Note = "this topic touches decisions already CLOSED — do not re-propose the closed options; surface the prior decision instead"
 	}
-	logUsage("check_decided", in.Topic, len(closed), out)
-	return nil, out, nil
+	return out
 }

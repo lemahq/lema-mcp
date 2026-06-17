@@ -14,6 +14,7 @@ import (
 
 	"github.com/lemahq/lema-mcp/internal/adr"
 	"github.com/lemahq/lema-mcp/internal/source"
+	"github.com/lemahq/lema-mcp/internal/verdict"
 )
 
 // guardInput is the subset of the Claude Code PreToolUse stdin payload the guard
@@ -73,41 +74,9 @@ func guardQuery(in map[string]any) string {
 	return q
 }
 
-// tokenize splits s into lowercased alphanumeric tokens, breaking on
-// non-alphanumeric runs AND camelCase boundaries, and dropping tokens shorter than
-// 2 runes — so "kafka.NewProducer()" and "KafkaBrokers" both yield kafka/new/producer
-// and kafka/brokers, and a killed option named inside an identifier still matches.
-func tokenize(s string) []string {
-	var toks []string
-	var cur []rune
-	var prev rune
-	flush := func() {
-		if len(cur) >= 2 {
-			toks = append(toks, strings.ToLower(string(cur)))
-		}
-		cur = cur[:0]
-	}
-	for _, r := range s {
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
-			flush()
-			prev = 0
-			continue
-		}
-		// camelCase / digit boundary: a lower/digit run followed by an uppercase
-		// letter starts a new token (NewProducer -> new, producer).
-		if len(cur) > 0 && unicode.IsUpper(r) && (unicode.IsLower(prev) || unicode.IsDigit(prev)) {
-			flush()
-		}
-		cur = append(cur, r)
-		prev = r
-	}
-	flush()
-	return toks
-}
-
 func tokenSet(s string) map[string]bool {
 	m := map[string]bool{}
-	for _, t := range tokenize(s) {
+	for _, t := range verdict.Tokenize(s) {
 		m[t] = true
 	}
 	return m
@@ -142,7 +111,7 @@ func optionMatches(key string, edit map[string]bool) (bool, float64) {
 	if edit[joined] {
 		return true, float64(len(joined))
 	}
-	pieces := tokenize(key)
+	pieces := verdict.Tokenize(key)
 	if len(pieces) == 0 {
 		return false, 0
 	}

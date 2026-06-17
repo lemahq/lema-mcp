@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -204,7 +205,11 @@ var _ DecisionSource = (*Hosted)(nil)
 // surface that failure rather than silently degrade to local-only checking
 // (the exact bug the hosted leg exists to fix).
 type ClosedFetcher interface {
-	FetchClosedAtoms(ctx context.Context) ([]Atom, error)
+	// FetchClosedAtoms returns the org's CLOSED no-go set. When workspaceIDs is
+	// non-empty the set is scoped to those workspaces (so a check_decided run in
+	// one repo never trips on another repo's rejected option); empty means every
+	// workspace the caller can see.
+	FetchClosedAtoms(ctx context.Context, workspaceIDs []string) ([]Atom, error)
 }
 
 type hostedClosedResp struct {
@@ -226,8 +231,16 @@ type hostedClosedResp struct {
 // served server-side). The served match_key lands on Atom.MatchKey so the
 // client-side weighted matcher treats hosted closures exactly like locally
 // captured ones.
-func (h *Hosted) FetchClosedAtoms(ctx context.Context) ([]Atom, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.baseURL+"/closed-atoms", nil)
+func (h *Hosted) FetchClosedAtoms(ctx context.Context, workspaceIDs []string) ([]Atom, error) {
+	u := h.baseURL + "/closed-atoms"
+	if len(workspaceIDs) > 0 {
+		q := url.Values{}
+		for _, id := range workspaceIDs {
+			q.Add("workspace_ids", id)
+		}
+		u += "?" + q.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}

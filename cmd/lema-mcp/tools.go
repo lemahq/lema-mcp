@@ -62,23 +62,30 @@ var (
 	}
 	checkDecidedTool = &mcp.Tool{
 		Name:        "check_decided",
-		Description: "Checks one proposed direction (a library, an approach, or a design) against decisions already settled and CLOSED — the rejected alternatives of accepted decisions and superseded options. Returns the matching closed decisions, empty when none match; a non-empty result means the option was already ruled out or superseded. Where search_decisions ranks all relevant claims, this filters to closed matches for the single option passed.",
+		Description: "Checks one proposed direction (a library, an approach, or a design) against decisions already settled and CLOSED, and returns a typed VERDICT: `ruled_out` (a binding prior decision already governs this option), `not_ruled_out` (nothing binding matched; any advisory or historical context is still included), `incomplete` (the closed set could not be fully loaded — not a confident no), or `error`. Each governing decision carries its force (binding | advisory | historical) and a reason; the legacy `decided`/`closed` fields remain for back-compat. Optionally scoped to specific workspace_ids. Where search_decisions ranks all relevant claims, this adjudicates the single option passed.",
 		Annotations: readOnlyLocal("Check if decided"),
 	}
 
-	// public_ask / why_not_public are registered by BOTH the full server (main)
-	// and the public-only server (try). The honesty boundary stays in the
-	// description; the synthesis-time "keep your own recall separate" steer rides
-	// in the grounding_note OUTPUT field (see runPublicQuery), not here.
+	// public_ask (agent-facing name why_decided, ADR-0097) / settled / why_not_public
+	// are registered by BOTH the full server (main) and the public-only server (try).
+	// The honesty boundary stays in the description; the synthesis-time "keep your own
+	// recall separate" steer rides in the grounding_note OUTPUT field (see
+	// runPublicQuery), not here. The Go identifier stays publicAskTool — it still POSTs
+	// to /ask-public via publicAsk/runPublicQuery.
 	publicAskTool = &mcp.Tool{
-		Name:        "public_ask",
+		Name:        "why_decided",
 		Description: publicAskDescription,
-		Annotations: readOnlyExternal("Ask a public project's decisions"),
+		Annotations: readOnlyExternal("Ask why an upstream project decided something"),
+	}
+	settledTool = &mcp.Tool{
+		Name:        "settled",
+		Description: settledDescription,
+		Annotations: readOnlyExternal("Check if a direction is already decided (public)"),
 	}
 	whyNotPublicTool = &mcp.Tool{
 		Name:        "why_not_public",
 		Description: whyNotPublicDescription,
-		Annotations: readOnlyExternal("Check a public project's ruled-out options"),
+		Annotations: readOnlyExternal("Check a public project's ruled-out options (deprecated alias for settled)"),
 	}
 
 	askTool = &mcp.Tool{
@@ -103,6 +110,6 @@ var (
 // compliance test asserts each one meets the Anthropic Directory criteria.
 var directoryTools = []*mcp.Tool{
 	searchDecisionsTool, getDecisionTool, listDecisionsTool, getDecisionGraphTool,
-	recordDecisionTool, checkDecidedTool, publicAskTool, whyNotPublicTool,
+	recordDecisionTool, checkDecidedTool, publicAskTool, settledTool, whyNotPublicTool,
 	askTool, searchDocsTool, getDocTool,
 }

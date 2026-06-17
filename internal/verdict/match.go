@@ -1,13 +1,9 @@
-package main
-
-import (
-	"math"
-	"sort"
-
-	"github.com/lemahq/lema-mcp/internal/source"
-)
-
-// guard_match.go is the ADR-0053 recall calibration: a distinctiveness-weighted
+// Package verdict holds the shared decision-adjudication judgment used by both
+// the MCP check_decided tool (cmd/lema-mcp) and the in-app proposemode tool.
+// The matcher here was moved out of package main (was guard_match.go) so both
+// surfaces judge through one implementation; parity is then structural.
+//
+// match.go is the ADR-0053 recall calibration: a distinctiveness-weighted
 // matcher that replaces the old all-tokens-AND rule (which required every token
 // of a full-sentence option name in the query, so recall collapsed on natural
 // language). The principle, precision-first: a match must rest on the killed
@@ -19,13 +15,23 @@ import (
 // term in many (or a stopword) weighs ~0. A query's score against an option is
 // the summed weight of the distinctive terms they share; it fires above a
 // calibrated threshold.
+package verdict
 
-// guardMatchThreshold is the weighted-overlap floor a query must clear to count
-// as reaching a closed option. Calibrated on the eval in guard_match_test.go to
-// fire on every labeled positive while leaving every negative empty. Raising it
-// trades recall for precision; this value is the recall-max at full precision on
-// that set.
-const guardMatchThreshold = 1.5
+import (
+	"math"
+	"sort"
+	"strings"
+	"unicode"
+
+	"github.com/lemahq/lema-mcp/internal/source"
+)
+
+// MatchThreshold is the weighted-overlap floor a query must clear to count as
+// reaching a closed option. Calibrated on the eval in match_test.go to fire on
+// every labeled positive while leaving every negative empty. Raising it trades
+// recall for precision; this value is the recall-max at full precision on that
+// set.
+const MatchThreshold = 1.5
 
 // guardStopwords are forced to zero weight regardless of corpus frequency. Two
 // classes: function words, and generic engineering/decision terms that carry no
@@ -64,12 +70,44 @@ var guardStopwords = map[string]bool{
 	// noun), so the matcher needs them to fire on it.
 }
 
+// Tokenize splits s into lowercased alphanumeric tokens, breaking on
+// non-alphanumeric runs AND camelCase boundaries, and dropping tokens shorter than
+// 2 runes — so "kafka.NewProducer()" and "KafkaBrokers" both yield kafka/new/producer
+// and kafka/brokers, and a killed option named inside an identifier still matches.
+func Tokenize(s string) []string {
+	var toks []string
+	var cur []rune
+	var prev rune
+	flush := func() {
+		if len(cur) >= 2 {
+			toks = append(toks, strings.ToLower(string(cur)))
+		}
+		cur = cur[:0]
+	}
+	for _, r := range s {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			flush()
+			prev = 0
+			continue
+		}
+		// camelCase / digit boundary: a lower/digit run followed by an uppercase
+		// letter starts a new token (NewProducer -> new, producer).
+		if len(cur) > 0 && unicode.IsUpper(r) && (unicode.IsLower(prev) || unicode.IsDigit(prev)) {
+			flush()
+		}
+		cur = append(cur, r)
+		prev = r
+	}
+	flush()
+	return toks
+}
+
 // significantTokens returns the option/query tokens that can carry distinctive
-// meaning: the existing tokenizer's output minus stopwords. Deduped.
+// meaning: the tokenizer's output minus stopwords. Deduped.
 func significantTokens(s string) []string {
 	seen := map[string]bool{}
 	out := []string{}
-	for _, t := range tokenize(s) {
+	for _, t := range Tokenize(s) {
 		if guardStopwords[t] || seen[t] {
 			continue
 		}
@@ -79,11 +117,11 @@ func significantTokens(s string) []string {
 	return out
 }
 
-// weightedGuardMatch returns the CLOSED atoms whose killed option the query
-// reaches, scored by shared-distinctiveness and sorted most-specific first. An
-// atom matches when the summed IDF weight of the distinctive terms it shares
-// with the query clears threshold.
-func weightedGuardMatch(closed []source.Atom, query string, threshold float64) []source.Atom {
+// Match returns the CLOSED atoms whose killed option the query reaches, scored
+// by shared-distinctiveness and sorted most-specific first. An atom matches when
+// the summed IDF weight of the distinctive terms it shares with the query clears
+// threshold.
+func Match(closed []source.Atom, query string, threshold float64) []source.Atom {
 	queryTokens := map[string]bool{}
 	for _, t := range significantTokens(query) {
 		queryTokens[t] = true

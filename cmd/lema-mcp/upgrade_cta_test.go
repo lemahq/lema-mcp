@@ -47,13 +47,16 @@ func TestPublicAskAbstainAttachesUpgradeCTA(t *testing.T) {
 	}
 }
 
-// TestWhyNotPublicAbstainAlsoGetsCTA: the shared runPublicQuery path means
-// why_not_public abstains carry the same nudge.
+// TestWhyNotPublicAbstainAlsoGetsCTA: why_not_public is now a thin alias for
+// settled — the shared runSettled path means abstains (not_settled with no
+// decisions) carry the same honest connect-your-repo nudge.
 func TestWhyNotPublicAbstainAlsoGetsCTA(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"scope": "react-rfcs", "answer": "No recorded decision against it.",
-			"sources": []any{}, "usage": map[string]any{},
+			"repo": "react-rfcs", "topic": "x",
+			"settled":   "not_settled",
+			"decisions": []any{},
+			"note":      "No recorded decision against it.",
 		})
 	}))
 	defer ts.Close()

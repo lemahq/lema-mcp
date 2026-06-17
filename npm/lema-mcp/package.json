@@ -1,6 +1,6 @@
 {
   "name": "lema-mcp",
-  "version": "0.8.2",
+  "version": "0.9.0",
   "description": "Local, database-less MCP server that makes your repo's decisions — and what it ruled out — queryable by your coding agent, and lets the agent record new ones with enforced never-reopen.",
   "bin": {
     "lema-mcp": "bin/lema-mcp.js"
@@ -12,10 +12,10 @@
     "prepack": "cp ../../README.md ./README.md && cp ../../LICENSE ./LICENSE"
   },
   "optionalDependencies": {
-    "lema-mcp-darwin-arm64": "0.8.2",
-    "lema-mcp-darwin-x64": "0.8.2",
-    "lema-mcp-linux-x64": "0.8.2",
-    "lema-mcp-linux-arm64": "0.8.2"
+    "lema-mcp-darwin-arm64": "0.9.0",
+    "lema-mcp-darwin-x64": "0.9.0",
+    "lema-mcp-linux-x64": "0.9.0",
+    "lema-mcp-linux-arm64": "0.9.0"
   },
   "engines": {
     "node": ">=18"

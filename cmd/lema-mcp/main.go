@@ -561,7 +561,7 @@ func main() {
 	checkGuardHook()
 
 	ctx := context.Background()
-	server := mcp.NewServer(&mcp.Implementation{Name: "lema-mcp", Version: "0.7.0"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "lema-mcp", Version: "0.9.0"}, nil)
 	mcp.AddTool(server, searchDecisionsTool, searchDecisions)
 	mcp.AddTool(server, getDecisionTool, getDecision)
 	mcp.AddTool(server, listDecisionsTool, listDecisions)
@@ -576,6 +576,7 @@ func main() {
 	// tool description; the synthesis-time recall-vs-record steer rides in the
 	// grounding_note output field (see runPublicQuery).
 	mcp.AddTool(server, publicAskTool, publicAsk)
+	mcp.AddTool(server, settledTool, settled)
 	mcp.AddTool(server, whyNotPublicTool, whyNotPublic)
 
 	// Hosted-only `ask` (ADR-0059 shape A) — a synthesized, cited answer over the
