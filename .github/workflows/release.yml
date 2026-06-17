@@ -118,7 +118,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release download --repo modelcontextprotocol/registry \
-            --pattern "mcp-publisher_*_$(uname -s | tr '[:upper:]' '[:lower:]')_amd64.tar.gz" \
+            --pattern "mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_amd64.tar.gz" \
             --output mcp-publisher.tgz
           tar xzf mcp-publisher.tgz mcp-publisher
           chmod +x mcp-publisher
