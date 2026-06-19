@@ -20,6 +20,14 @@ func TestNudgeReminder(t *testing.T) {
 		{"edit a lock file", guardInput{ToolName: "Edit", ToolInput: map[string]any{"file_path": "package-lock.json"}}, false},
 		{"bash install", guardInput{ToolName: "Bash", ToolInput: map[string]any{"command": "npm install left-pad"}}, false},
 		{"no file_path", guardInput{ToolName: "Edit", ToolInput: map[string]any{}}, false},
+		// Terraform / infra files
+		{"edit main.tf", guardInput{ToolName: "Edit", ToolInput: map[string]any{"file_path": "terraform/main.tf"}}, true},
+		{"write variables.tf", guardInput{ToolName: "Write", ToolInput: map[string]any{"file_path": "variables.tf"}}, true},
+		{"multiedit outputs.tf", guardInput{ToolName: "MultiEdit", ToolInput: map[string]any{"file_path": "modules/db/outputs.tf"}}, true},
+		{"write terraform.tfvars", guardInput{ToolName: "Write", ToolInput: map[string]any{"file_path": "envs/prod/terraform.tfvars"}}, true},
+		{"edit .tf.backup — silent", guardInput{ToolName: "Edit", ToolInput: map[string]any{"file_path": "main.tf.backup"}}, false},
+		{"edit terraform.tfstate — silent", guardInput{ToolName: "Edit", ToolInput: map[string]any{"file_path": "terraform.tfstate"}}, false},
+		{"edit .terraform.lock.hcl — silent", guardInput{ToolName: "Edit", ToolInput: map[string]any{"file_path": ".terraform.lock.hcl"}}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

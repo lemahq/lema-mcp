@@ -147,3 +147,95 @@ func (p *Public) Settled(ctx context.Context, slug, topic string) (SettledResult
 	}
 	return out, nil
 }
+
+// FuseSource is one cited rejection behind a /fuse ruled_out verdict. N is the
+// 1-based citation index the why_not [n] markers point at.
+type FuseSource struct {
+	N             int      `json:"n"`
+	Ref           string   `json:"ref"`
+	Type          string   `json:"type"`
+	Text          string   `json:"text"`
+	URL           string   `json:"url,omitempty"`
+	BindingCosine *float64 `json:"binding_cosine,omitempty"`
+}
+
+// FuseHow is the repo-level HOW pointer: the project's canonical docs URL plus a
+// topic hint. No vendor identifier — a plain URL (ADR-0099).
+type FuseHow struct {
+	DocHome string `json:"doc_home,omitempty"`
+	Topic   string `json:"topic,omitempty"`
+}
+
+// FuseResult is the Fusion verdict: ruled_out (with the cited why-not + how) or
+// no_recorded_ruling (honest abstain). Decoded from POST /fuse.
+type FuseResult struct {
+	Repo     string       `json:"repo"`
+	Approach string       `json:"approach"`
+	Verdict  string       `json:"verdict"`
+	WhyNot   string       `json:"why_not"`
+	Sources  []FuseSource `json:"sources"`
+	How      FuseHow      `json:"how"`
+	Note     string       `json:"note"`
+	Usage    AskUsage     `json:"-"`
+}
+
+// fuseWire decodes the raw /fuse response, folding the two synthesis legs into
+// one AskUsage (the same meter shape /ask-public serves).
+type fuseWire struct {
+	FuseResult
+	Usage struct {
+		AtomsTokens      int     `json:"atoms_tokens"`
+		SourceTokens     int     `json:"source_tokens"`
+		TokensSaved      int     `json:"tokens_saved"`
+		CompressionRatio float64 `json:"compression_ratio"`
+	} `json:"usage"`
+	SynthesisTokensIn  int `json:"synthesis_tokens_in"`
+	SynthesisTokensOut int `json:"synthesis_tokens_out"`
+}
+
+type fuseReq struct {
+	Slug     string `json:"slug"`
+	Approach string `json:"approach"`
+}
+
+// Fuse POSTs {slug, approach} to the no-auth POST /fuse and returns the fused
+// verdict (why-not + how, or honest abstain). 404 -> ErrPublicGraphNotLoaded,
+// 429 -> ErrPublicRateLimited (same honest degradation as PublicAsk/Settled).
+func (p *Public) Fuse(ctx context.Context, slug, approach string) (FuseResult, error) {
+	body, err := json.Marshal(fuseReq{Slug: slug, Approach: approach})
+	if err != nil {
+		return FuseResult{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/fuse", bytes.NewReader(body))
+	if err != nil {
+		return FuseResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := p.hc.Do(req)
+	if err != nil {
+		return FuseResult{}, fmt.Errorf("fuse: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return FuseResult{}, ErrPublicGraphNotLoaded
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return FuseResult{}, ErrPublicRateLimited
+	}
+	if resp.StatusCode != http.StatusOK {
+		return FuseResult{}, fmt.Errorf("fuse: status %d", resp.StatusCode)
+	}
+	var out fuseWire
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return FuseResult{}, fmt.Errorf("fuse decode: %w", err)
+	}
+	res := out.FuseResult
+	res.Usage = AskUsage{
+		AtomsTokens:      out.Usage.AtomsTokens,
+		SourceTokens:     out.Usage.SourceTokens,
+		TokensSaved:      out.Usage.TokensSaved,
+		CompressionRatio: out.Usage.CompressionRatio,
+		SynthesisTokens:  out.SynthesisTokensIn + out.SynthesisTokensOut,
+	}
+	return res, nil
+}

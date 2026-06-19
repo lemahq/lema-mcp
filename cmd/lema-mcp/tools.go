@@ -87,6 +87,13 @@ var (
 		Description: whyNotPublicDescription,
 		Annotations: readOnlyExternal("Check a public project's ruled-out options (deprecated alias for settled)"),
 	}
+	// check_approach (ADR-0099): the Fusion tool — fuses the recorded why-not
+	// (cited) with a how-pointer for one approach, retrieval-first.
+	checkApproachTool = &mcp.Tool{
+		Name:        "check_approach",
+		Description: checkApproachDescription,
+		Annotations: readOnlyExternal("Check whether an approach was ruled out, with the why + a docs pointer (public)"),
+	}
 
 	askTool = &mcp.Tool{
 		Name:        "ask",
@@ -111,5 +118,5 @@ var (
 var directoryTools = []*mcp.Tool{
 	searchDecisionsTool, getDecisionTool, listDecisionsTool, getDecisionGraphTool,
 	recordDecisionTool, checkDecidedTool, publicAskTool, settledTool, whyNotPublicTool,
-	askTool, searchDocsTool, getDocTool,
+	checkApproachTool, askTool, searchDocsTool, getDocTool,
 }

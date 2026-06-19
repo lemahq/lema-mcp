@@ -97,6 +97,7 @@ func runPublicOnlyServer() error {
 	mcp.AddTool(server, publicAskTool, publicAsk)
 	mcp.AddTool(server, settledTool, settled)
 	mcp.AddTool(server, whyNotPublicTool, whyNotPublic)
+	mcp.AddTool(server, checkApproachTool, checkApproach)
 	fmt.Fprintln(os.Stderr, "lema-mcp: public demo mode — why React/Kubernetes/Rust decided things + what they ruled out, no account")
 	return server.Run(context.Background(), &mcp.StdioTransport{})
 }

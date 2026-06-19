@@ -338,6 +338,12 @@ func main() {
 			// remind the agent to record_decision. Fail-open; always exit 0.
 			runNudge(os.Args[2:])
 			return
+		case "plan-guard":
+			// Strata Phase-0 spike (ADR-0090): match a `terraform show -json` plan
+			// against the closed-decision store and emit an advisory review.
+			// Fail-open; always exit 0 in v1 (LEMA_PLAN_GUARD_MODE=context).
+			runPlanGuard(os.Args[2:])
+			return
 		case "capture-rate":
 			// The capture-rate gauge: genuine record_decision calls vs the
 			// decision-shaped moments the nudge classifies, over the local agent
@@ -578,6 +584,7 @@ func main() {
 	mcp.AddTool(server, publicAskTool, publicAsk)
 	mcp.AddTool(server, settledTool, settled)
 	mcp.AddTool(server, whyNotPublicTool, whyNotPublic)
+	mcp.AddTool(server, checkApproachTool, checkApproach)
 
 	// Hosted-only `ask` (ADR-0059 shape A) — a synthesized, cited answer over the
 	// hosted graph. Registered only in hosted mode (LEMA_API_URL set): the local

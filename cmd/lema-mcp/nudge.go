@@ -23,28 +23,56 @@ var manifestFiles = map[string]bool{
 	"pom.xml":          true,
 }
 
+// manifestExts are file extensions (lowercased) that signal an infra decision
+// moment. Unlike dependency manifests, Terraform files never have unique
+// basenames (every module has a main.tf), so extension-based matching is used
+// instead of the basename map. .tfstate and .hcl are excluded: .tfstate is a
+// generated artifact; .terraform.lock.hcl is a lock file.
+var manifestExts = map[string]bool{
+	".tf":     true,
+	".tfvars": true,
+}
+
 // isManifestDecisionEdit is the shared decision-moment classifier: an
-// Edit/Write/MultiEdit touching a dependency manifest. It is used by BOTH the
-// capture nudge (to remind) and the capture-rate gauge (to count the
-// denominator), so the gauge measures exactly what the nudge classifies and
-// the two can never drift apart.
+// Edit/Write/MultiEdit touching a dependency manifest or an infra file. It is
+// used by BOTH the capture nudge (to remind) and the capture-rate gauge (to
+// count the denominator), so the gauge measures exactly what the nudge
+// classifies and the two can never drift apart.
 func isManifestDecisionEdit(toolName, filePath string) bool {
 	switch toolName {
 	case "Edit", "Write", "MultiEdit":
 	default:
 		return false
 	}
-	return filePath != "" && manifestFiles[strings.ToLower(filepath.Base(filePath))]
+	if filePath == "" {
+		return false
+	}
+	// Extension-based check for Terraform files (basenames are not unique).
+	if manifestExts[strings.ToLower(filepath.Ext(filePath))] {
+		return true
+	}
+	return manifestFiles[strings.ToLower(filepath.Base(filePath))]
+}
+
+// isTerraformFile reports whether the path has a Terraform extension (.tf or
+// .tfvars). Single source of truth for the infra-vs-dependency branch so that
+// adding a new extension to manifestExts only requires one additional site.
+func isTerraformFile(filePath string) bool {
+	return manifestExts[strings.ToLower(filepath.Ext(filePath))]
 }
 
 // nudgeReminder returns the capture reminder to surface for a tool call, or "" when
 // the call is not a decision-shaped moment. v1 fires only on an Edit/Write/MultiEdit
-// to a dependency manifest — the canonical record_decision moment — and stays silent
-// otherwise so it never becomes naggy (ADR-0054).
+// to a dependency manifest or infra file — the canonical record_decision moment —
+// and stays silent otherwise so it never becomes naggy (ADR-0054).
 func nudgeReminder(in guardInput) string {
 	p, _ := in.ToolInput["file_path"].(string)
 	if !isManifestDecisionEdit(in.ToolName, p) {
 		return ""
+	}
+	if isTerraformFile(p) {
+		return "lema: you changed infra in " + filepath.Base(p) +
+			". If you chose a provider, module, or resource configuration, call record_decision with the option you chose AND the alternatives you rejected — so the team and future agents don't re-litigate it."
 	}
 	return "lema: you changed dependencies in " + filepath.Base(p) +
 		". If you chose a library or framework, call record_decision with the option you chose AND the alternatives you rejected — so the team and future agents don't re-litigate it."

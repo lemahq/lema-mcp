@@ -212,7 +212,7 @@ func formatCaptureRate(rep captureRateReport, days int) string {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "lema capture-rate · %s · %d sessions\n\n", window, rep.Sessions)
-	fmt.Fprintf(&b, "  decision signals   %d   (dependency-manifest edits — the moments the nudge classifies)\n", rep.Signals)
+	fmt.Fprintf(&b, "  decision signals   %d   (dependency-manifest or infra file edits — the moments the nudge classifies)\n", rep.Signals)
 	fmt.Fprintf(&b, "  genuine captures   %d   (structurally-validated record_decision calls, deduped per session)\n", rep.Captures)
 	fmt.Fprintf(&b, "  capture rate       %s\n", rate)
 
@@ -238,7 +238,7 @@ func formatCaptureRate(rep captureRateReport, days int) string {
 		}
 	}
 
-	b.WriteString("\n  caveats: the denominator is a proxy (manifest edits only) — it undercounts\n")
+	b.WriteString("\n  caveats: the denominator is a proxy (manifest or infra file edits) — it undercounts\n")
 	b.WriteString("  decision moments, and captures at non-manifest moments can push the rate\n")
 	b.WriteString("  over 100%. Read the raw counts, not just the percentage. Self-measured.\n")
 	return b.String()

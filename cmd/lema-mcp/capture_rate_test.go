@@ -41,6 +41,11 @@ func TestIsManifestDecisionEdit(t *testing.T) {
 		{"bash touching go.mod is not an edit tool", "Bash", "/r/go.mod", false},
 		{"lockfiles stay silent", "Edit", "/r/package-lock.json", false},
 		{"empty path", "Edit", "", false},
+		// Terraform / infra files — must agree with nudge_test.go cases (never-drift invariant).
+		{"edit terraform main.tf", "Edit", "/r/terraform/main.tf", true},
+		{"write tfvars", "Write", "/r/envs/prod/terraform.tfvars", true},
+		{"tfstate is generated — silent", "Edit", "/r/terraform.tfstate", false},
+		{"lock.hcl is generated — silent", "Edit", "/r/.terraform.lock.hcl", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
