@@ -1,162 +1,117 @@
 # lema-mcp
 
-Your coding agent reasons well — it just doesn't know *your* system, and it keeps
-re-proposing the options your team already ruled out. `lema-mcp` is a local
-[MCP](https://modelcontextprotocol.io) server that fixes the second problem the
-way no read-only context tool can: it **captures the decisions you make** — the
-chosen option *and* the alternatives you killed — and then **enforces them**, so a
-settled decision stops getting reopened. No account, no database, no network.
+**Your coding agent can read the code. It can't read the _argument_ behind it.**
+`lema-mcp` gives your agent the recorded *why* — and the alternatives a project
+already ruled out — cited to the source. For React, Kubernetes, and Rust out of
+the box, and for your own repo with one command.
 
-Most "context" tools are read-only: a nicer way to grep your docs. `lema-mcp`
-reads too, but its job is **never-reopen**:
+[![npm](https://img.shields.io/npm/v/lema-mcp)](https://www.npmjs.com/package/lema-mcp)
+[![license](https://img.shields.io/npm/l/lema-mcp)](./LICENSE)
+[![MCP](https://img.shields.io/badge/MCP-server-111)](https://modelcontextprotocol.io)
 
-- Your agent settles a choice → it calls **`record_decision`** with what it chose
-  **and the alternatives it rejected, with why each was killed** (the part that
-  never survives into the code).
-- Before anyone's agent proposes a direction → **`check_decided`** returns the
-  prior decision if that option is **CLOSED**.
-- And on every edit, a **PreToolUse guard hook** (installed for you by `init`)
-  reads the draft change and surfaces a CLOSED decision *before* the dead option
-  gets re-proposed — enforced off both your captured decisions **and the repo's
-  own ADRs**.
+A local [MCP](https://modelcontextprotocol.io) server. No account, no database, no
+network for your own repo — install it in 30 seconds and ask why a project decided
+something, or whether the approach you're about to take was already rejected.
 
-```bash
-npx lema-mcp demo     # 30-second never-reopen walkthrough on a throwaway temp dir
-npx lema-mcp init     # wire this repo for capture + enforcement (idempotent)
-```
+---
 
-Then open the repo in your agent and ask *"why did we choose X?"* — or just let it
-work, and watch it record decisions and get nudged off the ones you settled.
+## ❌ Without lema
 
-## Try it on React, Kubernetes, or Rust — no account
+- The agent invents the **why** from training recall — fluently, and sometimes
+  wrongly. The rationale lives in RFC / KEP / PR threads; it was never in the code.
+- It re-proposes the approach the maintainers **already rejected** two years ago —
+  because a rejected alternative leaves *no trace* in the source.
+- Ask "was this ever ruled out?" and you get a confident guess, with no way to tell
+  a real ruling from a hallucinated one.
 
-Before it knows *your* repo, `lema-mcp` can already answer **why a popular project
-decided something** — over the recorded RFC/KEP decisions of React, Kubernetes,
-and Rust, served from lema's public demo. No account, no token:
+## ✅ With lema
+
+- One **cited** answer from the project's actual recorded deliberation — every `[n]`
+  links to the RFC / PR where the call was made.
+- A typed **`ruled_out`** verdict when a project already rejected your approach,
+  with the recorded reason *and* a pointer to where the docs say to do it instead.
+- An honest **"no recorded ruling"** when the record is silent — which means
+  *unknown*, **not** *approved*. lema never fills the gap with a guess.
+
+> lema holds **reasoning** — why a decision was made, what was rejected — not API
+> syntax or code samples. For those, reach for a docs tool. lema is the right place
+> for *why*.
+
+---
+
+## Try it in 30 seconds — no account
 
 ```bash
 npx lema-mcp try react        # or: kubernetes · rust
 ```
 
-That writes a **read-only** `lema` server (public mode) to `.mcp.json` — and if
-you already have the authed `lema` server from `init`, it's left untouched (that
-server already serves these public tools). Reload your agent's MCP servers and
-ask:
+That writes a read-only public server to your project's `.mcp.json`. Reload your
+agent's MCP servers (in Claude Code: `/mcp`) and try the flagship tool,
+**`check_approach`** — name a direction, get the recorded verdict:
 
-> *"why did React adopt Hooks over mixins?"* — or, before you reach for a pattern,
-> *"was a global event bus ever ruled out in Kubernetes?"*
+```text
+> "Let's add a delayMs prop to Suspense to debounce the fallback."   (repo: react)
 
-You get **one synthesized, cited answer** — each `[n]` links to its GitHub source
-(the RFC/PR) where available — and an honest **"no recorded ruling"** when the
-record is silent, instead of a confident guess. Two tools light up (`why_decided`,
-`settled`); nothing local is registered. Ready for the same on *your own*
-repo? `npx lema-mcp init` adds capture + enforcement.
+  ⛔ ruled_out — the React team considered and rejected this.
+     "<the recorded rationale, summarized — not a quote>"  [1]
+     Where to look instead →  https://react.dev/reference/react
+     [1] reactjs/rfcs#212
 
-Grounded only in recorded decisions; claims are **summarized, not verbatim**;
-there are **no** relitigation/blast lenses (a cold import writes no
-decision→decision edges) and no source-authored date. It's a curated three-repo
-demo corpus, not analytics over your own graph.
+> "I'll add a global event bus for cross-component communication."   (repo: react)
 
-## What never-reopen looks like
+  ◦ no_recorded_ruling — React's public record doesn't settle this.
+     (Unknown — not approved.)
+```
 
-Your agent settles a choice and calls `record_decision` with the chosen option
-and the rejected alternatives. Later, anyone's agent reaches for a dead option —
-in a `check_decided` call, in a `search_decisions` result, or while drafting an
-edit the guard inspects — and the killed option comes back **CLOSED**, with the
-original reason attached:
+Or just ask in plain language — *"why did React adopt Hooks over mixins?"* — and
+get one cited answer, with an honest abstain when the record is silent.
 
-> ⛔ **CLOSED — do not propose "SWR":** no first-class mutation / cache
-> invalidation — we'd hand-roll it *(decided 2026-06-04 · "Data fetching for the
-> web app" · chose TanStack Query)*
+Covered today: **React · Kubernetes · Rust**, served from lema's public API
+(`api.lema.sh`). Tokenless. It's a curated three-project demo corpus — not
+analytics over a graph you own.
 
-So the agent surfaces the prior decision instead of re-litigating it. Supersede a
-decision and the *previously chosen* option goes CLOSED too — never-reopen,
-enforced both ways. (That's the real output of `npx lema-mcp demo`, run against a
-throwaway temp dir.)
-
-The guard is **advisory and fail-open today**: in its default `context` mode it
-injects that CLOSED note as a non-blocking nudge for the agent — it never emits an
-`allow` (which would skip your normal Edit/Write confirmation on the very edit
-it's flagging) and it never hard-blocks (`deny`) in v1. Opt into
-`LEMA_GUARD_MODE=ask` and a strong match prompts *you* before the edit; `off` is a
-kill switch. Any error → it emits nothing and gets out of the way.
-
-Decisions are captured to `.lema/decisions.jsonl` — a plain append-only file you
-can commit, so your whole team's agents share the same memory through git. No key,
-no LLM call on our side: your agent forms the decision; `lema-mcp` stores it and
-serves it back.
-
-## Does enforcement actually change what the agent does?
-
-We measured it on **two real public repos we didn't write** (Backstage, vite),
-transcribing six of their own documented decisions into the `record_decision`
-format and running the **real `lema-mcp guard` binary** on the agent's draft edits.
-Agent and an arm-blind judge were Claude Sonnet 4.6; 168 trials, 0 errors; a
-deterministic code check agreed with the judge on 163/168 (the 5 diffs
-hand-verified in lema's favor). Three arms: **blind** (no doc), **docs** (the
-decision pre-loaded in context), **lema** (guard only, no doc in context).
-
-The honest result is an **existence proof**, not "agents are wrong 58% of the
-time":
-
-- Of the six well-documented public decisions, only **one** cut against the 2026
-  frontier model (`node-fetch` → native `fetch`). On that one contrarian decision,
-  a blind agent re-proposed the killed library **58.3% of the time (14/24, N=24)**;
-  lema drove it to **0%** — matching the docs-preloaded arm *without carrying the
-  doc in context*.
-- On the **five decisions the model already gets right**, lema stayed silent: **0%
-  re-proposal and 0% false-abstain** across 48 trials. The nagging / false-positive
-  failure people fear about enforcement didn't happen.
-
-The honest caveats, stated plainly: it's a **single contrarian decision-type**
-(node-fetch, N=24) — a solid existence proof, not breadth. And a public-repo
-benchmark *structurally understates* enforcement's value: public decisions are
-disproportionately the ones the model already absorbed in training (that's why
-they're widespread enough to be documented). The decisions where enforcement
-actually moves the needle are **proprietary, contrarian, recent, team-specific** —
-which by construction aren't in any public repo. That's the capture-forward thesis:
-enforcement catches the decisions where your team disagrees with the AI's defaults,
-and gets out of the way everywhere else.
-
-Full method, the result table, and every raw trial: [`./docs/enforcement-lift`](./docs/enforcement-lift).
+---
 
 ## Install
 
-`npx` needs only Node — no Go toolchain, no account:
+`npx` needs only Node — no Go toolchain, no account. Two commands cover both ways
+to use lema:
 
 ```bash
-npx lema-mcp init                  # one-time: wire this repo for capture + enforcement
+npx lema-mcp try react   # read-only: ask React/Kubernetes/Rust why + what's ruled out
+npx lema-mcp init        # your repo: decision capture + the never-reopen guard
 ```
 
-`init` is non-destructive and idempotent — existing config is merged, not
-clobbered, and re-running changes nothing. It writes **three files** via five
-idempotent steps:
+Both are **non-destructive and idempotent** — they merge into existing config and
+re-running changes nothing. `init` and `try` share the same `lema` server key; the
+authed `init` server is a superset (it serves the public tools too), so the two
+coexist and `try` never downgrades it.
 
-1. **`.mcp.json`** — registers the `lema` MCP server (preserving any servers
-   already there).
-2. **`AGENTS.md`** — appends a short, managed capture-protocol block: *when you
-   settle a non-trivial decision call `record_decision` with what you chose and
-   rejected; before proposing a direction call `check_decided`; treat a CLOSED
-   result as binding.* This protocol is what actually drives capture — a hook
-   can't form the decision itself.
-3. **`.claude/settings.json`** — installs **three hooks**: a PostToolUse commit
-   reminder (fires only on `git commit`), the PostToolUse **capture-nudge**
-   (`lema-mcp nudge`, prompts `record_decision` when you edit a dependency
-   manifest), and the PreToolUse **never-reopen guard** (`lema-mcp guard`, the
-   enforcement above).
+<details>
+<summary><b>Claude Code</b></summary>
 
-`init` does **not** create `.lema/decisions.jsonl` — the capture store is created
-lazily on the first `record_decision`.
-
-Prefer Go, or want a pinned binary?
+Easiest — let lema write the config and hooks for you:
 
 ```bash
-go install github.com/lemahq/lema-mcp/cmd/lema-mcp@latest
+npx lema-mcp init        # or: npx lema-mcp try react
 ```
 
-Or wire it by hand — add to your agent's MCP config (Claude Code `.mcp.json`).
-Note this gets you the read + capture tools, but not the guard/nudge hooks that
-`init` installs:
+Or add it by hand to `.mcp.json` (this gets the read + capture tools, but not the
+guard/nudge hooks that `init` installs):
+
+```json
+{
+  "mcpServers": {
+    "lema": { "command": "npx", "args": ["-y", "lema-mcp@latest"] }
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>Cursor</b></summary>
+
+Add to `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global):
 
 ```json
 {
@@ -166,143 +121,235 @@ Note this gets you the read + capture tools, but not the guard/nudge hooks that
 }
 ```
 
-With no flags, `lema-mcp` auto-discovers a decisions directory in the working
-directory (`docs/adr`, `doc/adr`, `docs/adrs`, `docs/decisions`,
-`docs/architecture/decisions`, `architecture/decisions`, `adr`, `.adr`) and an
-`openspec/` tree if present. You can also point it explicitly:
+For the no-account public demo instead, add the env block:
 
-```bash
-lema-mcp --adr-dir docs/adr          # a local directory (no account, no network)
-lema-mcp --repo github.com/org/name  # a public repo (GITHUB_TOKEN for private)
-```
-
-Other flags: `--ref` (branch/ref for a remote `--repo`), `--pattern` (ADR filename
-regex), `--openspec-dir`, `--capture-file` (override the JSONL path), and
-`--http`/`--port` (see *serve mode* below).
-
-## The tools
-
-Your agent calls these over MCP. In the standard server **eight are always on**;
-`search_docs` / `get_doc` also register in local mode once a markdown tree is
-indexed. (The `npx lema-mcp try` public-demo server runs a public-only subset —
-just `why_decided` / `settled`.)
-
-**Enforce + capture (the part read-only tools don't have):**
-
-- **`record_decision`** — capture a decision you just settled: the chosen option,
-  the **rejected** alternatives (with why each was killed), optional rationale /
-  refs / constraint / consequence, and `supersedes` to retire an earlier one.
-  Rejected and superseded options come back CLOSED. Appends to
-  `.lema/decisions.jsonl`.
-- **`check_decided`** — before proposing a direction, check whether it's already
-  decided and CLOSED. Matched off **both** the capture store **and the repo's own
-  ADRs**, so a documented decision stops a fresh agent even if it was never
-  captured live.
-
-**Read (the entry point — query before you write code):**
-
-- **`search_decisions`** — natural-language query → the most relevant atomic
-  claims (chosen / rejected / constraint / consequence) with their source ADR,
-  under a token budget. CLOSED flags surface here too.
-- **`get_decision`** — one decision's full body, status, and typed edges.
-- **`list_decisions`** — the decisions recorded in the repo, optionally by status.
-- **`get_decision_graph`** — traverse typed edges (`supersedes`, `superseded_by`,
-  `depends_on`, `related_to`) to connected decisions.
-- **`search_docs`** / **`get_doc`** *(local mode, when a doc tree is indexed)* —
-  sectioned, budgeted retrieval over the repo's project markdown (specs, READMEs,
-  agent instructions, ADR/openspec full text) so the agent reads the sections that
-  matter instead of whole files.
-
-**Public demo (no account — `npx lema-mcp try <repo>`):**
-
-- **`why_decided`** — ask why **React / Kubernetes / Rust** made a decision; one
-  cited answer over their recorded RFC/KEP decisions, surfacing status and the
-  ruled-out alternatives, with an honest abstain when the record is silent. The
-  abstain is also machine-readable (`record_silent: true`), and a grounded answer
-  carries `caveats` naming what the public demo does *not* cover. Tokenless.
-- **`settled`** — before you propose a library / pattern / approach, check whether
-  one of those projects already ruled it out. Returns a typed `state`
-  (`settled` / `not_settled` / `unsure`) plus each governing decision's ref and
-  recorded reasoning; `not_settled` means *not on the record*, **not *approved***.
-  (`why_not_public` remains as a deprecated alias.)
-
-```
-> search_decisions "why did we choose an MCP-first architecture?"
-```
-
-```jsonc
-// illustrative shape — atom text/ids vary by repo
+```json
 {
-  "repo": "docs/adr",
-  "claims": [
-    { "id": "16-2", "type": "chosen",   "text": "One MCP server is the single surface agents call — all writes route through it.", "ref": "ADR-0016" },
-    { "id": "27-4", "type": "rejected", "text": "Folding inference into lema was rejected on the serve path: the agent reasoning over the atoms is the customer's own.", "ref": "ADR-0027" }
-  ],
-  "tokens_used": 211,
-  "usage": { "atoms_tokens": 211, "source_decisions": 2, "source_tokens": 1840, "tokens_saved": 1629, "compression_ratio": 8.7 },
-  "truncated": false
+  "mcpServers": {
+    "lema": {
+      "command": "npx",
+      "args": ["-y", "lema-mcp@latest"],
+      "env": { "LEMA_MCP_MODE": "public", "LEMA_PUBLIC_REPO": "react-rfcs" }
+    }
+  }
 }
 ```
+</details>
 
-A note on token cost: the read tools return tight, sourced atoms (default
-~1500-token budget, tunable with `max_tokens`) instead of whole documents, and
-every `search_decisions` response carries a self-reported `usage` block estimating
-the tokens returned versus the source-document tokens for that call (the numbers
-above are illustrative). On a large decision record that's a meaningful per-call
-saving — but it's a local, self-measured estimate, not an audited benchmark, and
-it's a side benefit. The reason to run lema is never-reopen, above.
+<details>
+<summary><b>Claude Desktop</b></summary>
 
-## The subcommands
+Settings → Developer → Edit Config, then add to `mcpServers`:
 
-- **`init [dir]`** — wire a repo for capture (the three files / three hooks above);
-  idempotent. The same code path backs the lema Workbench GUI's "enable capture"
-  button.
-- **`demo`** — a ~30-second never-reopen walkthrough using the real capture +
-  enforce path against a throwaway temp dir that's deleted afterward. Nothing is
-  written to your repo. This is the fastest way to see the CLOSED behavior.
-- **`try <react|kubernetes|rust>`** — wire a **read-only public-demo** server
-  (`lema-try` in `.mcp.json`, public mode) so your agent can ask why those
-  projects decided things, no account. Distinct from `init` (which sets up
-  capture for *your* repo); the two coexist. Reload your agent's MCP servers
-  afterward.
-- **`guard`** — the PreToolUse hook body: reads the tool-call payload on stdin,
-  emits a never-reopen permission decision on stdout. Advisory, fail-open, always
-  exits 0. `init` installs it; you don't call it directly.
-- **`nudge`** — the PostToolUse hook body: on an Edit/Write/MultiEdit to a
-  dependency manifest (`go.mod`, `package.json`, `cargo.toml`, `pyproject.toml`,
-  `requirements.txt`, `gemfile`, `build.gradle`, `pom.xml`), emits a non-blocking
-  reminder to `record_decision`. Fail-open. Installed by `init`.
-- **`serve`** (≡ the `--http` flag) — serve the same engine over localhost HTTP
-  (default `:4321`, `--port`) for the lema Workbench desktop GUI instead of stdio
-  MCP.
+```json
+{
+  "mcpServers": {
+    "lema": {
+      "command": "npx",
+      "args": ["-y", "lema-mcp@latest"],
+      "env": { "LEMA_MCP_MODE": "public", "LEMA_PUBLIC_REPO": "react-rfcs" }
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>Windsurf</b></summary>
+
+Add to `~/.codeium/windsurf/mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "lema": { "command": "npx", "args": ["-y", "lema-mcp@latest"] }
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>VS Code (GitHub Copilot)</b></summary>
+
+Add to `.vscode/mcp.json` — note VS Code uses the `servers` key:
+
+```json
+{
+  "servers": {
+    "lema": { "command": "npx", "args": ["-y", "lema-mcp@latest"] }
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>Go install / pinned binary</b></summary>
+
+```bash
+go install github.com/lemahq/lema-mcp/cmd/lema-mcp@latest
+```
+
+For the public demo, set `LEMA_MCP_MODE=public` and `LEMA_PUBLIC_REPO=react-rfcs`
+(`k8s-enhancements` · `rust-rfcs`). The public API URL is baked into the binary.
+</details>
+
+The public config sets only `LEMA_MCP_MODE` + `LEMA_PUBLIC_REPO`
+(`react-rfcs` · `k8s-enhancements` · `rust-rfcs`) — the API URL is compiled in.
+
+---
+
+## Two ways to use it
+
+### 1. The public record — React, Kubernetes, Rust (read-only, no account)
+
+Ask why a popular project decided something, or check whether a direction was
+already rejected, over its recorded RFC/KEP deliberation. This is the `try` server.
+
+### 2. Your own repo — capture + never-reopen (local, no account)
+
+Most "context" tools are read-only — a nicer way to grep your docs. lema reads too,
+but its real job is **never-reopen**:
+
+- Your agent settles a choice → it calls **`record_decision`** with the option it
+  chose **and the alternatives it rejected, with why each was killed** (the part
+  that never survives into the code).
+- Before anyone proposes a direction → **`check_decided`** returns the prior
+  decision if that option is **CLOSED**.
+- On every edit, a **PreToolUse guard hook** (installed by `init`) reads the draft
+  change and surfaces a CLOSED decision *before* the dead option gets re-proposed —
+  enforced off both your captured decisions **and the repo's own ADRs**.
+
+Decisions are captured to `.lema/decisions.jsonl` — a plain append-only file you
+commit, so your whole team's agents share the same memory through git. No key, no
+LLM call on our side: your agent forms the decision; lema stores it and serves it
+back.
+
+#### What never-reopen looks like
+
+Your agent reaches for an option you already killed — and it comes back **CLOSED**,
+with the original reason attached:
+
+> ⛔ **CLOSED — do not propose "SWR":** no first-class mutation / cache
+> invalidation — we'd hand-roll it *(decided 2026-06-04 · "Data fetching for the
+> web app" · chose TanStack Query)*
+
+So the agent surfaces the prior decision instead of re-litigating it. Supersede a
+decision and the *previously chosen* option goes CLOSED too — enforced both ways.
+(That's the real output of `npx lema-mcp demo`, run against a throwaway temp dir.)
+
+The guard is **advisory and fail-open**: in its default `context` mode it injects
+that note as a non-blocking nudge — it never hard-blocks and never auto-approves an
+edit. `LEMA_GUARD_MODE=ask` prompts *you* on a strong match; `off` is a kill switch.
+Any error → it emits nothing and gets out of the way.
+
+---
+
+## Available tools
+
+Your agent calls these over MCP.
+
+### The public record (no account)
+
+| Tool | What it does |
+|------|--------------|
+| **`check_approach`** ★ | Name an approach → a typed `ruled_out` verdict with the recorded **why** (cited) **and** a pointer to where the docs cover the supported path — or an honest `no_recorded_ruling`. The Fusion tool. |
+| **`settled`** | Typed `state` (`settled` / `not_settled` / `unsure`) for a direction, plus each governing decision's ref and reasoning. `not_settled` means *not on the record*, **not approved**. |
+| **`why_decided`** | One cited answer to "why did React / Kubernetes / Rust decide X?", surfacing status and ruled-out alternatives — with a machine-readable abstain (`record_silent: true`) when silent. (`why_not_public` is a deprecated alias.) |
+
+### Your own repo
+
+| Tool | What it does |
+|------|--------------|
+| **`record_decision`** | Capture a settled decision: the chosen option and the **rejected** alternatives (with why each was killed), plus rationale / refs / `supersedes`. Rejected and superseded options come back CLOSED. Append-only. |
+| **`check_decided`** | Adjudicate one proposed direction against decisions already CLOSED → typed verdict (`ruled_out` / `not_ruled_out` / `incomplete` / `error`), off **both** your capture store **and** the repo's ADRs. |
+| **`search_decisions`** | Natural-language query → the most relevant atomic claims (chosen / rejected / constraint / consequence) with their source ADR, under a token budget. |
+| **`get_decision`** · **`list_decisions`** · **`get_decision_graph`** | One decision's full body; the list by status; traversal of typed edges (`supersedes`, `depends_on`, …). |
+| **`search_docs`** · **`get_doc`** | Sectioned, budgeted retrieval over the repo's project markdown (local mode, once a doc tree is indexed) — the matching sections, not whole files. |
+| **`ask`** | One cited, synthesized answer over your team's **hosted** decision graph (hosted mode). |
+
+In your own repo the full server registers the read + capture tools (and the public
+tools too); the `npx lema-mcp try` server runs the public subset only.
+
+---
+
+## Why lema is different (the honest part)
+
+lema's brand *is* its honesty — that's what makes a "why" tool trustworthy:
+
+- **Abstain ≠ approval.** Silence is reported as silence. lema would rather say
+  "no recorded ruling" than manufacture one.
+- **Cited, summarized — not quoted.** Answers are grounded in recorded decisions and
+  paraphrased ("the record indicates …"), each claim tied to a followable ref.
+- **Local-first.** Capture and enforcement run entirely on your machine, in a file
+  you own. No key, no upload, no model call on our side.
+- **No fabricated graph.** A cold import writes no decision→decision edges and no
+  source-authored dates; lema shows what's actually on the record, nothing it can't
+  stand behind.
+
+---
+
+## Does enforcement change what the agent does?
+
+We measured it on **two real public repos we didn't write** (Backstage, vite),
+transcribing six of their documented decisions into `record_decision` format and
+running the **real `lema-mcp guard` binary** on the agent's draft edits. 168 trials,
+0 errors. The honest result is an **existence proof**, not "agents are wrong 58% of
+the time":
+
+- On the one decision that cut against the 2026 frontier model (`node-fetch` →
+  native `fetch`), a blind agent re-proposed the killed library **58.3%** of the
+  time (14/24); lema drove it to **0%** — matching a docs-preloaded arm *without*
+  carrying the doc in context.
+- On the five decisions the model already gets right, lema stayed silent: **0%
+  re-proposal and 0% false-abstain** across 48 trials. No nagging.
+
+A public-repo benchmark *understates* the value — public decisions are
+disproportionately the ones the model already absorbed in training. The decisions
+where enforcement moves the needle are proprietary, contrarian, recent,
+team-specific. Full method and every raw trial:
+[`./docs/enforcement-lift`](./docs/enforcement-lift).
+
+---
 
 ## Configuration & privacy
 
-- **`LEMA_GUARD_MODE`** — `context` (default, non-blocking nudge), `ask` (prompt
-  the human on a strong match), or `off` (kill switch).
+- **`LEMA_GUARD_MODE`** — `context` (default, non-blocking), `ask` (prompt the human
+  on a strong match), or `off`.
 - **`LEMA_DISABLE_QUERY_LOGGING=1`** — drop query text from the usage log entirely.
   Otherwise queries are scrubbed for credential-shaped substrings before logging.
 - **`LEMA_USAGE_LOG` / `LEMA_QUESTION_LOG` / `LEMA_GUARD_LOG`** — opt-in local log
-  files (tool usage, unanswered questions, guard fires) for measuring and
-  calibrating; all off unless set.
+  files; all off unless set.
 
-## Hosted retrieval (optional)
+<details>
+<summary><b>Subcommands & flags</b></summary>
 
-By default everything is local and lexical. To point `search_decisions` at hosted
-hybrid retrieval over your full decision layer, set two env vars — no other change:
+- **`init [dir]`** — wire a repo for capture: registers the server in `.mcp.json`,
+  appends a managed capture-protocol block to `AGENTS.md`, and installs three hooks
+  (a commit reminder, the `nudge` capture prompt on dependency-manifest edits, and
+  the `guard` never-reopen check). Idempotent.
+- **`try <react|kubernetes|rust>`** — wire the read-only public-demo server.
+- **`demo`** — a ~30-second never-reopen walkthrough against a throwaway temp dir
+  (nothing written to your repo). The fastest way to see the CLOSED behavior.
+- **`guard`** / **`nudge`** — the hook bodies `init` installs; advisory, fail-open,
+  always exit 0. You don't call them directly.
+- **`serve`** (≡ `--http`, default `:4321`) — serve the same engine over localhost
+  HTTP for the lema Workbench desktop GUI instead of stdio MCP.
 
-```bash
-LEMA_API_URL=https://<your-lema-api> LEMA_API_TOKEN=<bearer> lema-mcp
-```
+With no flags, lema auto-discovers a decisions directory (`docs/adr`, `doc/adr`,
+`docs/adrs`, `docs/decisions`, `docs/architecture/decisions`,
+`architecture/decisions`, `adr`, `.adr`) and an `openspec/` tree. Point it
+explicitly with `--adr-dir`, `--repo github.com/org/name` (`GITHUB_TOKEN` for
+private), `--ref`, `--pattern`, `--openspec-dir`, or `--capture-file`.
 
-In hosted mode `search_decisions` runs against the atom layer over `POST /retrieve`;
-this is **search-only** in the MVP, so `get_decision` / `list_decisions` /
-`get_decision_graph` return a search-only error and the doc tools aren't
-registered. Capture and enforcement (`record_decision` / `check_decided` / the
-guard) are **always local**.
+**Hosted retrieval (optional).** Set `LEMA_API_URL` + `LEMA_API_TOKEN` to point
+`search_decisions` at hosted hybrid retrieval over your full decision layer
+(search-only in the MVP). Capture and enforcement are always local.
+</details>
+
+---
 
 ## License
 
-MIT. `lema-mcp` is the free, local wedge of [**lema**](https://lema.sh) — the
-system of record for *why*. The hosted decision graph, the team why-surface, and
-the manager-facing Intelligence layer are coming at [lema.sh](https://lema.sh).
+MIT. `lema-mcp` is the free, local wedge of [**lema**](https://lema.sh) — the system
+of record for *why*. The hosted decision graph, the team why-surface, and the
+manager-facing Intelligence layer are at [lema.sh](https://lema.sh).

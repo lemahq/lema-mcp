@@ -2,7 +2,7 @@
   "name": "lema-mcp",
   "version": "0.10.0",
   "mcpName": "io.github.lemahq/lema-mcp",
-  "description": "Local, database-less MCP server that makes your repo's decisions — and what it ruled out — queryable by your coding agent, and lets the agent record new ones with enforced never-reopen.",
+  "description": "MCP server that gives your coding agent the recorded why behind decisions — and what was already ruled out — cited. Check React, Rust, and Kubernetes out of the box, or capture and enforce never-reopen on your own repo. Local, no account.",
   "bin": {
     "lema-mcp": "bin/lema-mcp.js"
   },
@@ -38,6 +38,11 @@
     "decisions",
     "ai",
     "agent",
-    "context"
+    "context",
+    "rfc",
+    "react",
+    "rust",
+    "kubernetes",
+    "documentation"
   ]
 }
