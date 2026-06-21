@@ -30,6 +30,8 @@ something, or whether the approach you're about to take was already rejected.
   links to the RFC / PR where the call was made.
 - A typed **`ruled_out`** verdict when a project already rejected your approach,
   with the recorded reason *and* a pointer to where the docs say to do it instead.
+- A typed **`settled`** verdict when your approach *is* the project's in-force
+  recorded choice — the governing decision cited, with a docs pointer for the how.
 - An honest **"no recorded ruling"** when the record is silent — which means
   *unknown*, **not** *approved*. lema never fills the gap with a guess.
 
@@ -56,6 +58,13 @@ agent's MCP servers (in Claude Code: `/mcp`) and try the flagship tool,
      "<the recorded rationale, summarized — not a quote>"  [1]
      Where to look instead →  https://react.dev/reference/react
      [1] reactjs/rfcs#212
+
+> "I'll mark non-urgent updates with startTransition."   (repo: react)
+
+  ✓ settled — this is React's in-force recorded choice.
+     "<the governing decision, summarized>"  [1]
+     Docs for the how →  https://react.dev/reference/react/startTransition
+     [1] reactjs/rfcs#NNN
 
 > "I'll add a global event bus for cross-component communication."   (repo: react)
 
@@ -252,9 +261,9 @@ Your agent calls these over MCP.
 
 | Tool | What it does |
 |------|--------------|
-| **`check_approach`** ★ | Name an approach → a typed `ruled_out` verdict with the recorded **why** (cited) **and** a pointer to where the docs cover the supported path — or an honest `no_recorded_ruling`. The Fusion tool. |
-| **`settled`** | Typed `state` (`settled` / `not_settled` / `unsure`) for a direction, plus each governing decision's ref and reasoning. `not_settled` means *not on the record*, **not approved**. |
-| **`why_decided`** | One cited answer to "why did React / Kubernetes / Rust decide X?", surfacing status and ruled-out alternatives — with a machine-readable abstain (`record_silent: true`) when silent. (`why_not_public` is a deprecated alias.) |
+| **`check_approach`** ★ | Name an approach → a three-valued verdict: `ruled_out` (rejected, with the recorded **why**, cited), `settled` (it *is* the project's in-force recorded choice, the governing decision cited), or an honest `no_recorded_ruling`. Every verdict carries a pointer to where the docs cover the how. The Fusion tool. |
+| **`settled`** | **Deprecated — use `check_approach`** (whose `settled` verdict folds this in). Typed `state` (`settled` / `not_settled` / `unsure`) for a direction, plus each governing decision's ref and reasoning. `not_settled` means *not on the record*, **not approved**. |
+| **`why_decided`** | One cited answer to "why did React / Kubernetes / Rust decide X?", surfacing status and ruled-out alternatives — with a machine-readable abstain (`record_silent: true`) when silent. (`why_not_public` is a deprecated alias — use `check_approach`.) |
 
 ### Your own repo
 

@@ -77,15 +77,18 @@ var (
 		Description: publicAskDescription,
 		Annotations: readOnlyExternal("Ask why an upstream project decided something"),
 	}
+	// settled + why_not_public are DEPRECATED (ADR-0110): superseded by check_approach,
+	// whose three-valued verdict folds in settled's affirmative signal. Kept one release
+	// as thin aliases (settled→/settled, why_not_public→runSettled) so callers don't break.
 	settledTool = &mcp.Tool{
 		Name:        "settled",
 		Description: settledDescription,
-		Annotations: readOnlyExternal("Check if a direction is already decided (public)"),
+		Annotations: readOnlyExternal("Check if a direction is already decided (public; deprecated — use check_approach)"),
 	}
 	whyNotPublicTool = &mcp.Tool{
 		Name:        "why_not_public",
 		Description: whyNotPublicDescription,
-		Annotations: readOnlyExternal("Check a public project's ruled-out options (deprecated alias for settled)"),
+		Annotations: readOnlyExternal("Check a public project's ruled-out options (deprecated — use check_approach)"),
 	}
 	// check_approach (ADR-0099): the Fusion tool — fuses the recorded why-not
 	// (cited) with a how-pointer for one approach, retrieval-first.
