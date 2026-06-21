@@ -59,13 +59,6 @@ agent's MCP servers (in Claude Code: `/mcp`) and try the flagship tool,
      Where to look instead →  https://react.dev/reference/react
      [1] reactjs/rfcs#212
 
-> "I'll mark non-urgent updates with startTransition."   (repo: react)
-
-  ✓ settled — this is React's in-force recorded choice.
-     "<the governing decision, summarized>"  [1]
-     Docs for the how →  https://react.dev/reference/react/startTransition
-     [1] reactjs/rfcs#NNN
-
 > "I'll add a global event bus for cross-component communication."   (repo: react)
 
   ◦ no_recorded_ruling — React's public record doesn't settle this.
