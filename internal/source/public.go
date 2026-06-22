@@ -160,10 +160,15 @@ type FuseSource struct {
 }
 
 // FuseHow is the repo-level HOW pointer: the project's canonical docs URL plus a
-// topic hint. No vendor identifier — a plain URL (ADR-0099).
+// topic hint. No vendor identifier — a plain URL (ADR-0099). The two-stream fields
+// (ADR-0120) ride additively and are present only when the server has LEMA_FUSE_HOW on.
 type FuseHow struct {
 	DocHome string `json:"doc_home,omitempty"`
 	Topic   string `json:"topic,omitempty"`
+	// SanctionedAlternative is the code-aligned name for the what-instead (the topic on
+	// the ruled_out path); Grounding is its provenance: corpus_chosen | pointer | none.
+	SanctionedAlternative string `json:"sanctioned_alternative,omitempty"`
+	Grounding             string `json:"grounding,omitempty"`
 }
 
 // FuseResult is the Fusion verdict: ruled_out (with the cited why-not + how) or

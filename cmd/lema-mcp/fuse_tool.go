@@ -50,12 +50,17 @@ type fuseSourceOut struct {
 type fuseHowOut struct {
 	DocHome string `json:"doc_home,omitempty"`
 	Topic   string `json:"topic,omitempty"`
+	// Two-stream HOW (ADR-0120), present only when the server has LEMA_FUSE_HOW on:
+	// SanctionedAlternative is the what-instead under its honest name (topic stays a
+	// one-release alias); Grounding is its provenance (corpus_chosen | pointer | none).
+	SanctionedAlternative string `json:"sanctioned_alternative,omitempty"`
+	Grounding             string `json:"grounding,omitempty"`
 }
 
 type checkApproachOutput struct {
 	Repo     string          `json:"repo"`
 	Approach string          `json:"approach"`
-	Verdict  string          `json:"verdict"` // ruled_out | no_recorded_ruling (empty on degrade)
+	Verdict  string          `json:"verdict"` // ruled_out | settled | no_recorded_ruling (empty on degrade)
 	WhyNot   string          `json:"why_not,omitempty"`
 	Sources  []fuseSourceOut `json:"sources"`
 	How      fuseHowOut      `json:"how"`
@@ -116,7 +121,10 @@ func runCheckApproach(ctx context.Context, tool, repo, approach string) (checkAp
 	out := checkApproachOutput{
 		Repo: res.Repo, Approach: res.Approach, Verdict: res.Verdict,
 		WhyNot: res.WhyNot, Sources: sources,
-		How:  fuseHowOut{DocHome: res.How.DocHome, Topic: res.How.Topic},
+		How: fuseHowOut{
+			DocHome: res.How.DocHome, Topic: res.How.Topic,
+			SanctionedAlternative: res.How.SanctionedAlternative, Grounding: res.How.Grounding,
+		},
 		Note: res.Note,
 	}
 	switch {
