@@ -567,7 +567,7 @@ func main() {
 	checkGuardHook()
 
 	ctx := context.Background()
-	server := mcp.NewServer(&mcp.Implementation{Name: "lema-mcp", Version: "0.9.0"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "lema-mcp", Version: "0.11.1"}, nil)
 	mcp.AddTool(server, searchDecisionsTool, searchDecisions)
 	mcp.AddTool(server, getDecisionTool, getDecision)
 	mcp.AddTool(server, listDecisionsTool, listDecisions)
