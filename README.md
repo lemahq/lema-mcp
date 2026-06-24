@@ -254,9 +254,7 @@ Your agent calls these over MCP.
 
 | Tool | What it does |
 |------|--------------|
-| **`check_approach`** ★ | Name an approach → a three-valued verdict: `ruled_out` (rejected, with the recorded **why**, cited), `settled` (it *is* the project's in-force recorded choice, the governing decision cited), or an honest `no_recorded_ruling`. Every verdict carries a pointer to where the docs cover the how. The Fusion tool. |
-| **`settled`** | **Deprecated — use `check_approach`** (whose `settled` verdict folds this in). Typed `state` (`settled` / `not_settled` / `unsure`) for a direction, plus each governing decision's ref and reasoning. `not_settled` means *not on the record*, **not approved**. |
-| **`why_decided`** | One cited answer to "why did React / Kubernetes / Rust decide X?", surfacing status and ruled-out alternatives — with a machine-readable abstain (`record_silent: true`) when silent. (`why_not_public` is a deprecated alias — use `check_approach`.) |
+| **`check_approach`** ★ | Name an approach → a three-valued verdict: `ruled_out` (rejected, with the recorded **why** synthesized and cited), `settled` (it *is* the project's in-force recorded choice, the governing decision cited), or an honest `no_recorded_ruling`. Every verdict carries a pointer to where the docs cover the how. The one public door — it folds in the cited "why was this decided?" answer (the former `why_decided`) and the `settled` check. |
 
 ### Your own repo
 
@@ -270,7 +268,7 @@ Your agent calls these over MCP.
 | **`ask`** | One cited, synthesized answer over your team's **hosted** decision graph (hosted mode). |
 
 In your own repo the full server registers the read + capture tools (and the public
-tools too); the `npx lema-mcp try` server runs the public subset only.
+`check_approach` too); the `npx lema-mcp try` server runs the public door only.
 
 ---
 

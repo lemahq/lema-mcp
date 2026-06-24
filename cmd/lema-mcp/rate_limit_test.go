@@ -10,10 +10,12 @@ import (
 	"github.com/lemahq/lema-mcp/internal/source"
 )
 
-// TestPublicAskRateLimitedConvertsGracefully pins MCP.5: a 429 becomes an honest
-// "free limit reached → connect your repo / account" convert, NOT a hard error
-// and NOT ransom on the answer (the cap is hit; nothing was withheld).
-func TestPublicAskRateLimitedConvertsGracefully(t *testing.T) {
+// TestCheckApproachRateLimitedConvertsGracefully pins MCP.5 on the surviving public
+// door (ADR-0124): a 429 becomes an honest "free limit reached → connect your repo /
+// account" convert, NOT a hard error and NOT ransom on the answer (the cap is hit;
+// nothing was withheld). Moved here from the dropped why_decided handler, which
+// shared the same rateLimitedUpgradeCTA const.
+func TestCheckApproachRateLimitedConvertsGracefully(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	}))
@@ -22,12 +24,12 @@ func TestPublicAskRateLimitedConvertsGracefully(t *testing.T) {
 	publicSrc = source.NewPublic(ts.URL, ts.Client())
 	defer func() { publicSrc = prev }()
 
-	_, out, err := publicAsk(context.Background(), nil, publicAskInput{Repo: "react", Query: "q"})
+	out, err := runCheckApproach(context.Background(), "check_approach", "react", "q")
 	if err != nil {
 		t.Fatalf("rate-limit must convert, not error: %v", err)
 	}
-	if !strings.Contains(strings.ToLower(out.Answer), "limit") {
-		t.Errorf("answer should explain the free limit: %q", out.Answer)
+	if !strings.Contains(strings.ToLower(out.Note), "limit") {
+		t.Errorf("note should explain the free limit: %q", out.Note)
 	}
 	if out.Upgrade == "" || !strings.Contains(out.Upgrade, "utm_source=lema-mcp") {
 		t.Errorf("rate-limit should carry an attributed upgrade CTA: %q", out.Upgrade)
@@ -36,7 +38,7 @@ func TestPublicAskRateLimitedConvertsGracefully(t *testing.T) {
 		t.Errorf("rate-limit returns no sources: %+v", out.Sources)
 	}
 	// Honesty: never ransom-on-the-answer framing.
-	hay := strings.ToLower(out.Upgrade + " " + out.Answer)
+	hay := strings.ToLower(out.Upgrade + " " + out.Note)
 	for _, bad := range []string{"pay to unlock", "unlock this", "withheld", "purchase this"} {
 		if strings.Contains(hay, bad) {
 			t.Errorf("must not read as ransom on the answer (found %q)", bad)

@@ -33,6 +33,67 @@ import (
 // set.
 const MatchThreshold = 1.5
 
+// distinctMatchFloor / singleTokenTau are the matcher-precision guard against a
+// single rare token carrying a match on its own (ADR-0096 follow-up). Weighted IDF
+// means one uncommon term (e.g. "ts") can clear MatchThreshold alone, so a query
+// about TS *config* lexically reaches a ruling about .ts *imports*: same rare word,
+// different approach (a false ruled_out, the costly error). But a single VERY
+// distinctive term is sometimes the whole match (a query "switch to Pinecone" vs a
+// "Pinecone" rejection) — so we don't drop single-token matches at the lexical
+// stage; instead BuildConfirmed demands a STRONGER cosine for them. A genuine
+// single-term match is also semantically central (high cosine); an adjacent-topic
+// coincidence is marginal. Calibrated against the discussion authority eval.
+const (
+	distinctMatchFloor = 2    // distinctive shared terms below which the strict cosine applies
+	singleTokenTau     = 0.76 // cosine a single-distinctive-term match must clear (vs the normal tau)
+	distinctivenessIDF = 2.0  // IDF weight a shared term must clear to COUNT as distinctive (excludes corpus-common words like the project name)
+)
+
+// OptionDF is the document frequency of each significant term over the closed
+// options' match keys — exported so the confirm stage can reuse the exact
+// distinctiveness signal the matcher scores on.
+func OptionDF(closed []source.Atom) (df map[string]int, n int) {
+	df = map[string]int{}
+	for _, a := range closed {
+		if a.MatchKey == "" {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, t := range significantTokens(matchKeyFor(a)) {
+			if !seen[t] {
+				seen[t] = true
+				df[t]++
+			}
+		}
+	}
+	return df, len(closed)
+}
+
+// DistinctiveSharedCount is the number of DISTINCT terms a query shares with an
+// atom's match key whose IDF over the corpus clears distinctivenessIDF — i.e.
+// terms specific enough to carry a real match. A query about TS *config* shares
+// only the project name + a near-common word with a ruling about .ts *imports*;
+// a genuine rejection shares the approach's several content words. df/n come from
+// OptionDF over the same closed set the matcher scored.
+func DistinctiveSharedCount(query string, a source.Atom, df map[string]int, n int) int {
+	q := map[string]bool{}
+	for _, t := range significantTokens(query) {
+		q[t] = true
+	}
+	seen := map[string]bool{}
+	cnt := 0
+	for _, t := range significantTokens(matchKeyFor(a)) {
+		if !q[t] || seen[t] {
+			continue
+		}
+		seen[t] = true
+		if w := math.Log((float64(n)+1)/(float64(df[t])+1)) + 1; w >= distinctivenessIDF {
+			cnt++
+		}
+	}
+	return cnt
+}
+
 // guardStopwords are forced to zero weight regardless of corpus frequency. Two
 // classes: function words, and generic engineering/decision terms that carry no
 // option IDENTITY. The second class is load-bearing for precision — IDF cannot

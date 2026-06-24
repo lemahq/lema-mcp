@@ -338,6 +338,14 @@ func main() {
 			// remind the agent to record_decision. Fail-open; always exit 0.
 			runNudge(os.Args[2:])
 			return
+		case "push":
+			// Stop hook (ADR-0124 Phase 4, the loop's producer): scan the session
+			// transcript for Signal A — check_approach found no ruling, then the
+			// agent adopted the approach — and draft those adoptions to the workspace
+			// as proposed. Dark unless LEMA_FUSE_PUSH; fail-open; always exit 0;
+			// never blocks the stop.
+			runPush(os.Args[2:])
+			return
 		case "plan-guard":
 			// Strata Phase-0 spike (ADR-0090): match a `terraform show -json` plan
 			// against the closed-decision store and emit an advisory review.
@@ -567,7 +575,13 @@ func main() {
 	checkGuardHook()
 
 	ctx := context.Background()
-	server := mcp.NewServer(&mcp.Implementation{Name: "lema-mcp", Version: "0.11.1"}, nil)
+	// The authed server gains the same proactive steering channel the public funnel
+	// already uses (try.go) — it shipped nil, priming agents with nothing (ADR-0124,
+	// the v1 read wedge). Steering rides instructions, never the tool descriptions.
+	server := mcp.NewServer(
+		&mcp.Implementation{Name: "lema-mcp", Version: "0.12.0"},
+		&mcp.ServerOptions{Instructions: authedServerInstructions},
+	)
 	mcp.AddTool(server, searchDecisionsTool, searchDecisions)
 	mcp.AddTool(server, getDecisionTool, getDecision)
 	mcp.AddTool(server, listDecisionsTool, listDecisions)
@@ -578,12 +592,10 @@ func main() {
 
 	// Public demo read path (tokenless) — registered UNCONDITIONALLY, unlike the
 	// authed `ask`: no account needed, so the no-account wedge pulls cited upstream
-	// context (React/k8s/Rust) in the agent loop. The honesty boundary lives in the
-	// tool description; the synthesis-time recall-vs-record steer rides in the
-	// grounding_note output field (see runPublicQuery).
-	mcp.AddTool(server, publicAskTool, publicAsk)
-	mcp.AddTool(server, settledTool, settled)
-	mcp.AddTool(server, whyNotPublicTool, whyNotPublic)
+	// context (React/k8s/Rust) in the agent loop. check_approach is the ONE public
+	// door (ADR-0124): the why_decided why-answer folded into its recall-WHY
+	// synthesis (default-on). The honesty boundary lives in the tool description; the
+	// synthesis-time recall-vs-record steer rides in the grounding_note output field.
 	mcp.AddTool(server, checkApproachTool, checkApproach)
 
 	// Hosted-only `ask` (ADR-0059 shape A) — a synthesized, cited answer over the

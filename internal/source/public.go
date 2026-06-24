@@ -94,60 +94,6 @@ func (p *Public) PublicAsk(ctx context.Context, slug, query string) (AskResult, 
 	}, nil
 }
 
-// SettledDecision is one governing decision surfaced by /settled.
-type SettledDecision struct {
-	Ref    string `json:"ref"`
-	Reason string `json:"reason"`
-}
-
-// SettledResult is the typed public verdict: state + the recorded reasoning.
-type SettledResult struct {
-	Repo      string            `json:"repo"`
-	Topic     string            `json:"topic"`
-	Settled   string            `json:"settled"`
-	Decisions []SettledDecision `json:"decisions"`
-	Note      string            `json:"note"`
-}
-
-type settledReq struct {
-	Slug  string `json:"slug"`
-	Topic string `json:"topic"`
-}
-
-// Settled POSTs {slug, topic} to the no-auth POST /settled and returns the typed
-// "is this already decided, and why?" result. 404 -> ErrPublicGraphNotLoaded,
-// 429 -> ErrPublicRateLimited (same honest degradation as PublicAsk).
-func (p *Public) Settled(ctx context.Context, slug, topic string) (SettledResult, error) {
-	body, err := json.Marshal(settledReq{Slug: slug, Topic: topic})
-	if err != nil {
-		return SettledResult{}, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/settled", bytes.NewReader(body))
-	if err != nil {
-		return SettledResult{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := p.hc.Do(req)
-	if err != nil {
-		return SettledResult{}, fmt.Errorf("settled: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return SettledResult{}, ErrPublicGraphNotLoaded
-	}
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return SettledResult{}, ErrPublicRateLimited
-	}
-	if resp.StatusCode != http.StatusOK {
-		return SettledResult{}, fmt.Errorf("settled: status %d", resp.StatusCode)
-	}
-	var out SettledResult
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return SettledResult{}, fmt.Errorf("settled decode: %w", err)
-	}
-	return out, nil
-}
-
 // FuseSource is one cited rejection behind a /fuse ruled_out verdict. N is the
 // 1-based citation index the why_not [n] markers point at.
 type FuseSource struct {
@@ -166,22 +112,42 @@ type FuseHow struct {
 	DocHome string `json:"doc_home,omitempty"`
 	Topic   string `json:"topic,omitempty"`
 	// SanctionedAlternative is the code-aligned name for the what-instead (the topic on
-	// the ruled_out path); Grounding is its provenance: corpus_chosen | pointer | none.
+	// the ruled_out path); Grounding is its provenance: corpus_chosen | doc_extract |
+	// pointer | none.
 	SanctionedAlternative string `json:"sanctioned_alternative,omitempty"`
 	Grounding             string `json:"grounding,omitempty"`
+	// Guidance / Citation / FetchedAt are the Phase-2 deref (ADR-0120): a verbatim snippet
+	// from the project's own docs, the real fetched section it came from, and the instant
+	// it was fetched (a FACT about when the snippet was read, NOT a liveness claim — it is
+	// frozen in the verdict cache, so on a cache hit it can be much older than the response).
+	// Present only on a deref hit; absent on a pointer/none degrade.
+	Guidance  string           `json:"guidance,omitempty"`
+	Citation  *FuseHowCitation `json:"citation,omitempty"`
+	FetchedAt string           `json:"fetched_at,omitempty"`
+}
+
+// FuseHowCitation is the deref's real section pointer: a fetched-200 URL (host ∈ the
+// project's doc hosts) and its human-facing section label (ADR-0120).
+type FuseHowCitation struct {
+	URL     string `json:"url,omitempty"`
+	Section string `json:"section,omitempty"`
 }
 
 // FuseResult is the Fusion verdict: ruled_out (with the cited why-not + how) or
 // no_recorded_ruling (honest abstain). Decoded from POST /fuse.
 type FuseResult struct {
-	Repo     string       `json:"repo"`
-	Approach string       `json:"approach"`
-	Verdict  string       `json:"verdict"`
-	WhyNot   string       `json:"why_not"`
-	Sources  []FuseSource `json:"sources"`
-	How      FuseHow      `json:"how"`
-	Note     string       `json:"note"`
-	Usage    AskUsage     `json:"-"`
+	Repo     string `json:"repo"`
+	Approach string `json:"approach"`
+	Verdict  string `json:"verdict"`
+	WhyNot   string `json:"why_not"`
+	// Why is the ADR-0121 recall-WHY synthesis: recorded reasoning the backend
+	// serves on a no_recorded_ruling when retrieval grounded something but no
+	// ruling fired (fuse.go writeFuseRecallWhy). It is reasoning, never a ruling.
+	Why     string       `json:"why,omitempty"`
+	Sources []FuseSource `json:"sources"`
+	How     FuseHow      `json:"how"`
+	Note    string       `json:"note"`
+	Usage   AskUsage     `json:"-"`
 }
 
 // fuseWire decodes the raw /fuse response, folding the two synthesis legs into
@@ -205,7 +171,7 @@ type fuseReq struct {
 
 // Fuse POSTs {slug, approach} to the no-auth POST /fuse and returns the fused
 // verdict (why-not + how, or honest abstain). 404 -> ErrPublicGraphNotLoaded,
-// 429 -> ErrPublicRateLimited (same honest degradation as PublicAsk/Settled).
+// 429 -> ErrPublicRateLimited (same honest degradation as PublicAsk).
 func (p *Public) Fuse(ctx context.Context, slug, approach string) (FuseResult, error) {
 	body, err := json.Marshal(fuseReq{Slug: slug, Approach: approach})
 	if err != nil {

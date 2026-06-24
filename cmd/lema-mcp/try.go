@@ -26,7 +26,7 @@ const publicServerKey = "lema"
 // recorded rationale and rejected alternatives are not recoverable from the code;
 // answering "why" from model recall reconstructs them, sometimes wrongly) as fact,
 // not as an instruction to Claude — so it stays clear of the Directory banned-phrase
-// rule. It names no specific tool, so it survives the why_decided / settled renames.
+// rule. It names no specific tool, so it survives the why_decided drop.
 const publicServerInstructions = "lema answers why upstream open-source projects — React, Kubernetes (k8s), and Rust — made their design decisions, and whether a direction was already ruled out, grounded in each project's own recorded RFC/KEP deliberation with GitHub citations. A coding agent cannot recover a project's rationale or its rejected alternatives from the source code; producing a \"why\" from model recall reconstructs it — fluently, sometimes wrongly. This server returns the project's actual record instead. It holds reasoning (why a decision was made, what was rejected), not API syntax or code samples — a documentation tool is the right place for those. When the record is silent it says so; that means \"unknown,\" not \"approved.\" Covered today: React, Kubernetes, Rust."
 
 // errAuthedLemaPresent signals that an authed `lema` server (from `init`) already
@@ -91,12 +91,9 @@ func runPublicOnlyServer() error {
 		fmt.Fprintln(os.Stderr, "lema-mcp: public mode but no LEMA_PUBLIC_API_URL / baked default — the public tools will error until set")
 	}
 	server := mcp.NewServer(
-		&mcp.Implementation{Name: "lema-mcp", Version: "0.9.0"},
+		&mcp.Implementation{Name: "lema-mcp", Version: "0.12.0"},
 		&mcp.ServerOptions{Instructions: publicServerInstructions},
 	)
-	mcp.AddTool(server, publicAskTool, publicAsk)
-	mcp.AddTool(server, settledTool, settled)
-	mcp.AddTool(server, whyNotPublicTool, whyNotPublic)
 	mcp.AddTool(server, checkApproachTool, checkApproach)
 	fmt.Fprintln(os.Stderr, "lema-mcp: public demo mode — why React/Kubernetes/Rust decided things + what they ruled out, no account")
 	return server.Run(context.Background(), &mcp.StdioTransport{})

@@ -63,10 +63,26 @@ func TestDeriveForce(t *testing.T) {
 		{source.Atom{Closed: true, Type: "superseded"}, Historical},
 		{source.Atom{Closed: true, Type: "deprecated"}, Historical},
 		{source.Atom{Closed: true, Type: "advisory"}, Advisory},
-		// no-regression fallback: a closed atom with an unreadable type is still
-		// in the no-go set, so it must bind, not silently drop to advisory.
-		{source.Atom{Closed: true, Type: ""}, Binding},
+		// fail-advisory fallback (ADR-0124/0125): a closed atom whose type we
+		// cannot read must NOT manufacture a binding hard stop. The write-path
+		// risk model inverted the old "default to binding is non-muting" rule —
+		// a forged or garbled closed atom that auto-binds is the gun, so a
+		// binding force is reserved for an explicitly-typed rejected alternative;
+		// everything unrecognized degrades to advisory context, not a ruling.
+		{source.Atom{Closed: true, Type: ""}, Advisory},
+		{source.Atom{Closed: true, Type: "garbled-unknown"}, Advisory},
 		{source.Atom{Closed: false, Type: ""}, Advisory},
+		// The real-world atom that hit the old default→binding fallback: the
+		// capture store marks a SUPERSEDED decision's chosen direction Closed but
+		// keeps Type="chosen" (source/capture.go). It is a superseded lineage =
+		// HISTORICAL context, NOT a hard ruling — the rejected ALTERNATIVES are the
+		// no-go set — so it resolves historical (not_ruled_out), not binding. The
+		// plan-guard's never-reopen enforcement keys on Closed directly (not
+		// DeriveForce), so it still flags reopening a superseded choice.
+		{source.Atom{Closed: true, Type: "chosen"}, Historical},
+		// A non-closed chosen direction (the live decision's own choice) is not a
+		// constraint at all → advisory.
+		{source.Atom{Closed: false, Type: "chosen"}, Advisory},
 	}
 	for _, c := range cases {
 		if got := DeriveForce(c.a); got != c.want {

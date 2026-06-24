@@ -11,14 +11,19 @@ import (
 	"github.com/lemahq/lema-mcp/internal/source"
 )
 
-// TestPublicAskAbstainAttachesUpgradeCTA: on a real abstain (200 with empty
-// sources), the output carries the honest connect-your-repo nudge — never a
-// paywall, always attributed.
-func TestPublicAskAbstainAttachesUpgradeCTA(t *testing.T) {
+// These pin the abstain/grounded/degrade upgrade-CTA paths on check_approach — the
+// one surviving public door (ADR-0124). They moved here from the dropped why_decided
+// handler (runPublicQuery), which shared the SAME abstainUpgradeCTA const, so the
+// coverage rides forward onto runCheckApproach unchanged.
+
+// TestCheckApproachAbstainAttachesUpgradeCTA: on a real abstain (200
+// no_recorded_ruling with empty sources), the output carries the honest
+// connect-your-repo nudge — never a paywall, always attributed.
+func TestCheckApproachAbstainAttachesUpgradeCTA(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"scope": "react-rfcs", "answer": "No recorded decision matched.",
-			"sources": []any{}, "usage": map[string]any{},
+			"repo": "react-rfcs", "approach": "x", "verdict": "no_recorded_ruling",
+			"sources": []any{}, "how": map[string]any{"doc_home": "https://react.dev"},
 		})
 	}))
 	defer ts.Close()
@@ -26,9 +31,9 @@ func TestPublicAskAbstainAttachesUpgradeCTA(t *testing.T) {
 	publicSrc = source.NewPublic(ts.URL, ts.Client())
 	defer func() { publicSrc = prev }()
 
-	_, out, err := publicAsk(context.Background(), nil, publicAskInput{Repo: "react", Query: "x"})
+	out, err := runCheckApproach(context.Background(), "check_approach", "react", "x")
 	if err != nil {
-		t.Fatalf("publicAsk: %v", err)
+		t.Fatalf("runCheckApproach: %v", err)
 	}
 	if len(out.Sources) != 0 {
 		t.Fatalf("expected abstain (no sources), got %d", len(out.Sources))
@@ -47,40 +52,15 @@ func TestPublicAskAbstainAttachesUpgradeCTA(t *testing.T) {
 	}
 }
 
-// TestWhyNotPublicAbstainAlsoGetsCTA: why_not_public is now a thin alias for
-// settled — the shared runSettled path means abstains (not_settled with no
-// decisions) carry the same honest connect-your-repo nudge.
-func TestWhyNotPublicAbstainAlsoGetsCTA(t *testing.T) {
+// TestCheckApproachGroundedHasNoUpgradeCTA: a grounded (cited) ruled_out must NOT
+// carry the CTA — the upsell only fires when the corpus genuinely had nothing.
+func TestCheckApproachGroundedHasNoUpgradeCTA(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"repo": "react-rfcs", "topic": "x",
-			"settled":   "not_settled",
-			"decisions": []any{},
-			"note":      "No recorded decision against it.",
-		})
-	}))
-	defer ts.Close()
-	prev := publicSrc
-	publicSrc = source.NewPublic(ts.URL, ts.Client())
-	defer func() { publicSrc = prev }()
-
-	_, out, err := whyNotPublic(context.Background(), nil, whyNotPublicInput{Repo: "react", Option: "x"})
-	if err != nil {
-		t.Fatalf("whyNotPublic: %v", err)
-	}
-	if out.Upgrade == "" {
-		t.Error("why_not_public abstain should also carry the upgrade CTA")
-	}
-}
-
-// TestPublicAskGroundedHasNoUpgradeCTA: a grounded (cited) answer must NOT carry
-// the CTA — the upsell only fires when the corpus genuinely had nothing.
-func TestPublicAskGroundedHasNoUpgradeCTA(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"scope": "react-rfcs", "answer": "Mixins were rejected [1].",
+			"repo": "react-rfcs", "approach": "mixins", "verdict": "ruled_out",
+			"why_not": "Mixins were rejected [1].",
 			"sources": []map[string]any{{"n": 1, "ref": "reactjs/rfcs#68", "type": "rejected", "text": "x"}},
-			"usage":   map[string]any{"atoms_tokens": 10, "source_tokens": 100, "compression_ratio": 10.0},
+			"how":     map[string]any{"doc_home": "https://react.dev"},
 		})
 	}))
 	defer ts.Close()
@@ -88,18 +68,21 @@ func TestPublicAskGroundedHasNoUpgradeCTA(t *testing.T) {
 	publicSrc = source.NewPublic(ts.URL, ts.Client())
 	defer func() { publicSrc = prev }()
 
-	_, out, err := publicAsk(context.Background(), nil, publicAskInput{Repo: "react", Query: "x"})
+	out, err := runCheckApproach(context.Background(), "check_approach", "react", "mixins")
 	if err != nil {
-		t.Fatalf("publicAsk: %v", err)
+		t.Fatalf("runCheckApproach: %v", err)
+	}
+	if out.Verdict != "ruled_out" {
+		t.Fatalf("verdict = %q, want ruled_out (grounded)", out.Verdict)
 	}
 	if out.Upgrade != "" {
 		t.Errorf("grounded answer must NOT carry the upgrade CTA: %q", out.Upgrade)
 	}
 }
 
-// TestPublicAsk404DegradeHasNoUpgradeCTA: the "graph isn't loaded yet" degrade is
-// an infra state, not an abstain — it must not fire the connect-your-repo nudge.
-func TestPublicAsk404DegradeHasNoUpgradeCTA(t *testing.T) {
+// TestCheckApproach404DegradeHasNoUpgradeCTA: the "graph isn't loaded yet" degrade
+// is an infra state, not an abstain — it must not fire the connect-your-repo nudge.
+func TestCheckApproach404DegradeHasNoUpgradeCTA(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
@@ -108,9 +91,9 @@ func TestPublicAsk404DegradeHasNoUpgradeCTA(t *testing.T) {
 	publicSrc = source.NewPublic(ts.URL, ts.Client())
 	defer func() { publicSrc = prev }()
 
-	_, out, err := publicAsk(context.Background(), nil, publicAskInput{Repo: "rust", Query: "x"})
+	out, err := runCheckApproach(context.Background(), "check_approach", "rust", "x")
 	if err != nil {
-		t.Fatalf("publicAsk: %v", err)
+		t.Fatalf("runCheckApproach: %v", err)
 	}
 	if out.Upgrade != "" {
 		t.Errorf("404 'not loaded' degrade must not carry the upgrade CTA: %q", out.Upgrade)

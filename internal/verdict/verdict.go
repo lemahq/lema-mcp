@@ -43,24 +43,37 @@ type Verdict struct {
 
 // DeriveForce tags a CLOSED atom by how forcefully it governs, from the fields
 // the atom already carries (no schema add). A rejected alternative of a live
-// decision is binding; a superseded/deprecated lineage is historical context.
-// A closed atom whose type we can't read defaults to binding — it is in the
-// no-go set, so treating it as a ruling is the safe (non-muting) fallback; only
-// an explicitly weaker type drops it to advisory. NB: the hosted closedAtomsSQL
-// returns only rejected-of-accepted-live atoms today, so hosted atoms resolve to
-// Binding until the corpus widens to carry genuine advisory data (a later slice).
+// decision is binding; a superseded/deprecated lineage — and a CLOSED chosen
+// direction, which the capture store marks closed only when its decision was
+// superseded (source/capture.go) — is historical context. An atom whose type we
+// can't read FAILS ADVISORY: surfaced as context, never as a binding hard stop.
+// The write path (ADR-0124/0125) inverted the older "default to binding is the
+// safe, non-muting fallback" rule: once any principal can push atoms into the
+// corpus, a forged or garbled closed atom that auto-binds is the gun, so the
+// binding force is reserved for an explicitly rejected alternative and everything
+// unrecognized degrades to advisory. NB: the hosted feed sets
+// Type="rejected_alternative" in ClosedAtomsAsSource (repo/closed_atoms.go), so
+// hosted atoms resolve to Binding via the explicit case below — this fallback
+// only governs atoms whose type genuinely could not be read.
 func DeriveForce(a source.Atom) Force {
 	switch strings.ToLower(a.Type) {
 	case "rejected", "rejected_alternative":
 		return Binding
 	case "superseded", "deprecated":
 		return Historical
+	case "chosen":
+		// A CLOSED chosen direction is a superseded lineage (the capture store
+		// closes it only on supersession) — historical context, not a hard
+		// ruling. Its rejected ALTERNATIVES carry the no-go force.
+		if a.Closed {
+			return Historical
+		}
+		return Advisory
 	case "advisory":
 		return Advisory
 	default:
-		if a.Closed {
-			return Binding
-		}
+		// Fail advisory: do not manufacture a hard stop from a type we cannot
+		// read, whether or not the atom is flagged closed.
 		return Advisory
 	}
 }
@@ -93,9 +106,19 @@ func Build(closed []source.Atom, topic string) Verdict {
 // invert the rule and let unconfirmed atoms through.
 func BuildConfirmed(closed []source.Atom, topic string, sim map[string]float64, tau float64) Verdict {
 	matched := Match(closed, topic, MatchThreshold)
+	df, n := OptionDF(closed)
 	confirmed := make([]source.Atom, 0, len(matched))
 	for _, a := range matched {
-		if sim[a.ID] >= tau {
+		// A match resting on fewer than distinctMatchFloor DISTINCTIVE shared terms
+		// must clear a stronger cosine: a query about TS config reaching a ruling
+		// about .ts imports shares only near-common words (a marginal cosine, the
+		// false ruled_out), while a genuine single-term match is semantically central
+		// (high cosine). Multi-distinctive-term matches use the normal tau.
+		effTau := tau
+		if DistinctiveSharedCount(topic, a, df, n) < distinctMatchFloor && singleTokenTau > tau {
+			effTau = singleTokenTau
+		}
+		if sim[a.ID] >= effTau {
 			confirmed = append(confirmed, a)
 		}
 	}

@@ -66,30 +66,12 @@ var (
 		Annotations: readOnlyLocal("Check if decided"),
 	}
 
-	// public_ask (agent-facing name why_decided, ADR-0097) / settled / why_not_public
-	// are registered by BOTH the full server (main) and the public-only server (try).
-	// The honesty boundary stays in the description; the synthesis-time "keep your own
-	// recall separate" steer rides in the grounding_note OUTPUT field (see
-	// runPublicQuery), not here. The Go identifier stays publicAskTool — it still POSTs
-	// to /ask-public via publicAsk/runPublicQuery.
-	publicAskTool = &mcp.Tool{
-		Name:        "why_decided",
-		Description: publicAskDescription,
-		Annotations: readOnlyExternal("Ask why an upstream project decided something"),
-	}
-	// settled + why_not_public are DEPRECATED (ADR-0110): superseded by check_approach,
-	// whose three-valued verdict folds in settled's affirmative signal. Kept one release
-	// as thin aliases (settled→/settled, why_not_public→runSettled) so callers don't break.
-	settledTool = &mcp.Tool{
-		Name:        "settled",
-		Description: settledDescription,
-		Annotations: readOnlyExternal("Check if a direction is already decided (public; deprecated — use check_approach)"),
-	}
-	whyNotPublicTool = &mcp.Tool{
-		Name:        "why_not_public",
-		Description: whyNotPublicDescription,
-		Annotations: readOnlyExternal("Check a public project's ruled-out options (deprecated — use check_approach)"),
-	}
+	// why_decided + settled + why_not_public were RETIRED here (ADR-0097/0110/0124):
+	// all three are superseded by check_approach, the one public door. why_decided's
+	// why-answer folded into check_approach's recall-WHY synthesis (now default-on,
+	// ADR-0121); settled/why_not_public's rejection signal is covered by its
+	// retrieval-first ruled_out verdict. They shipped one+ release as thin aliases;
+	// this is the drop.
 	// check_approach (ADR-0099): the Fusion tool — fuses the recorded why-not
 	// (cited) with a how-pointer for one approach, retrieval-first.
 	checkApproachTool = &mcp.Tool{
@@ -120,6 +102,6 @@ var (
 // compliance test asserts each one meets the Anthropic Directory criteria.
 var directoryTools = []*mcp.Tool{
 	searchDecisionsTool, getDecisionTool, listDecisionsTool, getDecisionGraphTool,
-	recordDecisionTool, checkDecidedTool, publicAskTool, settledTool, whyNotPublicTool,
+	recordDecisionTool, checkDecidedTool,
 	checkApproachTool, askTool, searchDocsTool, getDocTool,
 }
