@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "lema": {
+      "command": "npx",
+      "args": ["-y", "lema-mcp@latest"],
+      "env": {
+        "LEMA_MCP_MODE": "public",
+        "LEMA_PUBLIC_REPO": "react-rfcs"
+      }
+    }
+  }
+}
