@@ -27,9 +27,11 @@ type guardInput struct {
 // guardOutput / hookSpecificOutput are the PreToolUse response contract.
 // permissionDecision is "ask" (a human prompt) or OMITTED (a context-mode nudge):
 // the guard never emits "allow" — that would skip the user's normal Edit/Write
-// confirmation on the very edit it is flagging — and never "deny" in v1.
+// confirmation on the very edit it is flagging. The autonomous matcher never emits
+// "deny" either; the ONLY deny is human-bound — an attended :respect resolution in
+// terminal mode (see guard_terminal.go), never the matcher on its own.
 // additionalContext is the non-blocking agent nudge; permissionDecisionReason is
-// the "ask" reason (ADR-0052).
+// the "ask"/deny reason (ADR-0052).
 type guardOutput struct {
 	HookSpecificOutput hookSpecificOutput `json:"hookSpecificOutput"`
 }
@@ -252,6 +254,19 @@ func runGuard(args []string) {
 
 	var in guardInput
 	if err := json.Unmarshal(data, &in); err != nil {
+		return
+	}
+	// Terminal mode: inside the lema terminal an attended human resolves the
+	// interception, so the hook delegates to the terminal's serve --http sidecar
+	// (which evaluates with this same matcher) instead of evaluating locally. Unlike
+	// the unattended path below, a resolved :respect can bind a deny — that is the
+	// human's call, not the matcher's (ADR-0052; see guard_terminal.go).
+	if endpoint := os.Getenv(guardEndpointEnvVar); endpoint != "" {
+		if out := guardViaTerminal(guardHTTPClient, endpoint, in); out != nil {
+			if b, err := json.Marshal(out); err == nil {
+				fmt.Println(string(b))
+			}
+		}
 		return
 	}
 	store, err := source.NewCaptureStore(capturePath)

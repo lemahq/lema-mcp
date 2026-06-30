@@ -205,13 +205,58 @@ func TestScanTranscriptForCandidates_EndToEnd(t *testing.T) {
 	}
 }
 
-func TestPushEnabled(t *testing.T) {
-	for v, want := range map[string]bool{"": false, "0": false, "false": false, "yes": false, "1": true, "true": true} {
-		t.Setenv("LEMA_FUSE_PUSH", v)
-		if got := pushEnabled(); got != want {
-			t.Errorf("LEMA_FUSE_PUSH=%q: pushEnabled()=%v, want %v", v, got, want)
+// The producer gate is now the hosted env-wide WorkOS flag lema-fuse-push
+// (ADR-0111), fetched from the API rather than read off a local env var: the
+// Stop hook has no WorkOS session and must not hold WORKOS_API_KEY. The client
+// asks GET /push-enabled (Bearer auth) and fails CLOSED — it scans/transmits
+// only when the API affirmatively returns enabled:true.
+func TestPushProducerEnabled(t *testing.T) {
+	t.Run("enabled true -> on; sends GET /push-enabled with bearer auth", func(t *testing.T) {
+		var gotMethod, gotPath, gotAuth string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotMethod, gotPath, gotAuth = r.Method, r.URL.Path, r.Header.Get("Authorization")
+			_ = json.NewEncoder(w).Encode(map[string]bool{"enabled": true})
+		}))
+		defer srv.Close()
+		if !pushProducerEnabled(context.Background(), srv.Client(), srv.URL, "lema_live_abc") {
+			t.Error("want enabled (true)")
 		}
-	}
+		if gotMethod != http.MethodGet || gotPath != "/push-enabled" {
+			t.Errorf("request = %s %s, want GET /push-enabled", gotMethod, gotPath)
+		}
+		if gotAuth != "Bearer lema_live_abc" {
+			t.Errorf("auth = %q, want Bearer lema_live_abc", gotAuth)
+		}
+	})
+
+	t.Run("enabled false -> off", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]bool{"enabled": false})
+		}))
+		defer srv.Close()
+		if pushProducerEnabled(context.Background(), srv.Client(), srv.URL, "t") {
+			t.Error("want disabled (false)")
+		}
+	})
+
+	t.Run("server error -> fail closed", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+		if pushProducerEnabled(context.Background(), srv.Client(), srv.URL, "t") {
+			t.Error("5xx must fail closed (false)")
+		}
+	})
+
+	t.Run("unreachable API -> fail closed", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		url := srv.URL
+		srv.Close()
+		if pushProducerEnabled(context.Background(), &http.Client{}, url, "t") {
+			t.Error("transport error must fail closed (false)")
+		}
+	})
 }
 
 // The orchestration is fail-open and silent: it pushes only when credentials
@@ -222,6 +267,31 @@ func TestPushRunner(t *testing.T) {
 	cands := []pushCandidate{{Approach: "Redis", Refs: []string{"c.go"}}}
 	base := stopHookInput{TranscriptPath: "/x/session.jsonl"}
 	okPush := func(context.Context, []pushRecord) (pushResponse, error) { return pushResponse{Created: 1}, nil }
+	gateOn := func(context.Context) bool { return true }
+
+	t.Run("producer disabled (gate false) -> no scan, no push", func(t *testing.T) {
+		scanned, pushed := false, false
+		r := pushRunner{
+			gate: func(context.Context) bool { return false },
+			scan: func(string) ([]pushCandidate, error) { scanned = true; return cands, nil },
+			push: func(context.Context, []pushRecord) (pushResponse, error) { pushed = true; return pushResponse{}, nil },
+			now:  time.Now, canPush: true,
+		}
+		if n := r.run(context.Background(), base); n != 0 || scanned || pushed {
+			t.Errorf("n=%d scanned=%v pushed=%v, want 0/false/false — a disabled producer must not read the transcript or transmit", n, scanned, pushed)
+		}
+	})
+
+	t.Run("no gate wired -> fail-closed no-op", func(t *testing.T) {
+		scanned := false
+		r := pushRunner{
+			scan: func(string) ([]pushCandidate, error) { scanned = true; return cands, nil },
+			push: okPush, now: time.Now, canPush: true, // gate nil
+		}
+		if n := r.run(context.Background(), base); n != 0 || scanned {
+			t.Errorf("n=%d scanned=%v, want 0/false — a nil gate must fail closed", n, scanned)
+		}
+	})
 
 	t.Run("no credentials -> no scan, no push", func(t *testing.T) {
 		scanned, pushed := false, false
@@ -255,6 +325,7 @@ func TestPushRunner(t *testing.T) {
 	t.Run("happy path -> drafts proposed", func(t *testing.T) {
 		var got []pushRecord
 		r := pushRunner{
+			gate: gateOn,
 			scan: func(string) ([]pushCandidate, error) { return cands, nil },
 			push: func(_ context.Context, recs []pushRecord) (pushResponse, error) {
 				got = recs
@@ -271,7 +342,7 @@ func TestPushRunner(t *testing.T) {
 	})
 
 	t.Run("scan error -> fail-open no-op", func(t *testing.T) {
-		r := pushRunner{scan: func(string) ([]pushCandidate, error) { return nil, errors.New("boom") }, push: okPush, now: time.Now, canPush: true}
+		r := pushRunner{gate: gateOn, scan: func(string) ([]pushCandidate, error) { return nil, errors.New("boom") }, push: okPush, now: time.Now, canPush: true}
 		if n := r.run(context.Background(), base); n != 0 {
 			t.Errorf("n=%d, want 0 on scan error", n)
 		}
@@ -279,6 +350,7 @@ func TestPushRunner(t *testing.T) {
 
 	t.Run("push error -> fail-open no-op", func(t *testing.T) {
 		r := pushRunner{
+			gate: gateOn,
 			scan: func(string) ([]pushCandidate, error) { return cands, nil },
 			push: func(context.Context, []pushRecord) (pushResponse, error) { return pushResponse{}, errors.New("boom") },
 			now:  time.Now, canPush: true,

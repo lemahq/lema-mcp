@@ -17,6 +17,13 @@ import (
 // graph stay local-only for now.
 var errHostedSearchOnly = errors.New("hosted mode supports search only in this MVP; run lema-mcp without LEMA_API_URL for list/get/graph")
 
+// ErrHostedQuotaReached is returned by CheckApproach when the authed endpoint
+// answers 429 — the plan-aware daily query quota (ADR-0103). It is the authed
+// sibling of ErrPublicRateLimited: the caller converts it into an honest "limit
+// reached" message rather than a raw tool error, so a paying user hitting their
+// quota gets the same graceful degrade the tokenless leg already gives.
+var ErrHostedQuotaReached = errors.New("hosted query quota reached")
+
 // Hosted is a DecisionSource backed by a lema deployment's POST /retrieve
 // (ADR-0040): it sends the query with a bearer token and maps the returned
 // atoms. Only Search is implemented; the other tools report the limitation.
@@ -185,6 +192,61 @@ func (h *Hosted) Ask(ctx context.Context, query string, workspaceIDs []string) (
 			SynthesisTokens: out.SynthesisTokensIn + out.SynthesisTokensOut,
 		},
 	}, nil
+}
+
+// hostedCheckApproachReq is the authed Fusion query (#293): the approach to check
+// against the caller's own corpus, optionally focused to specific workspaces. The
+// workspace_ids key is omitted when empty so the server resolves the caller's full
+// scope rather than an empty list.
+type hostedCheckApproachReq struct {
+	Approach     string   `json:"approach"`
+	WorkspaceIDs []string `json:"workspace_ids,omitempty"`
+}
+
+// CheckApproach POSTs {approach, workspace_ids} to the authed POST /check-approach
+// and returns the fused verdict (ruled_out with the cited why-not, or the honest
+// no_recorded_ruling with the recall-WHY reasoning) over the CALLER'S OWN corpus
+// (#293, ADR-0124). It is the authed sibling of Public.Fuse: the same fuseWire
+// response shape, but with a bearer token and an own-corpus query instead of a public
+// slug — so the MCP tool maps an own-repo verdict exactly like a commons one. Hosted-
+// only by design: answering over the user's recorded decisions needs the hosted
+// retrieval + Vertex synthesis the local DB-less binary deliberately does not carry.
+func (h *Hosted) CheckApproach(ctx context.Context, approach string, workspaceIDs []string) (FuseResult, error) {
+	body, err := json.Marshal(hostedCheckApproachReq{Approach: approach, WorkspaceIDs: workspaceIDs})
+	if err != nil {
+		return FuseResult{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.baseURL+"/check-approach", bytes.NewReader(body))
+	if err != nil {
+		return FuseResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+h.token)
+
+	resp, err := h.hc.Do(req)
+	if err != nil {
+		return FuseResult{}, fmt.Errorf("hosted check-approach: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return FuseResult{}, ErrHostedQuotaReached
+	}
+	if resp.StatusCode != http.StatusOK {
+		return FuseResult{}, fmt.Errorf("hosted check-approach: status %d", resp.StatusCode)
+	}
+	var out fuseWire // same wire shape as POST /fuse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return FuseResult{}, fmt.Errorf("hosted check-approach decode: %w", err)
+	}
+	res := out.FuseResult
+	res.Usage = AskUsage{
+		AtomsTokens:      out.Usage.AtomsTokens,
+		SourceTokens:     out.Usage.SourceTokens,
+		TokensSaved:      out.Usage.TokensSaved,
+		CompressionRatio: out.Usage.CompressionRatio,
+		SynthesisTokens:  out.SynthesisTokensIn + out.SynthesisTokensOut,
+	}
+	return res, nil
 }
 
 func (h *Hosted) List(context.Context, string, int) ([]Summary, error) {

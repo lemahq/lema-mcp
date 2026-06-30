@@ -27,25 +27,17 @@ type recordOutput struct {
 	Recorded string `json:"recorded"`
 }
 
-// recordDecision captures a decision at deliberation to the local store. The
-// calling agent forms the atom (bring-your-own-AI); the server only persists it.
-func recordDecision(_ context.Context, _ *mcp.CallToolRequest, in recordInput) (*mcp.CallToolResult, recordOutput, error) {
-	if capture == nil {
-		return nil, recordOutput{}, fmt.Errorf("capture store is not available")
-	}
-	rec, err := capture.Record(source.DecisionRecord{
-		Title: in.Title, Chosen: in.Chosen, Rejected: in.Rejected, Rationale: in.Rationale,
-		Refs: in.Refs, Constraint: in.Constraint, Consequence: in.Consequence, Supersedes: in.Supersedes,
-	})
+// recordDecision captures a decision at deliberation. The calling agent forms the
+// atom (bring-your-own-AI); the recorder persists it via the active sink (the
+// local capture store in solo mode, or a proposed draft to the org corpus in
+// hosted mode — record_decision.go). The sink is wired in main() by trust tier.
+func recordDecision(ctx context.Context, _ *mcp.CallToolRequest, in recordInput) (*mcp.CallToolResult, recordOutput, error) {
+	out, err := decisionRecorder.record(ctx, in.toDecisionRecord())
 	if err != nil {
 		return nil, recordOutput{}, err
 	}
-	msg := fmt.Sprintf("recorded %q → chose %s", rec.Title, rec.Chosen)
-	if n := len(rec.Rejected); n > 0 {
-		msg += fmt.Sprintf("; %d rejected alternative(s) now CLOSED", n)
-	}
-	logUsage("record_decision", rec.Title, 1, rec)
-	return nil, recordOutput{ID: rec.ID, Status: rec.Status, Recorded: msg}, nil
+	logUsage("record_decision", in.Title, 1, in)
+	return nil, out, nil
 }
 
 type checkInput struct {

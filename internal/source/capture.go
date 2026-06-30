@@ -14,6 +14,14 @@ import (
 	"unicode"
 )
 
+// overrideReopens gates the PROPOSED override re-flag semantics (lema-terminal
+// Phase 2 follow-up): when a CURRENT decision SUPERSEDES a rejecting decision AND
+// chooses the rejected option, that rejected-alternative atom stops enforcing — the
+// precedent-not-scripture case (an explicit, human-authored reversal). DEFAULT-OFF
+// so the locked never-reopen invariant (ADR-0052) is unchanged until ratified. See
+// the proposal doc in workspace/lema-terminal (project)/.
+var overrideReopens = os.Getenv("LEMA_OVERRIDE_REOPENS") == "1"
+
 // RejectedAlt is one killed option and why it was killed — the enforcement
 // payload nothing else in a repo records. When an agent later proposes this
 // option, capture-aware search returns it flagged CLOSED.
@@ -28,17 +36,18 @@ type RejectedAlt struct {
 // the server only stores and projects it. Status is derived, not authored —
 // "superseded" is set when a later record supersedes this one.
 type DecisionRecord struct {
-	ID          string        `json:"id"`
-	TS          string        `json:"ts"`
-	Title       string        `json:"title"`
-	Chosen      string        `json:"chosen"`
-	Rejected    []RejectedAlt `json:"rejected,omitempty"`
-	Rationale   string        `json:"rationale,omitempty"`
-	Refs        []string      `json:"refs,omitempty"`
-	Constraint  string        `json:"constraint,omitempty"`
-	Consequence string        `json:"consequence,omitempty"`
-	Supersedes  []string      `json:"supersedes,omitempty"`
-	Status      string        `json:"status"`
+	ID           string        `json:"id"`
+	TS           string        `json:"ts"`
+	Title        string        `json:"title"`
+	Chosen       string        `json:"chosen"`
+	Rejected     []RejectedAlt `json:"rejected,omitempty"`
+	Rationale    string        `json:"rationale,omitempty"`
+	Refs         []string      `json:"refs,omitempty"`
+	Constraint   string        `json:"constraint,omitempty"`
+	Consequence  string        `json:"consequence,omitempty"`
+	Supersedes   []string      `json:"supersedes,omitempty"`
+	SupersededBy *string       `json:"superseded_by,omitempty"`
+	Status       string        `json:"status"`
 }
 
 // CaptureStore is a writable, JSONL-backed local store of decisions captured at
@@ -141,7 +150,10 @@ func (s *CaptureStore) refreshIfStale() {
 }
 
 // reduce collapses the append log into current state: last record wins per id,
-// then any record's supersedes edges flip the referenced records to superseded.
+// then any record's supersedes edges flip the referenced records to superseded,
+// and any record's own superseded_by marks itself superseded (so a decision
+// condensed from an ADR whose successor is a kept ADR file — a different source
+// — still closes its chosen atom rather than reading as in-force).
 func reduce(lines []DecisionRecord) ([]DecisionRecord, map[string]int) {
 	// Optimization: preallocate slice and map capacity to len(lines) to avoid reallocation.
 	// Measured performance impact (for 10,000 items):
@@ -157,11 +169,14 @@ func reduce(lines []DecisionRecord) ([]DecisionRecord, map[string]int) {
 		byID[r.ID] = len(out)
 		out = append(out, r)
 	}
-	for _, r := range out {
-		for _, sid := range r.Supersedes {
-			if i, ok := byID[sid]; ok {
-				out[i].Status = "superseded"
+	for i := range out {
+		for _, sid := range out[i].Supersedes {
+			if j, ok := byID[sid]; ok {
+				out[j].Status = "superseded"
 			}
+		}
+		if out[i].SupersededBy != nil && *out[i].SupersededBy != "" {
+			out[i].Status = "superseded"
 		}
 	}
 	return out, byID
@@ -298,6 +313,11 @@ func sanitizeRefs(refs []string) []string {
 // chosen option whose decision has been superseded. Caller holds s.mu.
 func (s *CaptureStore) buildAtoms() []Atom {
 	out := []Atom{}
+	// PROPOSAL (default-off, LEMA_OVERRIDE_REOPENS): the options a CURRENT decision
+	// chose while superseding each rejecting decision. A rejected-alternative atom
+	// whose option is rechosen this way stops enforcing — the human-authored reversal.
+	// Built only when the flag is on, so the default never-reopen path is unchanged.
+	rechosen := s.rechosenViaSupersession()
 	for _, r := range s.records {
 		// Sanitize the agent-supplied provenance once per record; it rides onto the
 		// chosen and rejected atoms (the followable, decision-level claims) but not
@@ -325,9 +345,16 @@ func (s *CaptureStore) buildAtoms() []Atom {
 			if alt.Why != "" {
 				text += " — " + alt.Why
 			}
+			// Default: a rejected alternative is CLOSED. PROPOSAL: if a current decision
+			// superseded this one AND chose this option, the team reversed it — the atom
+			// stays in the record (history/search) but no longer enforces.
+			closed, closedNote := true, note
+			if overrideReopens && optionReversed(rechosen[r.ID], alt.Option) {
+				closed, closedNote = false, ""
+			}
 			out = append(out, Atom{
 				ID: fmt.Sprintf("%s-rej-%d", r.ID, i), Type: "rejected_alternative",
-				Text: text, Ref: r.ID, Refs: refs, Closed: true, ClosedNote: note, MatchKey: alt.Option,
+				Text: text, Ref: r.ID, Refs: refs, Closed: closed, ClosedNote: closedNote, MatchKey: alt.Option,
 			})
 		}
 		if r.Constraint != "" {
@@ -338,6 +365,50 @@ func (s *CaptureStore) buildAtoms() []Atom {
 		}
 	}
 	return out
+}
+
+// rechosenViaSupersession maps each superseded decision id → the option keys a
+// CURRENT (not itself superseded) decision chose while superseding it. Empty when
+// the proposal flag is off, so the default path allocates nothing and behaves
+// exactly as before. The reversal is SCOPED to the explicit supersedes edge: an
+// unrelated decision that merely chose the same option does not un-flag anything.
+func (s *CaptureStore) rechosenViaSupersession() map[string][]string {
+	if !overrideReopens {
+		return nil
+	}
+	rechosen := map[string][]string{}
+	for _, d2 := range s.records {
+		if d2.Status == "superseded" { // a reversal that was itself overridden no longer counts
+			continue
+		}
+		ck := optionKey(d2.Chosen)
+		if ck == "" {
+			continue
+		}
+		for _, sid := range d2.Supersedes {
+			rechosen[sid] = append(rechosen[sid], ck)
+		}
+	}
+	return rechosen
+}
+
+// optionKey normalizes an option/chosen string for matching (lowercase, trimmed).
+func optionKey(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+// optionReversed reports whether one of the rechosen options matches this rejected
+// option — exact normalized equality, or the chosen text containing the option
+// (so "Kafka for exactly-once" reverses a rejected "Kafka").
+func optionReversed(chosenKeys []string, option string) bool {
+	ok := optionKey(option)
+	if ok == "" {
+		return false
+	}
+	for _, ck := range chosenKeys {
+		if ck == ok || strings.Contains(ck, ok) {
+			return true
+		}
+	}
+	return false
 }
 
 // Search returns captured atoms relevant to the query, ranked lexically with a
