@@ -42,6 +42,10 @@ func serveHTTP(port int) error {
 	mux.HandleFunc("/api/graph", httpGraph)                  // GET ?number=&depth=
 	mux.HandleFunc("/api/check", httpCheck)                  // GET ?topic=
 	mux.HandleFunc("/api/decided", httpDecided)              // GET — all currently-CLOSED captures (enforcement feed)
+	mux.HandleFunc("/api/guard", httpGuard)                  // POST {tool_name,tool_input} — tool-call interception (advisory)
+	mux.HandleFunc("/api/guard/pending", httpGuardPending)   // GET — open interceptions for the terminal to render
+	mux.HandleFunc("/api/guard/resolve", httpGuardResolve)   // POST {id,resolution,why} — the human's :respect / :override
+	mux.HandleFunc("/api/guard/result", httpGuardResult)     // GET ?id= — the hook polls for the resolution
 	mux.HandleFunc("/api/record", httpRecord)                // POST DecisionRecord
 	mux.HandleFunc("/api/init", httpInit)                    // POST — register lema-mcp in the repo
 	mux.HandleFunc("/api/plugins", httpPlugins)              // GET — Plugins panel snapshot (ADR-0043/0044)
@@ -162,12 +166,32 @@ func httpToken() string {
 	return hex.EncodeToString(b)
 }
 
+// isGuardCoordinationPath reports whether p is one of the tokenless /api/guard*
+// coordination routes (the exact /api/guard, or anything under /api/guard/). The
+// trailing-slash check keeps the exemption precise: an unrelated route like
+// /api/guardian is NOT exempt.
+func isGuardCoordinationPath(p string) bool {
+	return p == "/api/guard" || strings.HasPrefix(p, "/api/guard/")
+}
+
 // withToken guards every /api/ route with the local token (Bearer header or
-// ?token=). /healthz and CORS preflight stay open. A localhost write port that
-// any local process or a drive-by page could POST to is a real surface (ADR-0044).
+// ?token=). /healthz, CORS preflight, and the /api/guard* coordination routes
+// stay open. A localhost write port that any local process or a drive-by page
+// could POST to is a real surface (ADR-0044).
+//
+// The /api/guard* exemption is load-bearing for the lema-terminal loop (ADR-0052):
+// the terminal-mode PreToolUse hook (guard_terminal.go) POSTs /api/guard and polls
+// /api/guard/result with a BARE client — it carries no token, and as engine code
+// running unattended inside the agent's process it has no way to be handed one. v1's
+// boundary for these ephemeral coordination routes is the 127.0.0.1 bind, not a
+// token (the design lock — "localhost bind is the boundary for v1"). They open and
+// resolve an in-memory pending; they never persist. The one persisted write the
+// terminal makes — the :override supersession via /api/record — stays token-guarded
+// (the terminal carries the token there). Without this exemption the hook's POST
+// 401s, fails its JSON decode, and silently fails open: a bare terminal.
 func withToken(token string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions || r.URL.Path == "/healthz" {
+		if r.Method == http.MethodOptions || r.URL.Path == "/healthz" || isGuardCoordinationPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -425,10 +449,6 @@ func httpRecord(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	if capture == nil {
-		http.Error(w, "capture store unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var in source.DecisionRecord
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -440,10 +460,14 @@ func httpRecord(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	rec, err := capture.Record(in)
+	// Route through the same recorder the MCP record_decision tool uses (wired by
+	// trust tier in main): in hosted mode this drafts a `proposed` capture to the
+	// org corpus rather than binding it locally-accepted (ADR-0125), keeping the
+	// GUI and MCP record surfaces consistent.
+	out, err := decisionRecorder.record(r.Context(), in)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSONResp(w, map[string]any{"recorded": rec})
+	writeJSONResp(w, map[string]any{"recorded": out})
 }

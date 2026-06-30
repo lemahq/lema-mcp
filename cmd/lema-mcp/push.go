@@ -38,22 +38,15 @@ import (
 //     mirrors the live capture-guard.py Stop hook and reuses the same Go
 //     transcript machinery (sessions.go / capture_rate.go).
 //
-// The whole feature is dark behind LEMA_FUSE_PUSH (default OFF), so it ships
-// silent in prod until the flag is set (mirrors the backend
-// settledVerdictEnabled).
+// The whole feature is dark unless the env-wide WorkOS Feature Flag
+// `lema-fuse-push` is on (ADR-0111), so it ships silent in prod until the flag
+// is flipped in the dashboard — no client redeploy. The Stop hook holds no
+// WorkOS session (and must never hold WORKOS_API_KEY), so it learns the flag
+// from the hosted API via GET /push-enabled (pushProducerEnabled), fail-closed.
+// The gate replaces the old LEMA_FUSE_PUSH env var, whose value lived on every
+// agent machine; the flag now lives in one place, the WorkOS dashboard.
 
-const (
-	pushFlagEnv      = "LEMA_FUSE_PUSH"    // master switch, default OFF (dark in prod)
-	pushWorkspaceEnv = "LEMA_WORKSPACE_ID" // the workspace the drafts land in
-)
-
-// pushEnabled reports whether the push producer is on. Default OFF, read per
-// invocation — the flag-flip-not-a-build lever, mirroring the backend
-// settledVerdictEnabled.
-func pushEnabled() bool {
-	v := os.Getenv(pushFlagEnv)
-	return v == "1" || v == "true"
-}
+const pushWorkspaceEnv = "LEMA_WORKSPACE_ID" // the workspace the drafts land in
 
 // stopHookInput is the subset of the Claude Code Stop-hook stdin payload the
 // producer reads (mirrors capture-guard.py). Other fields are ignored.
@@ -67,6 +60,11 @@ type stopHookInput struct {
 // scan, the HTTP push, the clock, and whether credentials resolved). The shell
 // runPush wires the real implementations; tests pass fakes.
 type pushRunner struct {
+	// gate reports whether the producer is on for this deployment (the
+	// lema-fuse-push WorkOS flag, via the API pre-check). Checked before scan, so
+	// a disabled producer never reads the transcript or transmits. A nil gate
+	// fails closed (treated as off) — the producer must never run ungated.
+	gate    func(ctx context.Context) bool
 	scan    func(path string) ([]pushCandidate, error)
 	push    func(ctx context.Context, records []pushRecord) (pushResponse, error)
 	now     func() time.Time
@@ -84,6 +82,9 @@ func (r pushRunner) run(ctx context.Context, in stopHookInput) int {
 	if !r.canPush {
 		return 0 // no credentials/workspace resolved — nowhere to draft; fail-open
 	}
+	if r.gate == nil || !r.gate(ctx) {
+		return 0 // producer off (lema-fuse-push) or no gate wired — fail-closed, before any scan/transmit
+	}
 	cands, err := r.scan(in.TranscriptPath)
 	if err != nil || len(cands) == 0 {
 		return 0
@@ -96,21 +97,20 @@ func (r pushRunner) run(ctx context.Context, in stopHookInput) int {
 }
 
 // runPush is the `lema-mcp push` Stop-hook body — the thin I/O shell over the
-// tested pushRunner. Dark unless LEMA_FUSE_PUSH is set. It reads the Stop payload
-// from stdin, resolves the hosted credentials + target workspace
-// (LEMA_WORKSPACE_ID), and drafts any Signal-A adoptions as proposed. Always
-// returns (exit 0) and never writes a block decision to stdout: a producer
-// failure must never wedge a session, and the hook drafts silently rather than
-// nagging (the human's in-app accept is the only judgment).
+// tested pushRunner. It reads the Stop payload from stdin, resolves the hosted
+// credentials + target workspace (LEMA_WORKSPACE_ID), and — only when the
+// hosted env-wide WorkOS flag lema-fuse-push is on (the gate) — drafts any
+// Signal-A adoptions as proposed. Always returns (exit 0) and never writes a
+// block decision to stdout: a producer failure must never wedge a session, and
+// the hook drafts silently rather than nagging (the human's in-app accept is
+// the only judgment).
 //
-// Wire it as a Stop hook in .claude/settings.json once the flag is on:
+// Wire it as a Stop hook in .claude/settings.json (it stays dark until the flag
+// is flipped on, so it's safe to install ahead of turn-on):
 //
 //	"Stop": [{ "matcher": "", "hooks": [{ "type": "command",
 //	  "command": "lema-mcp push" }]}]
 func runPush(args []string) {
-	if !pushEnabled() {
-		return
-	}
 	data, ok := readStopStdin(3 * time.Second)
 	if !ok {
 		return
@@ -121,10 +121,13 @@ func runPush(args []string) {
 	}
 	apiURL, token, _ := resolveHostedConfig()
 	workspaceID := strings.TrimSpace(os.Getenv(pushWorkspaceEnv))
-	// Bound the push so a slow/hung API can never delay the agent's turn-end (the
-	// stdin read is already bounded; the network call must be too).
+	// Bound the whole op so a slow/hung API can never delay the agent's turn-end
+	// (the stdin read is already bounded; the gate pre-check and push share this
+	// budget). The gate fires only inside run(), after the cheap re-entrant/
+	// no-transcript/no-credentials checks — so a no-op Stop costs no WorkOS call.
 	client := &http.Client{Timeout: pushTimeout}
 	r := pushRunner{
+		gate: func(ctx context.Context) bool { return pushProducerEnabled(ctx, client, apiURL, token) },
 		scan: scanTranscriptForCandidates,
 		push: func(ctx context.Context, records []pushRecord) (pushResponse, error) {
 			return pushDecisions(ctx, client, apiURL, token, workspaceID, records)
@@ -137,6 +140,40 @@ func runPush(args []string) {
 	if n := r.run(ctx, in); n > 0 {
 		fmt.Fprintf(os.Stderr, "lema-mcp push: drafted %d decision(s) as proposed — accept in-app to confirm and record them\n", n)
 	}
+}
+
+// pushProducerEnabled asks the hosted API whether the Signal-A producer is on
+// for this deployment: GET {apiURL}/push-enabled → {"enabled": bool}. This is
+// the env-wide WorkOS flag lema-fuse-push (ADR-0111) surfaced to a client that
+// has no WorkOS session of its own — it authenticates with its lema_live_
+// token, the same one it pushes with. Fail-closed: false on any non-200 or
+// transport error, so the producer stays dark unless the API affirmatively says
+// it is on.
+func pushProducerEnabled(ctx context.Context, client *http.Client, apiURL, token string) bool {
+	if apiURL == "" || token == "" {
+		return false
+	}
+	url := strings.TrimRight(apiURL, "/") + "/push-enabled"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return false
+	}
+	return body.Enabled
 }
 
 // pushTimeout bounds the whole push (the HTTP client and the request context) so
@@ -584,7 +621,15 @@ type pushRecord struct {
 	Rejected  []pushRejectedAlt `json:"rejected,omitempty"`
 	Rationale string            `json:"rationale,omitempty"`
 	Refs      []string          `json:"refs,omitempty"`
-	Status    string            `json:"status"`
+	// Constraint/Consequence/Supersedes carry the richer fields an explicit
+	// record_decision capture provides (the server's importDecisionRecord already
+	// accepts them). Signal A leaves them empty — the deterministic transcript
+	// signal can't see a constraint or a superseded decision — so they are
+	// omitempty and only the record_decision wire populates them.
+	Constraint  string   `json:"constraint,omitempty"`
+	Consequence string   `json:"consequence,omitempty"`
+	Supersedes  []string `json:"supersedes,omitempty"`
+	Status      string   `json:"status"`
 }
 
 type pushRequest struct {
@@ -600,6 +645,11 @@ type pushResult struct {
 	Status     string  `json:"status"`
 	Reason     string  `json:"reason,omitempty"`
 	DecisionID *string `json:"decision_id,omitempty"`
+	// Warnings are the server's non-fatal per-record notes (an unresolvable
+	// supersedes target, a local-id collision fork, a lossy status). The record
+	// still landed (status created/updated), but a consumer must surface these so
+	// a degraded outcome is never silent.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 type pushResponse struct {

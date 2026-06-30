@@ -16,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -342,9 +343,23 @@ func main() {
 			// Stop hook (ADR-0124 Phase 4, the loop's producer): scan the session
 			// transcript for Signal A — check_approach found no ruling, then the
 			// agent adopted the approach — and draft those adoptions to the workspace
-			// as proposed. Dark unless LEMA_FUSE_PUSH; fail-open; always exit 0;
-			// never blocks the stop.
+			// as proposed. Dark unless the env-wide WorkOS flag lema-fuse-push is on
+			// (checked via the hosted GET /push-enabled, ADR-0111); fail-open;
+			// always exit 0; never blocks the stop.
 			runPush(os.Args[2:])
+			return
+		case "frontload":
+			// UserPromptSubmit hook (agent-session-loop P1, the loop's reader): retrieve
+			// the recorded decisions relevant to the prompt and inject them as context
+			// before the agent acts. Dark unless LEMA_FUSE_FRONTLOAD; abstains (injects
+			// nothing) when the record is silent; fail-open; always exit 0.
+			runFrontload(os.Args[2:])
+			return
+		case "run-event":
+			// Run-ledger hooks (run-ledger v1 local slice): spool session events per tab,
+			// distill on PreCompact, inject checkpoint on SessionStart. Dark unless
+			// LEMA_RUN_LEDGER=1 (set per-PTY by lema-terminal); fail-open; always exit 0.
+			runRunEvent(os.Args[2:])
 			return
 		case "plan-guard":
 			// Strata Phase-0 spike (ADR-0090): match a `terraform show -json` plan
@@ -425,18 +440,19 @@ func main() {
 	// the per-user ~/.config/lema/credentials file filling whatever env leaves
 	// unset (ADR-0060 resolved question 1 — the channel for GUI-launched
 	// editors whose MCP child doesn't inherit shell env). Env always wins.
-	if apiURL, token, usedFile := resolveHostedConfig(); apiURL != "" {
-		if token == "" {
+	hostedAPIURL, hostedToken, hostedViaFile := resolveHostedConfig()
+	if hostedAPIURL != "" {
+		if hostedToken == "" {
 			log.Fatal("lema-mcp: LEMA_API_TOKEN is required when LEMA_API_URL is set (env, or ~/.config/lema/credentials)")
 		}
-		hostedSrc = source.NewHosted(apiURL, token, nil)
+		hostedSrc = source.NewHosted(hostedAPIURL, hostedToken, nil)
 		src = hostedSrc
 		corpusSize = -1 // hosted: remote corpus size is unknown
 		via := ""
-		if usedFile {
+		if hostedViaFile {
 			via = " (credentials file)"
 		}
-		fmt.Fprintf(os.Stderr, "lema-mcp: hosted atom search + ask via %s%s\n", apiURL, via)
+		fmt.Fprintf(os.Stderr, "lema-mcp: hosted atom search + ask via %s%s\n", hostedAPIURL, via)
 	}
 
 	// Public demo graphs (React/k8s/Rust): the tokenless read path into the seeded
@@ -560,6 +576,31 @@ func main() {
 		fmt.Fprintf(os.Stderr, "lema-mcp: %d captured decision(s) in %s\n", n, *captureFile)
 	}
 
+	// Wire the record_decision sink by trust tier (record_decision.go). HOSTED
+	// (LEMA_API_URL set): push captures to the org corpus as `proposed` drafts that
+	// a human's in-app accept binds (ADR-0125), reusing the push client. SOLO:
+	// append to the local capture store, which binds on this machine. Hosted with no
+	// LEMA_WORKSPACE_ID fails loud rather than silently binding a draft locally.
+	if hostedSrc != nil {
+		workspaceID := strings.TrimSpace(os.Getenv(pushWorkspaceEnv))
+		if workspaceID == "" {
+			decisionRecorder = recorder{pushHosted: func(context.Context, source.DecisionRecord) (recordOutput, error) {
+				return recordOutput{}, fmt.Errorf("record_decision: hosted mode is on but %s is unset — set it to your lema workspace id to record decisions to your team's corpus", pushWorkspaceEnv)
+			}}
+		} else {
+			client := &http.Client{Timeout: recordPushTimeout}
+			push := func(ctx context.Context, recs []pushRecord) (pushResponse, error) {
+				return pushDecisions(ctx, client, hostedAPIURL, hostedToken, workspaceID, recs)
+			}
+			decisionRecorder = recorder{pushHosted: func(ctx context.Context, dr source.DecisionRecord) (recordOutput, error) {
+				return recordToHosted(ctx, dr, time.Now(), push)
+			}}
+			fmt.Fprintf(os.Stderr, "lema-mcp: record_decision drafts to hosted workspace %s\n", workspaceID)
+		}
+	} else {
+		decisionRecorder = recorder{capture: capture}
+	}
+
 	// HTTP mode (ADR-0043/0044): serve the same engine over localhost for the lema
 	// Workspaces GUI instead of the stdio MCP transport.
 	if serveMode || *httpFlag {
@@ -579,7 +620,7 @@ func main() {
 	// already uses (try.go) — it shipped nil, priming agents with nothing (ADR-0124,
 	// the v1 read wedge). Steering rides instructions, never the tool descriptions.
 	server := mcp.NewServer(
-		&mcp.Implementation{Name: "lema-mcp", Version: "0.12.0"},
+		&mcp.Implementation{Name: "lema-mcp", Version: "0.13.0"},
 		&mcp.ServerOptions{Instructions: authedServerInstructions},
 	)
 	mcp.AddTool(server, searchDecisionsTool, searchDecisions)
@@ -596,7 +637,17 @@ func main() {
 	// door (ADR-0124): the why_decided why-answer folded into its recall-WHY
 	// synthesis (default-on). The honesty boundary lives in the tool description; the
 	// synthesis-time recall-vs-record steer rides in the grounding_note output field.
-	mcp.AddTool(server, checkApproachTool, checkApproach)
+	// In hosted mode (#293) check_approach answers over the caller's OWN corpus, so
+	// register it with the own-repo-accurate description + title (a shallow copy; the
+	// default public tool is untouched for the tokenless wedge and the try binary).
+	caTool := checkApproachTool
+	if hostedSrc != nil {
+		t := *checkApproachTool
+		t.Description = checkApproachHostedDescription
+		t.Annotations = readOnlyExternal("Check whether an approach was ruled out in your connected repos, with the why")
+		caTool = &t
+	}
+	mcp.AddTool(server, caTool, checkApproach)
 
 	// Hosted-only `ask` (ADR-0059 shape A) — a synthesized, cited answer over the
 	// hosted graph. Registered only in hosted mode (LEMA_API_URL set): the local

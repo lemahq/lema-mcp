@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -232,6 +233,33 @@ func TestClosedAtomsNilSafe(t *testing.T) {
 	var s *CaptureStore
 	if got := s.ClosedAtoms(); got != nil {
 		t.Errorf("nil store ClosedAtoms = %v, want nil", got)
+	}
+}
+
+// TestSupersededByClosesChosen covers a decision condensed from an ADR whose
+// successor is a KEPT ADR file (a different source): the loaded record carries
+// its own superseded_by, so reduce() must mark it superseded and CLOSE its
+// chosen atom — even though no in-store record supersedes it and its written
+// status is not "superseded". Without honoring superseded_by, an overridden
+// decision would read as in-force.
+func TestSupersededByClosesChosen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "d.jsonl")
+	line := `{"id":"ADR-0110","ts":"2026-06-21T00:00Z","title":"Two MCP doors","chosen":"two tools","superseded_by":"ADR-0124","status":"accepted"}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewCaptureStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawClosedChosen bool
+	for _, a := range s.ClosedAtoms() {
+		if a.Type == "chosen" && a.Ref == "ADR-0110" {
+			sawClosedChosen = true
+		}
+	}
+	if !sawClosedChosen {
+		t.Error("superseded_by set should CLOSE the chosen atom even when status != superseded")
 	}
 }
 
