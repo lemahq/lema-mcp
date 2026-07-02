@@ -48,8 +48,9 @@ func sampleDecisionRecord() source.DecisionRecord {
 // In hosted mode a capture is pushed as a single PROPOSED draft carrying the full
 // record_decision payload (rejected alts with why, constraint, consequence,
 // supersedes), a stable content-keyed id, and the stamped time — and the tool
-// output tells the human to accept it to bind. The whole reason hosted capture is
-// safe: the draft can only ever be proposed; a human accept is what binds.
+// output conveys it's live in recall, with a human confirm what binds the ruling
+// (no inbox accept-queue, ADR-0135). The whole reason hosted capture is safe: the
+// draft can only ever be proposed; a human confirm (never the agent) is what binds.
 func TestRecordToHosted_DraftsFullProposedRecord(t *testing.T) {
 	dr := sampleDecisionRecord()
 	now := time.Date(2026, 6, 27, 12, 0, 0, 0, time.UTC)
@@ -106,15 +107,18 @@ func TestRecordToHosted_DraftsFullProposedRecord(t *testing.T) {
 	if out.ID != "dec_9001" {
 		t.Errorf("output id = %q, want the server decision id dec_9001", out.ID)
 	}
-	if !strings.Contains(strings.ToLower(out.Recorded), "accept") {
-		t.Errorf("output message %q must tell the human to accept it to bind", out.Recorded)
+	if !strings.Contains(strings.ToLower(out.Recorded), "confirm") {
+		t.Errorf("output message %q must convey that a human confirm binds the ruling", out.Recorded)
+	}
+	if strings.Contains(strings.ToLower(out.Recorded), "inbox") {
+		t.Errorf("output message %q must not reference the removed inbox (ADR-0135)", out.Recorded)
 	}
 }
 
 // #4: the output status + message follow the server's per-record outcome. A
-// created record is a proposed draft to accept; an updated/skipped record means
-// the decision already existed (an import never changes its lifecycle status), so
-// the tool must NOT tell the human to go accept a draft that may already be bound.
+// created record is a proposed draft (live in recall; a human confirm binds it);
+// an updated/skipped record means the decision already existed (an import never
+// changes its lifecycle status), so the tool must NOT re-announce a fresh draft.
 func TestRecordToHosted_StatusFollowsServerResult(t *testing.T) {
 	dr := sampleDecisionRecord()
 	now := time.Date(2026, 6, 27, 12, 0, 0, 0, time.UTC)
@@ -129,9 +133,9 @@ func TestRecordToHosted_StatusFollowsServerResult(t *testing.T) {
 		wantContains    string
 		wantNotContains string
 	}{
-		{"created", "proposed", "accept", ""},
-		{"updated", "updated", "updated", "accept it in your lema inbox"},
-		{"skipped", "skipped", "already recorded", "accept it in your lema inbox"},
+		{"created", "proposed", "confirm", "inbox"},
+		{"updated", "updated", "updated", "inbox"},
+		{"skipped", "skipped", "already recorded", "inbox"},
 	}
 	for _, tc := range cases {
 		out, err := recordToHosted(context.Background(), dr, now, mk(tc.serverStatus))

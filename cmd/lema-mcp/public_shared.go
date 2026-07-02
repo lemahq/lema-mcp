@@ -24,6 +24,11 @@ var publicRepoSlugs = map[string]string{
 	"k8s-enhancements": "k8s-enhancements",
 	"rust":             "rust-rfcs",
 	"rust-rfcs":        "rust-rfcs",
+	"vue":              "vue-rfcs",
+	"vue-rfcs":         "vue-rfcs",
+	"go":               "go-proposals",
+	"golang":           "go-proposals",
+	"go-proposals":     "go-proposals",
 }
 
 // abstainUpgradeCTA is the honest conversion line on an abstain: the public graph

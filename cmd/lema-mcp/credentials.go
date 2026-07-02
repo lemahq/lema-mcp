@@ -21,6 +21,13 @@ import (
 
 const credentialsRelPath = ".config/lema/credentials"
 
+// workspaceIDEnv names the target workspace a hosted capture (record_decision /
+// the Stop-hook push) drafts into, and the workspace the frontload retrieval is
+// scoped to. Resolved by resolveWorkspaceID with the same env-first-then-file
+// precedence as the URL/token, so the per-user credentials file — the
+// recommended, key-safe channel — can carry it too (not only .mcp.json env).
+const workspaceIDEnv = "LEMA_WORKSPACE_ID"
+
 // credentialsPath returns ~/.config/lema/credentials, or "" when no home
 // directory is resolvable.
 func credentialsPath() string {
@@ -99,4 +106,23 @@ func resolveHostedConfig() (apiURL, token string, usedFile bool) {
 		usedFile = true
 	}
 	return apiURL, token, usedFile
+}
+
+// resolveWorkspaceID resolves the hosted capture/frontload target workspace:
+// process env first, then the per-user credentials file for whatever env leaves
+// unset — the same precedence resolveHostedConfig uses for URL/token. Env-first
+// means an explicit LEMA_WORKSPACE_ID short-circuits the file read entirely, so
+// a shell-env or .mcp.json setup behaves exactly as before; the file only fills
+// the gap, which is what lets the recommended credentials-file channel target a
+// workspace without exporting an env var. Returns "" when neither is set — the
+// callers treat that as "no workspace, nothing to push/draft" (fail-open).
+func resolveWorkspaceID() string {
+	if v := strings.TrimSpace(os.Getenv(workspaceIDEnv)); v != "" {
+		return v
+	}
+	creds, err := readCredentialsFile(credentialsPath())
+	if err != nil || creds == nil {
+		return ""
+	}
+	return strings.TrimSpace(creds[workspaceIDEnv])
 }
