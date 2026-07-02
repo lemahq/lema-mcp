@@ -76,6 +76,34 @@ func TestResolveHostedConfigNoFileNoEnv(t *testing.T) {
 	}
 }
 
+// resolveWorkspaceID mirrors the URL/token precedence: env first, then the
+// per-user credentials file. This is what lets the recommended credentials-file
+// setup channel target a capture workspace without exporting an env var.
+
+func TestResolveWorkspaceIDFromFile(t *testing.T) {
+	t.Setenv(workspaceIDEnv, "")
+	writeCredsFile(t, "LEMA_API_URL=https://api.example.test\nLEMA_API_TOKEN=lema_live_abc\nLEMA_WORKSPACE_ID=ws-from-file\n", 0o600)
+	if got := resolveWorkspaceID(); got != "ws-from-file" {
+		t.Errorf("resolveWorkspaceID() = %q, want ws-from-file (from credentials file)", got)
+	}
+}
+
+func TestResolveWorkspaceIDEnvWins(t *testing.T) {
+	writeCredsFile(t, "LEMA_WORKSPACE_ID=ws-from-file\n", 0o600)
+	t.Setenv(workspaceIDEnv, "ws-from-env")
+	if got := resolveWorkspaceID(); got != "ws-from-env" {
+		t.Errorf("resolveWorkspaceID() = %q, want ws-from-env (env always wins)", got)
+	}
+}
+
+func TestResolveWorkspaceIDUnset(t *testing.T) {
+	t.Setenv(workspaceIDEnv, "")
+	writeCredsFile(t, "LEMA_API_TOKEN=lema_live_x\n", 0o600) // no workspace id in env or file
+	if got := resolveWorkspaceID(); got != "" {
+		t.Errorf("resolveWorkspaceID() = %q, want empty when unset everywhere", got)
+	}
+}
+
 func TestReadCredentialsFileParsing(t *testing.T) {
 	path := writeCredsFile(t, "\n# comment\nLEMA_API_TOKEN = lema_live_x \nmalformed line\nEXTRA=1\n", 0o600)
 	creds, err := readCredentialsFile(path)

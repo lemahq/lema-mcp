@@ -455,7 +455,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "lema-mcp: hosted atom search + ask via %s%s\n", hostedAPIURL, via)
 	}
 
-	// Public demo graphs (React/k8s/Rust): the tokenless read path into the seeded
+	// Public demo graphs (React/k8s/Rust/Vue/Go): the tokenless read path into the seeded
 	// public store at no-auth POST /ask-public. Independent of hosted/local mode —
 	// public_ask is registered unconditionally — so an agent gets cited upstream
 	// context with no account. LEMA_PUBLIC_API_URL overrides the baked default.
@@ -582,10 +582,10 @@ func main() {
 	// append to the local capture store, which binds on this machine. Hosted with no
 	// LEMA_WORKSPACE_ID fails loud rather than silently binding a draft locally.
 	if hostedSrc != nil {
-		workspaceID := strings.TrimSpace(os.Getenv(pushWorkspaceEnv))
+		workspaceID := resolveWorkspaceID()
 		if workspaceID == "" {
 			decisionRecorder = recorder{pushHosted: func(context.Context, source.DecisionRecord) (recordOutput, error) {
-				return recordOutput{}, fmt.Errorf("record_decision: hosted mode is on but %s is unset — set it to your lema workspace id to record decisions to your team's corpus", pushWorkspaceEnv)
+				return recordOutput{}, fmt.Errorf("record_decision: hosted mode is on but %s is unset — set it to your lema workspace id (in your shell env, ~/.config/lema/credentials, or the .mcp.json env block) to record decisions to your team's corpus", workspaceIDEnv)
 			}}
 		} else {
 			client := &http.Client{Timeout: recordPushTimeout}
@@ -620,7 +620,7 @@ func main() {
 	// already uses (try.go) — it shipped nil, priming agents with nothing (ADR-0124,
 	// the v1 read wedge). Steering rides instructions, never the tool descriptions.
 	server := mcp.NewServer(
-		&mcp.Implementation{Name: "lema-mcp", Version: "0.13.0"},
+		&mcp.Implementation{Name: "lema-mcp", Version: "0.14.0"},
 		&mcp.ServerOptions{Instructions: authedServerInstructions},
 	)
 	mcp.AddTool(server, searchDecisionsTool, searchDecisions)
@@ -633,7 +633,7 @@ func main() {
 
 	// Public demo read path (tokenless) — registered UNCONDITIONALLY, unlike the
 	// authed `ask`: no account needed, so the no-account wedge pulls cited upstream
-	// context (React/k8s/Rust) in the agent loop. check_approach is the ONE public
+	// context (React/k8s/Rust/Vue/Go) in the agent loop. check_approach is the ONE public
 	// door (ADR-0124): the why_decided why-answer folded into its recall-WHY
 	// synthesis (default-on). The honesty boundary lives in the tool description; the
 	// synthesis-time recall-vs-record steer rides in the grounding_note output field.

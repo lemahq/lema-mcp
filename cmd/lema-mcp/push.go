@@ -46,8 +46,6 @@ import (
 // The gate replaces the old LEMA_FUSE_PUSH env var, whose value lived on every
 // agent machine; the flag now lives in one place, the WorkOS dashboard.
 
-const pushWorkspaceEnv = "LEMA_WORKSPACE_ID" // the workspace the drafts land in
-
 // stopHookInput is the subset of the Claude Code Stop-hook stdin payload the
 // producer reads (mirrors capture-guard.py). Other fields are ignored.
 type stopHookInput struct {
@@ -120,7 +118,7 @@ func runPush(args []string) {
 		return
 	}
 	apiURL, token, _ := resolveHostedConfig()
-	workspaceID := strings.TrimSpace(os.Getenv(pushWorkspaceEnv))
+	workspaceID := resolveWorkspaceID()
 	// Bound the whole op so a slow/hung API can never delay the agent's turn-end
 	// (the stdin read is already bounded; the gate pre-check and push share this
 	// budget). The gate fires only inside run(), after the cheap re-entrant/

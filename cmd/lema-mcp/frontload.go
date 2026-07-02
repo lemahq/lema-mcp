@@ -43,10 +43,9 @@ import (
 //	  "command": "lema-mcp frontload" }]}]
 
 const (
-	frontloadFlagEnv      = "LEMA_FUSE_FRONTLOAD" // master switch, default OFF (dark in prod)
-	frontloadWorkspaceEnv = "LEMA_WORKSPACE_ID"   // the workspace retrieval is scoped to
-	frontloadMaxSources   = 5                     // hard cap on injected atoms — never the whole graph
-	frontloadMaxQueryLen  = 2000                  // cap the scope-query length (runes)
+	frontloadFlagEnv     = "LEMA_FUSE_FRONTLOAD" // master switch, default OFF (dark in prod)
+	frontloadMaxSources  = 5                     // hard cap on injected atoms — never the whole graph
+	frontloadMaxQueryLen = 2000                  // cap the scope-query length (runes)
 )
 
 // frontloadTimeout bounds the whole frontload (the HTTP client and the request
@@ -177,7 +176,7 @@ func runFrontload(args []string) {
 		return
 	}
 	apiURL, token, _ := resolveHostedConfig()
-	workspaceID := strings.TrimSpace(os.Getenv(frontloadWorkspaceEnv))
+	workspaceID := resolveWorkspaceID()
 	client := &http.Client{Timeout: frontloadTimeout}
 	hosted := source.NewHosted(apiURL, token, client)
 	r := frontloadRunner{

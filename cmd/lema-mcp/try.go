@@ -27,7 +27,7 @@ const publicServerKey = "lema"
 // answering "why" from model recall reconstructs them, sometimes wrongly) as fact,
 // not as an instruction to Claude — so it stays clear of the Directory banned-phrase
 // rule. It names no specific tool, so it survives the why_decided drop.
-const publicServerInstructions = "lema answers why upstream open-source projects — React, Kubernetes (k8s), and Rust — made their design decisions, and whether a direction was already ruled out, grounded in each project's own recorded RFC/KEP deliberation with GitHub citations. A coding agent cannot recover a project's rationale or its rejected alternatives from the source code; producing a \"why\" from model recall reconstructs it — fluently, sometimes wrongly. This server returns the project's actual record instead. It holds reasoning (why a decision was made, what was rejected), not API syntax or code samples — a documentation tool is the right place for those. When the record is silent it says so; that means \"unknown,\" not \"approved.\" Covered today: React, Kubernetes, Rust."
+const publicServerInstructions = "lema answers why upstream open-source projects — React, Kubernetes (k8s), Rust, Vue, and Go — made their design decisions, and whether a direction was already ruled out, grounded in each project's own recorded RFC/KEP deliberation with GitHub citations. A coding agent cannot recover a project's rationale or its rejected alternatives from the source code; producing a \"why\" from model recall reconstructs it — fluently, sometimes wrongly. This server returns the project's actual record instead. It holds reasoning (why a decision was made, what was rejected), not API syntax or code samples — a documentation tool is the right place for those. When the record is silent it says so; that means \"unknown,\" not \"approved.\" Covered today: React, Kubernetes, Rust, Vue, Go."
 
 // errAuthedLemaPresent signals that an authed `lema` server (from `init`) already
 // exists in .mcp.json. `try` must not downgrade it — the authed server already
@@ -95,23 +95,23 @@ func runPublicOnlyServer() error {
 		&mcp.ServerOptions{Instructions: publicServerInstructions},
 	)
 	mcp.AddTool(server, checkApproachTool, checkApproach)
-	fmt.Fprintln(os.Stderr, "lema-mcp: public demo mode — why React/Kubernetes/Rust decided things + what they ruled out, no account")
+	fmt.Fprintln(os.Stderr, "lema-mcp: public demo mode — why React/Kubernetes/Rust/Vue/Go decided things + what they ruled out, no account")
 	return server.Run(context.Background(), &mcp.StdioTransport{})
 }
 
 // runTry writes the read-only public-demo server into ./.mcp.json + prints next steps.
 func runTry(args []string) error {
 	if len(args) < 1 || strings.TrimSpace(args[0]) == "" {
-		return fmt.Errorf("usage: lema-mcp try <react|kubernetes|rust>")
+		return fmt.Errorf("usage: lema-mcp try <react|kubernetes|rust|vue|go>")
 	}
 	repo := strings.ToLower(strings.TrimSpace(args[0]))
 	slug, ok := publicRepoSlugs[repo]
 	if !ok {
-		return fmt.Errorf("unknown repo %q; supported: react, kubernetes, rust", args[0])
+		return fmt.Errorf("unknown repo %q; supported: react, kubernetes, rust, vue, go", args[0])
 	}
 	if _, err := ensureMCPTryJSON(".mcp.json", slug, resolvePublicAPIURL()); err != nil {
 		if errors.Is(err, errAuthedLemaPresent) {
-			fmt.Println("You already have the full lema server in .mcp.json — it includes the public React/Kubernetes/Rust tools, so there's nothing to add.")
+			fmt.Println("You already have the full lema server in .mcp.json — it includes the public React/Kubernetes/Rust/Vue/Go tools, so there's nothing to add.")
 			return nil
 		}
 		return err

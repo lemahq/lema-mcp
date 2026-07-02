@@ -78,9 +78,10 @@ func (r recorder) record(ctx context.Context, dr source.DecisionRecord) (recordO
 // rejected alternatives (the enforcement payload), constraint, consequence, and
 // supersedes — under a stable content-keyed id so a re-record is idempotent. The
 // output status + message follow the server's per-record outcome: `created` is a
-// new proposed draft to accept; `updated`/`skipped` mean the decision already
-// existed (an import never changes a decision's lifecycle status), so it does NOT
-// claim "proposed / go accept it". Any non-fatal server warnings are surfaced so
+// new proposed draft — live in recall, with a human confirm what binds its
+// ruling (per ADR-0135 there is no inbox accept-queue); `updated`/`skipped` mean
+// the decision already existed (an import never changes a decision's lifecycle
+// status), so it does NOT re-announce a fresh draft. Any non-fatal server warnings are surfaced so
 // a degraded outcome (e.g. an unresolvable supersedes target) is never silent. A
 // transport failure OR a server-reported per-record failure is returned (fail
 // loud); it NEVER silently falls back to the local store.
@@ -129,9 +130,9 @@ func recordToHosted(ctx context.Context, dr source.DecisionRecord, now time.Time
 		msg = fmt.Sprintf("%q is already recorded in your team's corpus — no change", dr.Title)
 	default: // "created", or an empty/unknown status — treat as a new proposed draft
 		status = pushStatusProposed
-		msg = fmt.Sprintf("drafted %q as proposed in your team's corpus — accept it in your lema inbox to confirm and record it", dr.Title)
+		msg = fmt.Sprintf("recorded %q in your team's corpus — live in recall now", dr.Title)
 		if n := len(dr.Rejected); n > 0 {
-			msg += fmt.Sprintf(" (with %d rejected alternative(s) that bind as CLOSED on accept)", n)
+			msg += fmt.Sprintf(" (its %d ruled-out alternative(s) start enforcing once a human confirms the ruling — an agent capture never self-binds)", n)
 		}
 	}
 	if len(r0.Warnings) > 0 {
