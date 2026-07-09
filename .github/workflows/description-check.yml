@@ -1,0 +1,13 @@
+name: description check
+on: [pull_request]
+permissions: { contents: read, pull-requests: write, id-token: write }
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0, ref: "${{ github.event.pull_request.head.sha }}" }
+      - uses: lemahq/lema-verify@v1
+        with:
+          api-url: https://api.lema.sh
+          github-token: "${{ github.token }}"
