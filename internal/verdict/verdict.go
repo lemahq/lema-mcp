@@ -26,6 +26,27 @@ const (
 	Historical Force = "historical" // superseded/deprecated lineage — context, not a live constraint
 )
 
+// FindingKind classifies contract-check findings (lema verify). It is a
+// separate vocabulary from Label: contract findings are observations about a
+// diff vs its description and must never read as rulings.
+type FindingKind string
+
+const (
+	ClaimFound        FindingKind = "claim_found"
+	ClaimNotFound     FindingKind = "claim_not_found"
+	UndescribedChange FindingKind = "undescribed_change"
+)
+
+// CardState is the overall state of one verify card.
+type CardState string
+
+const (
+	CardChecked    CardState = "checked"
+	CardTooGeneral CardState = "too_general" // near-zero checkable claims: never renders as a pass
+	CardIncomplete CardState = "incomplete"  // material elision/timeout: disclosed, not guessed
+	CardErrored    CardState = "error"
+)
+
 // GoverningDecision is one closed atom that governs the checked topic.
 type GoverningDecision struct {
 	Ref          string  `json:"ref"`
@@ -134,17 +155,21 @@ func buildFrom(matched []source.Atom) Verdict {
 			Reason: "no governing decision found for this topic"}
 	}
 	gov := make([]GoverningDecision, 0, len(matched))
-	hasBinding := false
-	for _, a := range matched {
+	// The cited ruling must be the highest-ranked BINDING match, never matched[0]
+	// blindly: a historical/advisory atom can outscore the binding rejection
+	// lexically, and a ruled_out citing a superseded decision is a false citation
+	// (the d_31fe20 dogfood bug, 2026-07-07).
+	var cite *source.Atom
+	for i, a := range matched {
 		f := DeriveForce(a)
-		if f == Binding {
-			hasBinding = true
+		if f == Binding && cite == nil {
+			cite = &matched[i]
 		}
 		gov = append(gov, GoverningDecision{Ref: refOf(a), DerivedForce: f, Summary: a.ClosedNote, Score: a.Score})
 	}
-	if hasBinding {
+	if cite != nil {
 		return Verdict{Verdict: RuledOut, GoverningDecisions: gov,
-			Reason: fmt.Sprintf("ruled out by %s — do not re-propose; surface the prior decision instead", refOf(matched[0]))}
+			Reason: fmt.Sprintf("ruled out by %s — do not re-propose; surface the prior decision instead", refOf(*cite))}
 	}
 	return Verdict{Verdict: NotRuledOut, GoverningDecisions: gov,
 		Reason: "not a hard ruling; advisory or historical context exists — proceed with awareness"}

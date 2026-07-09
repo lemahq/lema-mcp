@@ -638,11 +638,17 @@ type pushRequest struct {
 }
 
 type pushResult struct {
-	LocalID    string  `json:"local_id"`
-	Title      string  `json:"title"`
-	Status     string  `json:"status"`
-	Reason     string  `json:"reason,omitempty"`
-	DecisionID *string `json:"decision_id,omitempty"`
+	LocalID string `json:"local_id"`
+	Title   string `json:"title"`
+	Status  string `json:"status"`
+	// CurrentStatus is the lifecycle status the record landed at, server-reported
+	// on a created record: "accepted" when the trust tier auto-accepted it into
+	// recall (soloSelfPush, ADR-0134/0135), "proposed" when it drafted. Empty on
+	// updated/skipped (an import never changes lifecycle status) and from older
+	// servers — a consumer must not claim recall either way without it (#355).
+	CurrentStatus string  `json:"current_status,omitempty"`
+	Reason        string  `json:"reason,omitempty"`
+	DecisionID    *string `json:"decision_id,omitempty"`
 	// Warnings are the server's non-fatal per-record notes (an unresolvable
 	// supersedes target, a local-id collision fork, a lossy status). The record
 	// still landed (status created/updated), but a consumer must surface these so
@@ -687,10 +693,15 @@ func candidateRecords(cands []pushCandidate, now time.Time) []pushRecord {
 }
 
 // pushDecisions POSTs records to the workspace import endpoint as the authed
-// programmatic principal. The server coerces a programmatic push to `proposed`
-// regardless of the status sent, so this can only ever DRAFT. Returns the
-// server's summary (incl. the server-derived recorded_by). A non-2xx is an error
-// (fail loud) — the caller decides to swallow it (fail-open for the hook).
+// programmatic principal. The server adjudicates each record's landed status by
+// trust tier (captureAcceptFor + soloSelfPush, ADR-0134/0135): a solo owner's
+// push may auto-accept into recall; everything else drafts `proposed`. Either
+// way a programmatic push can never BIND — the accept event stays
+// actor_kind=agent, outside the binding feed (ADR-0125). Signal-A candidates
+// still self-assert `proposed` deliberately (an unreviewed transcript inference
+// must stay a draft); record_decision sends no status. Returns the server's
+// summary (incl. the server-derived recorded_by). A non-2xx is an error (fail
+// loud) — the caller decides to swallow it (fail-open for the hook).
 func pushDecisions(ctx context.Context, client *http.Client, apiURL, token, workspaceID string, records []pushRecord) (pushResponse, error) {
 	if len(records) == 0 {
 		return pushResponse{}, nil

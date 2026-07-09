@@ -14,11 +14,15 @@ import (
 )
 
 // fakeCapture is a captureSink that records the input it was handed and mimics
-// the real CaptureStore's contract: it stamps a content id and forces accepted.
+// the real CaptureStore's contract: Record stamps a content id and forces
+// accepted; RecordDraft stamps proposed (the non-binding hosted-fallback write).
 type fakeCapture struct {
-	got    source.DecisionRecord
-	called bool
-	err    error
+	got         source.DecisionRecord
+	called      bool
+	err         error
+	draftGot    source.DecisionRecord
+	draftCalled bool
+	draftErr    error
 }
 
 func (f *fakeCapture) Record(in source.DecisionRecord) (source.DecisionRecord, error) {
@@ -29,6 +33,17 @@ func (f *fakeCapture) Record(in source.DecisionRecord) (source.DecisionRecord, e
 	}
 	in.ID = "d_fake01"
 	in.Status = "accepted"
+	return in, nil
+}
+
+func (f *fakeCapture) RecordDraft(in source.DecisionRecord) (source.DecisionRecord, error) {
+	f.draftCalled = true
+	f.draftGot = in
+	if f.draftErr != nil {
+		return source.DecisionRecord{}, f.draftErr
+	}
+	in.ID = "d_draft1"
+	in.Status = "proposed"
 	return in, nil
 }
 
@@ -45,13 +60,16 @@ func sampleDecisionRecord() source.DecisionRecord {
 	}
 }
 
-// In hosted mode a capture is pushed as a single PROPOSED draft carrying the full
-// record_decision payload (rejected alts with why, constraint, consequence,
-// supersedes), a stable content-keyed id, and the stamped time — and the tool
-// output conveys it's live in recall, with a human confirm what binds the ruling
-// (no inbox accept-queue, ADR-0135). The whole reason hosted capture is safe: the
-// draft can only ever be proposed; a human confirm (never the agent) is what binds.
-func TestRecordToHosted_DraftsFullProposedRecord(t *testing.T) {
+// In hosted mode a capture is pushed carrying the full record_decision payload
+// (rejected alts with why, constraint, consequence, supersedes), a stable
+// content-keyed id, the stamped time — and NO self-asserted status: the server
+// adjudicates the trust tier (ADR-0134/0135 — a solo owner's push auto-accepts
+// into RECALL; any other programmatic push drafts proposed; lemahq/lema#355).
+// The tool output keys off the landed current_status the server reports, so it
+// never claims recall for a draft that retrieval excludes. BIND stays human
+// either way: the accept event is actor_kind=agent and never feeds the binding
+// predicate (ADR-0125).
+func TestRecordToHosted_PushesFullRecordServerAdjudicates(t *testing.T) {
 	dr := sampleDecisionRecord()
 	now := time.Date(2026, 6, 27, 12, 0, 0, 0, time.UTC)
 
@@ -62,7 +80,7 @@ func TestRecordToHosted_DraftsFullProposedRecord(t *testing.T) {
 		return pushResponse{
 			Created:    1,
 			RecordedBy: "agent",
-			Results:    []pushResult{{LocalID: recs[0].ID, Title: recs[0].Title, Status: "created", DecisionID: &decID}},
+			Results:    []pushResult{{LocalID: recs[0].ID, Title: recs[0].Title, Status: "created", CurrentStatus: "accepted", DecisionID: &decID}},
 		}, nil
 	}
 
@@ -75,8 +93,8 @@ func TestRecordToHosted_DraftsFullProposedRecord(t *testing.T) {
 		t.Fatalf("want exactly one pushed record, got %d: %+v", len(got), got)
 	}
 	r := got[0]
-	if r.Status != "proposed" {
-		t.Errorf("status = %q, want proposed (a programmatic capture must never self-bind)", r.Status)
+	if r.Status != "" {
+		t.Errorf("status = %q, want empty — record_decision must not self-assert a status; the server adjudicates the trust tier (a self-asserted 'proposed' can never auto-accept, lemahq/lema#355)", r.Status)
 	}
 	if r.ID != sessionDecisionID(dr.Title, dr.Chosen) {
 		t.Errorf("id = %q, want the content-keyed id %q (idempotent re-record)", r.ID, sessionDecisionID(dr.Title, dr.Chosen))
@@ -101,55 +119,66 @@ func TestRecordToHosted_DraftsFullProposedRecord(t *testing.T) {
 		t.Errorf("rejected = %+v, want %+v (the killed options are the enforcement payload)", r.Rejected, wantRej)
 	}
 
-	if out.Status != "proposed" {
-		t.Errorf("output status = %q, want proposed", out.Status)
+	if out.Status != "accepted" {
+		t.Errorf("output status = %q, want the landed current_status accepted", out.Status)
 	}
 	if out.ID != "dec_9001" {
 		t.Errorf("output id = %q, want the server decision id dec_9001", out.ID)
 	}
-	if !strings.Contains(strings.ToLower(out.Recorded), "confirm") {
+	low := strings.ToLower(out.Recorded)
+	if !strings.Contains(low, "recall") {
+		t.Errorf("output message %q must convey the accepted capture is live in recall", out.Recorded)
+	}
+	if !strings.Contains(low, "confirm") {
 		t.Errorf("output message %q must convey that a human confirm binds the ruling", out.Recorded)
 	}
-	if strings.Contains(strings.ToLower(out.Recorded), "inbox") {
+	if strings.Contains(low, "inbox") {
 		t.Errorf("output message %q must not reference the removed inbox (ADR-0135)", out.Recorded)
 	}
 }
 
-// #4: the output status + message follow the server's per-record outcome. A
-// created record is a proposed draft (live in recall; a human confirm binds it);
-// an updated/skipped record means the decision already existed (an import never
-// changes its lifecycle status), so the tool must NOT re-announce a fresh draft.
+// #4: the output status + message follow the server's per-record outcome AND
+// the landed current_status it reports (lemahq/lema#355): an auto-accepted
+// capture (soloSelfPush, ADR-0134) is live in recall; a team draft is proposed
+// and must NOT claim recall is open; an older server that reports no
+// current_status gets a neutral message that claims neither. updated/skipped
+// mean the decision already existed (an import never changes its lifecycle
+// status), so the tool must NOT re-announce a fresh capture.
 func TestRecordToHosted_StatusFollowsServerResult(t *testing.T) {
 	dr := sampleDecisionRecord()
 	now := time.Date(2026, 6, 27, 12, 0, 0, 0, time.UTC)
-	mk := func(status string) func(context.Context, []pushRecord) (pushResponse, error) {
+	mk := func(status, currentStatus string) func(context.Context, []pushRecord) (pushResponse, error) {
 		return func(context.Context, []pushRecord) (pushResponse, error) {
-			return pushResponse{Results: []pushResult{{Status: status}}}, nil
+			return pushResponse{Results: []pushResult{{Status: status, CurrentStatus: currentStatus}}}, nil
 		}
 	}
 	cases := []struct {
 		serverStatus    string
+		currentStatus   string
 		wantStatus      string
 		wantContains    string
 		wantNotContains string
 	}{
-		{"created", "proposed", "confirm", "inbox"},
-		{"updated", "updated", "updated", "inbox"},
-		{"skipped", "skipped", "already recorded", "inbox"},
+		{"created", "accepted", "accepted", "live in recall", "inbox"},
+		{"created", "proposed", "proposed", "accept", "live in recall"},
+		{"created", "", "recorded", "recorded", "live in recall"},
+		{"updated", "", "updated", "updated", "inbox"},
+		{"skipped", "", "skipped", "already recorded", "inbox"},
 	}
 	for _, tc := range cases {
-		out, err := recordToHosted(context.Background(), dr, now, mk(tc.serverStatus))
+		out, err := recordToHosted(context.Background(), dr, now, mk(tc.serverStatus, tc.currentStatus))
 		if err != nil {
-			t.Fatalf("server %q: unexpected error: %v", tc.serverStatus, err)
+			t.Fatalf("server %q/%q: unexpected error: %v", tc.serverStatus, tc.currentStatus, err)
 		}
 		if out.Status != tc.wantStatus {
-			t.Errorf("server %q: out.Status=%q want %q", tc.serverStatus, out.Status, tc.wantStatus)
+			t.Errorf("server %q/%q: out.Status=%q want %q", tc.serverStatus, tc.currentStatus, out.Status, tc.wantStatus)
 		}
-		if !strings.Contains(strings.ToLower(out.Recorded), tc.wantContains) {
-			t.Errorf("server %q: msg %q must contain %q", tc.serverStatus, out.Recorded, tc.wantContains)
+		low := strings.ToLower(out.Recorded)
+		if !strings.Contains(low, tc.wantContains) {
+			t.Errorf("server %q/%q: msg %q must contain %q", tc.serverStatus, tc.currentStatus, out.Recorded, tc.wantContains)
 		}
-		if tc.wantNotContains != "" && strings.Contains(out.Recorded, tc.wantNotContains) {
-			t.Errorf("server %q: msg %q must NOT tell user to accept a decision that already exists", tc.serverStatus, out.Recorded)
+		if tc.wantNotContains != "" && strings.Contains(low, tc.wantNotContains) {
+			t.Errorf("server %q/%q: msg %q must NOT contain %q (an honest message never overclaims recall or points at the removed inbox)", tc.serverStatus, tc.currentStatus, out.Recorded, tc.wantNotContains)
 		}
 	}
 }

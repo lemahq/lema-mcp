@@ -423,13 +423,24 @@ func httpGraph(w http.ResponseWriter, r *http.Request) {
 	writeJSONResp(w, map[string]any{"graph": g})
 }
 
+// httpCheck serves the never-reopen judgment to the GUI through the SAME code
+// path as the stdio check_decided tool (checkDecidedFor), so the two surfaces
+// cannot disagree on the same topic. It used to run capture.CheckDecided — a
+// local-lexical filter over the capture store only, with no repo-ADR set, no
+// hosted org closures, and no verdict envelope — which the lema-terminal
+// design debate caught disagreeing with check_decided. A hosted fetch failure
+// is a 502 carrying the errored envelope: visible and retryable, never a
+// confident "not decided" computed from local capture alone (ADR-0094).
 func httpCheck(w http.ResponseWriter, r *http.Request) {
 	topic := r.URL.Query().Get("topic")
-	var closed []source.Atom
-	if capture != nil {
-		closed = capture.CheckDecided(topic, 10)
+	out, err := checkDecidedFor(r.Context(), topic, nil)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(out)
+		return
 	}
-	writeJSONResp(w, checkOutput{Topic: topic, Decided: len(closed) > 0, Closed: closed})
+	writeJSONResp(w, out)
 }
 
 // httpDecided returns every currently-CLOSED captured decision (rejected

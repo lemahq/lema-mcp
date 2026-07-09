@@ -60,6 +60,10 @@ type fuseSourceOut struct {
 	// source (sourceReceipt) — absent before, so check_approach cited a rejection
 	// without the per-source provenance line its sibling tools carry.
 	Receipt string `json:"receipt,omitempty"`
+	// DecisionURL is the citation's stable public permalink ({web}/d/{id}) — a
+	// no-signup page a human can open from a PR thread. Passed through from the
+	// public /fuse wire; absent on authed own-corpus verdicts.
+	DecisionURL string `json:"decision_url,omitempty"`
 }
 
 type fuseHowOut struct {
@@ -251,7 +255,8 @@ func mapAndLogCheckApproach(tool, approach string, res source.FuseResult, ownCor
 			// always a rejected-type atom (citedRejections filters on Type), and the
 			// wire shape carries no decision Status, so its polarity rides Type — map
 			// it into the slot sourceReceipt keys on, with the per-atom cosine.
-			Receipt: sourceReceipt(source.AskSource{Status: s.Type, Relevance: s.BindingCosine}),
+			Receipt:     sourceReceipt(source.AskSource{Status: s.Type, Relevance: s.BindingCosine}),
+			DecisionURL: s.DecisionURL,
 		}
 	}
 	out := checkApproachOutput{

@@ -13,12 +13,23 @@ import (
 // backing store. The two modes are deliberately split by the trust tier
 // (ADR-0125): in SOLO mode the operator is the only judge, so a capture appends
 // to the local .lema/decisions.jsonl store, which the CaptureStore records as
-// `accepted` and enforces immediately. In HOSTED mode the team is the judge, so
-// a capture is pushed to the org corpus as a `proposed` draft (server-coerced —
-// a programmatic principal can never self-bind) and a human's later in-app accept
-// is what binds it. The local store is bypassed in hosted mode on purpose: a
-// local `accepted` write would bind a draft on this machine that the team has not
-// accepted (and could reject), the exact poison the proposed gate prevents.
+// `accepted` and enforces immediately. In HOSTED mode the capture is pushed to
+// the org corpus with NO self-asserted status — the server adjudicates the
+// trust tier (captureAcceptFor + soloSelfPush, ADR-0134/0135): a solo owner's
+// push auto-accepts into RECALL (if it was implemented, it was decided — no
+// accept-queue to scroll); any other programmatic push drafts `proposed`. BIND
+// is human either way — the accept event stays actor_kind=agent, so a capture
+// can open recall but never a binding ruling (the poison gate). The client must
+// not push `proposed` itself: a self-asserted `proposed` never claimed accepted,
+// so the server's solo auto-accept can't fire and the capture lands invisible to
+// recall (lemahq/lema#355). The local store's accepted path is bypassed in
+// hosted mode on purpose: a local `accepted` write would bind a draft on this
+// machine that the team has not accepted (and could reject). But a hosted push
+// FAILURE must not lose the capture either (the #348 lesson: recording has to
+// cost nothing at the moment a decision lands) — so a failed push falls back to
+// a local DRAFT (CaptureStore.RecordDraft, status proposed): durable and
+// searchable, binding nothing, announced loudly in the tool response. Both
+// tenets hold: fail loud, and never lose the write.
 
 // recordPushTimeout bounds the hosted record_decision push from the client side.
 // It is longer than the Stop-hook's pushTimeout: record_decision is an
@@ -33,31 +44,59 @@ const recordPushTimeout = 30 * time.Second
 // tier. The zero value records nothing and errors — main() always sets one.
 var decisionRecorder recorder
 
-// captureSink is the local decision store record_decision writes to in solo mode
-// (satisfied by *source.CaptureStore). An interface so the recorder is testable
-// without a real jsonl file.
+// captureSink is the local decision store record_decision writes to
+// (satisfied by *source.CaptureStore): Record in solo mode, RecordDraft as the
+// non-binding preserve-the-write fallback when a hosted push fails. An
+// interface so the recorder is testable without a real jsonl file.
 type captureSink interface {
 	Record(source.DecisionRecord) (source.DecisionRecord, error)
+	RecordDraft(source.DecisionRecord) (source.DecisionRecord, error)
 }
 
-// recorder is the active sink for record_decision. Exactly one of the two sinks
-// is set: pushHosted in hosted mode (LEMA_API_URL set), capture in solo mode.
+// recorder is the active sink for record_decision: pushHosted in hosted mode
+// (LEMA_API_URL set), capture alone in solo mode. In hosted mode capture is
+// ALSO set (when the local store loaded) as the draft fallback for a failed
+// push; capturePath names its file for the fallback message.
 type recorder struct {
-	capture    captureSink
-	pushHosted func(ctx context.Context, dr source.DecisionRecord) (recordOutput, error)
+	capture     captureSink
+	capturePath string
+	pushHosted  func(ctx context.Context, dr source.DecisionRecord) (recordOutput, error)
 }
 
 // record validates the capture and persists it via the active sink. Title and
 // chosen are required (mirrors the local CaptureStore guard) so an empty field
 // fails the same clean way in hosted mode as in solo, instead of round-tripping
-// to a murkier server error. Hosted wins when set; solo falls through to the
-// local store; a recorder with neither fails loud.
+// to a murkier server error. Hosted wins when set; a hosted push failure is
+// preserved as a non-binding local draft when the local store is available
+// (fail loud, but never lose the write) and stays an error when it is not;
+// solo falls through to the local store; a recorder with neither fails loud.
 func (r recorder) record(ctx context.Context, dr source.DecisionRecord) (recordOutput, error) {
 	if strings.TrimSpace(dr.Title) == "" || strings.TrimSpace(dr.Chosen) == "" {
 		return recordOutput{}, fmt.Errorf("title and chosen are required")
 	}
 	if r.pushHosted != nil {
-		return r.pushHosted(ctx, dr)
+		out, err := r.pushHosted(ctx, dr)
+		if err == nil {
+			return out, nil
+		}
+		if r.capture == nil {
+			return recordOutput{}, err // nowhere to preserve the capture — fail loud
+		}
+		rec, derr := r.capture.RecordDraft(dr)
+		if derr != nil {
+			return recordOutput{}, fmt.Errorf("%w; the local draft fallback also failed (%v) — the capture was NOT saved", err, derr)
+		}
+		path := r.capturePath
+		if path == "" {
+			path = ".lema/decisions.jsonl"
+		}
+		return recordOutput{
+			ID:     rec.ID,
+			Status: "local_draft",
+			Recorded: fmt.Sprintf(
+				"%v — the capture was preserved locally as a draft in %s (id %s). It surfaces in search but does not enforce, and it is NOT in your team's corpus; fix the hosted workspace mapping (%s), then record this decision again to push it.",
+				err, path, rec.ID, workspaceIDHint),
+		}, nil
 	}
 	if r.capture == nil {
 		return recordOutput{}, fmt.Errorf("capture store is not available")
@@ -73,18 +112,24 @@ func (r recorder) record(ctx context.Context, dr source.DecisionRecord) (recordO
 	return recordOutput{ID: rec.ID, Status: rec.Status, Recorded: msg}, nil
 }
 
-// recordToHosted pushes one capture to the org corpus as a single PROPOSED draft
-// and maps the server ack into the tool output. It carries the full payload — the
-// rejected alternatives (the enforcement payload), constraint, consequence, and
-// supersedes — under a stable content-keyed id so a re-record is idempotent. The
-// output status + message follow the server's per-record outcome: `created` is a
-// new proposed draft — live in recall, with a human confirm what binds its
-// ruling (per ADR-0135 there is no inbox accept-queue); `updated`/`skipped` mean
-// the decision already existed (an import never changes a decision's lifecycle
-// status), so it does NOT re-announce a fresh draft. Any non-fatal server warnings are surfaced so
-// a degraded outcome (e.g. an unresolvable supersedes target) is never silent. A
-// transport failure OR a server-reported per-record failure is returned (fail
-// loud); it NEVER silently falls back to the local store.
+// recordToHosted pushes one capture to the org corpus and maps the server ack
+// into the tool output. It carries the full payload — the rejected alternatives
+// (the enforcement payload), constraint, consequence, and supersedes — under a
+// stable content-keyed id so a re-record is idempotent, and NO self-asserted
+// status: the server adjudicates the trust tier (ADR-0134/0135, see the mode
+// comment above — a hardcoded `proposed` here is what kept solo captures out of
+// recall, lemahq/lema#355). The output status + message follow the server's
+// per-record outcome AND the landed current_status it reports: created+accepted
+// is live in recall now (a human confirm still binds the ruling); created+
+// proposed is a draft whose recall opens on an in-app accept; a created with no
+// reported current_status (older server) claims neither; `updated`/`skipped`
+// mean the decision already existed (an import never changes a decision's
+// lifecycle status), so it does NOT re-announce a fresh capture. Any non-fatal
+// server warnings are surfaced so a degraded outcome (e.g. an unresolvable
+// supersedes target) is never silent. A transport failure OR a server-reported
+// per-record failure is returned (fail loud); the recorder — not this function —
+// then preserves the capture as a loud, non-binding local draft (never a silent
+// local `accepted` write).
 func recordToHosted(ctx context.Context, dr source.DecisionRecord, now time.Time, push func(context.Context, []pushRecord) (pushResponse, error)) (recordOutput, error) {
 	rec := pushRecord{
 		ID:          sessionDecisionID(dr.Title, dr.Chosen),
@@ -97,7 +142,6 @@ func recordToHosted(ctx context.Context, dr source.DecisionRecord, now time.Time
 		Constraint:  dr.Constraint,
 		Consequence: dr.Consequence,
 		Supersedes:  dr.Supersedes,
-		Status:      pushStatusProposed,
 	}
 	resp, err := push(ctx, []pushRecord{rec})
 	if err != nil {
@@ -128,11 +172,25 @@ func recordToHosted(ctx context.Context, dr source.DecisionRecord, now time.Time
 	case "skipped":
 		status = "skipped"
 		msg = fmt.Sprintf("%q is already recorded in your team's corpus — no change", dr.Title)
-	default: // "created", or an empty/unknown status — treat as a new proposed draft
-		status = pushStatusProposed
-		msg = fmt.Sprintf("recorded %q in your team's corpus — live in recall now", dr.Title)
-		if n := len(dr.Rejected); n > 0 {
-			msg += fmt.Sprintf(" (its %d ruled-out alternative(s) start enforcing once a human confirms the ruling — an agent capture never self-binds)", n)
+	default: // "created", or an empty/unknown status — a new capture
+		// Recall honesty rides on the server-reported landed status, never a
+		// client-side guess (#355).
+		switch r0.CurrentStatus {
+		case "accepted":
+			status = "accepted"
+			msg = fmt.Sprintf("recorded %q in your team's corpus — live in recall now", dr.Title)
+			if n := len(dr.Rejected); n > 0 {
+				msg += fmt.Sprintf(" (its %d ruled-out alternative(s) start enforcing once a human confirms the ruling — an agent capture never self-binds)", n)
+			}
+		case pushStatusProposed:
+			status = pushStatusProposed
+			msg = fmt.Sprintf("drafted %q as proposed in your team's corpus — a human accepts it in-app to open recall and bind its ruling", dr.Title)
+		default: // older server: landed status unreported — claim neither recall nor draft
+			status = "recorded"
+			msg = fmt.Sprintf("recorded %q in your team's corpus", dr.Title)
+			if n := len(dr.Rejected); n > 0 {
+				msg += fmt.Sprintf(" (%d rejected alternative(s) recorded — a human accept in-app is what binds them)", n)
+			}
 		}
 	}
 	if len(r0.Warnings) > 0 {

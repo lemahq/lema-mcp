@@ -103,6 +103,11 @@ type FuseSource struct {
 	Text          string   `json:"text"`
 	URL           string   `json:"url,omitempty"`
 	BindingCosine *float64 `json:"binding_cosine,omitempty"`
+	// DecisionURL is the citation's stable public permalink ({web}/d/{id},
+	// week-1 spread floor) — served by the public /fuse path so an agent can
+	// paste the recorded why into a PR thread. Absent on authed own-corpus
+	// verdicts (a private decision never gets a public URL).
+	DecisionURL string `json:"decision_url,omitempty"`
 }
 
 // FuseHow is the repo-level HOW pointer: the project's canonical docs URL plus a

@@ -170,9 +170,14 @@ func reduce(lines []DecisionRecord) ([]DecisionRecord, map[string]int) {
 		out = append(out, r)
 	}
 	for i := range out {
-		for _, sid := range out[i].Supersedes {
-			if j, ok := byID[sid]; ok {
-				out[j].Status = "superseded"
+		// A draft (status proposed — the hosted-fallback write) must never un-bind
+		// a settled record: its supersedes edges wait until an accepted write of
+		// the same decision upgrades it.
+		if out[i].Status != "proposed" {
+			for _, sid := range out[i].Supersedes {
+				if j, ok := byID[sid]; ok {
+					out[j].Status = "superseded"
+				}
 			}
 		}
 		if out[i].SupersededBy != nil && *out[i].SupersededBy != "" {
@@ -193,12 +198,28 @@ func decisionID(title, chosen string) string {
 	return fmt.Sprintf("d_%06x", h.Sum32()&0xffffff)
 }
 
-// Record validates, stamps, and appends a decision, returning the stored record.
+// Record validates, stamps, and appends a decision as accepted, returning the
+// stored record — the solo-mode write, where the operator is the only judge.
 // title and chosen are required; rejected is strongly encouraged (the tool nudges
 // for it) but not enforced here, since a hard minimum invites fabricated
 // alternatives. supersedes flips the referenced decisions to superseded. The
 // append is the on-disk source of truth; memory is updated to match.
 func (s *CaptureStore) Record(in DecisionRecord) (DecisionRecord, error) {
+	return s.record(in, "accepted")
+}
+
+// RecordDraft persists a decision with status proposed — the hosted-fallback
+// write (cmd/lema-mcp/record_decision.go): a capture whose hosted push failed
+// is preserved durably and searchably, but NON-BINDING. Its rejected
+// alternatives do not enforce never-reopen and its supersedes edges do not
+// close their targets, because no human and no server trust tier has accepted
+// it. A later accepted write of the same decision (same content id) upgrades
+// the draft in place.
+func (s *CaptureStore) RecordDraft(in DecisionRecord) (DecisionRecord, error) {
+	return s.record(in, "proposed")
+}
+
+func (s *CaptureStore) record(in DecisionRecord, status string) (DecisionRecord, error) {
 	if strings.TrimSpace(in.Title) == "" || strings.TrimSpace(in.Chosen) == "" {
 		return DecisionRecord{}, fmt.Errorf("title and chosen are required")
 	}
@@ -207,7 +228,7 @@ func (s *CaptureStore) Record(in DecisionRecord) (DecisionRecord, error) {
 
 	in.ID = decisionID(in.Title, in.Chosen)
 	in.TS = time.Now().UTC().Format("2006-01-02T15:04Z")
-	in.Status = "accepted"
+	in.Status = status
 
 	if err := s.appendLine(in); err != nil {
 		return DecisionRecord{}, err
@@ -323,9 +344,15 @@ func (s *CaptureStore) buildAtoms() []Atom {
 		// chosen and rejected atoms (the followable, decision-level claims) but not
 		// the constraint/consequence atoms, which stay payload-tight.
 		refs := sanitizeRefs(r.Refs)
+		// A draft (status proposed — the hosted-fallback write) surfaces in search
+		// but binds nothing: its atoms carry a draft marker and never close.
+		isDraft := r.Status == "proposed"
 		chosenText := r.Title + " — chose " + r.Chosen
 		if r.Rationale != "" {
 			chosenText += " (" + r.Rationale + ")"
+		}
+		if isDraft {
+			chosenText += " [draft — not yet accepted]"
 		}
 		chosen := Atom{ID: r.ID + "-chosen", Type: "chosen", Text: chosenText, Ref: r.ID, Refs: refs}
 		if r.Status == "superseded" {
@@ -345,11 +372,15 @@ func (s *CaptureStore) buildAtoms() []Atom {
 			if alt.Why != "" {
 				text += " — " + alt.Why
 			}
-			// Default: a rejected alternative is CLOSED. PROPOSAL: if a current decision
+			// Default: a rejected alternative is CLOSED. A draft's rejection never
+			// enforces (nobody accepted it). PROPOSAL: if a current decision
 			// superseded this one AND chose this option, the team reversed it — the atom
 			// stays in the record (history/search) but no longer enforces.
 			closed, closedNote := true, note
-			if overrideReopens && optionReversed(rechosen[r.ID], alt.Option) {
+			if isDraft {
+				closed, closedNote = false, ""
+				text += " [draft — not yet accepted]"
+			} else if overrideReopens && optionReversed(rechosen[r.ID], alt.Option) {
 				closed, closedNote = false, ""
 			}
 			out = append(out, Atom{
