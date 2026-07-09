@@ -125,7 +125,7 @@ var guardStopwords = map[string]bool{
 	"vector": true, "database": true, "search": true, "index": true, "call": true,
 	"backend": true, "frontend": true, "tooling": true, "server": true, "client": true,
 	"config": true, "app": true, "application": true, "feature": true, "version": true,
-	"api": true,
+	"api": true, "surface": true, "surfaces": true, "tool": true, "tools": true, "authed": true,
 	// NB: "code", "embed", "chunks", "retrieval", "document" are deliberately NOT
 	// stopworded — they are the only identity the chunk-RAG option has (no proper
 	// noun), so the matcher needs them to fire on it.

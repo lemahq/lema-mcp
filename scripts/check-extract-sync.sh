@@ -26,7 +26,7 @@ SRC="$MONOREPO/apps/api"
 OLD="github.com/lemahq/lema/apps/api"
 NEW="github.com/lemahq/lema-mcp"
 # The exact set the monorepo extracts (kept in lockstep with extract-lema-mcp.sh).
-DIRS="cmd/lema-mcp internal/adr internal/source internal/openspec internal/docs internal/verdict"
+DIRS="cmd/lema-mcp internal/adr internal/source internal/openspec internal/docs internal/verdict internal/decisioncheck"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

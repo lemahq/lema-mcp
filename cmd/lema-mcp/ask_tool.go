@@ -35,6 +35,10 @@ type askSourceOut struct {
 	RejectedAlternatives []string `json:"rejected_alternatives,omitempty"`
 	Relevance            *float64 `json:"relevance,omitempty"`
 	Receipt              string   `json:"receipt,omitempty"`
+	// DecisionURL is the citation's stable public permalink ({web}/d/{id}) — a
+	// no-signup page a human can open from a paste. Present only on
+	// public-corpus answers; the authed corpus never serves a public URL.
+	DecisionURL string `json:"decision_url,omitempty"`
 }
 
 // toAskSourceOut maps a wire AskSource into the tool output, attaching the
@@ -44,7 +48,8 @@ func toAskSourceOut(s source.AskSource) askSourceOut {
 		N: s.N, Ref: s.Ref, Type: s.Type, Text: s.Text,
 		Locator: s.Locator, URL: s.URL, Status: s.Status, Workspace: s.Workspace,
 		RejectedAlternatives: s.RejectedAlternatives, Relevance: s.Relevance,
-		Receipt: sourceReceipt(s),
+		Receipt:     sourceReceipt(s),
+		DecisionURL: s.DecisionURL,
 	}
 }
 

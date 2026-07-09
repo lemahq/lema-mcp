@@ -567,32 +567,43 @@ func main() {
 
 	// Decision capture (ADR-0042) is local and mode-independent: record_decision
 	// writes here and search/check_decided enforce never-reopen, with or without a
-	// hosted backend. A missing file is fine — the first record creates it.
+	// hosted backend. A missing file is fine — the first record creates it. In a
+	// linked git worktree the relative path anchors to the MAIN checkout
+	// (capture_path.go): one decision record per repo, or capture forks and dies
+	// with the worktree.
+	capturePath := resolveCaptureFile(*captureFile)
 	var cerr error
-	if capture, cerr = source.NewCaptureStore(*captureFile); cerr != nil {
+	if capture, cerr = source.NewCaptureStore(capturePath); cerr != nil {
 		log.Fatalf("lema-mcp: capture store: %v", cerr)
 	}
+	if capturePath != *captureFile {
+		fmt.Fprintf(os.Stderr, "lema-mcp: linked git worktree — capture store anchored to the main checkout: %s\n", capturePath)
+	}
 	if n := capture.Len(); n > 0 {
-		fmt.Fprintf(os.Stderr, "lema-mcp: %d captured decision(s) in %s\n", n, *captureFile)
+		fmt.Fprintf(os.Stderr, "lema-mcp: %d captured decision(s) in %s\n", n, capturePath)
 	}
 
 	// Wire the record_decision sink by trust tier (record_decision.go). HOSTED
-	// (LEMA_API_URL set): push captures to the org corpus as `proposed` drafts that
-	// a human's in-app accept binds (ADR-0125), reusing the push client. SOLO:
-	// append to the local capture store, which binds on this machine. Hosted with no
-	// LEMA_WORKSPACE_ID fails loud rather than silently binding a draft locally.
+	// (LEMA_API_URL set): push captures to the org corpus, where the server
+	// adjudicates the landed status and a human's in-app accept binds (ADR-0125).
+	// SOLO: append to the local capture store, which binds on this machine.
+	// Hosted with no LEMA_WORKSPACE_ID does NOT hard-fail (#348): the recorder
+	// auto-resolves the target from GET /workspaces when this credential can see
+	// exactly one, and otherwise errors with the workspace list + where to set
+	// the env var — never a dead end that eats the capture. And a hosted push
+	// FAILURE preserves the capture as a loud, NON-BINDING local draft
+	// (recorder.record) rather than losing the write. It still never silently
+	// binds a draft locally.
 	if hostedSrc != nil {
-		workspaceID := resolveWorkspaceID()
-		if workspaceID == "" {
-			decisionRecorder = recorder{pushHosted: func(context.Context, source.DecisionRecord) (recordOutput, error) {
-				return recordOutput{}, fmt.Errorf("record_decision: hosted mode is on but %s is unset — set it to your lema workspace id (in your shell env, ~/.config/lema/credentials, or the .mcp.json env block) to record decisions to your team's corpus", workspaceIDEnv)
-			}}
+		client := &http.Client{Timeout: recordPushTimeout}
+		if workspaceID := resolveWorkspaceID(); workspaceID == "" {
+			decisionRecorder = recorder{capture: capture, capturePath: capturePath, pushHosted: newWorkspaceAutoResolvingPush(hostedAPIURL, hostedToken, client)}
+			fmt.Fprintf(os.Stderr, "lema-mcp: record_decision: %s unset — will auto-resolve the workspace from %s/workspaces on first capture (#348)\n", workspaceIDEnv, strings.TrimRight(hostedAPIURL, "/"))
 		} else {
-			client := &http.Client{Timeout: recordPushTimeout}
 			push := func(ctx context.Context, recs []pushRecord) (pushResponse, error) {
 				return pushDecisions(ctx, client, hostedAPIURL, hostedToken, workspaceID, recs)
 			}
-			decisionRecorder = recorder{pushHosted: func(ctx context.Context, dr source.DecisionRecord) (recordOutput, error) {
+			decisionRecorder = recorder{capture: capture, capturePath: capturePath, pushHosted: func(ctx context.Context, dr source.DecisionRecord) (recordOutput, error) {
 				return recordToHosted(ctx, dr, time.Now(), push)
 			}}
 			fmt.Fprintf(os.Stderr, "lema-mcp: record_decision drafts to hosted workspace %s\n", workspaceID)
@@ -620,7 +631,7 @@ func main() {
 	// already uses (try.go) — it shipped nil, priming agents with nothing (ADR-0124,
 	// the v1 read wedge). Steering rides instructions, never the tool descriptions.
 	server := mcp.NewServer(
-		&mcp.Implementation{Name: "lema-mcp", Version: "0.14.0"},
+		&mcp.Implementation{Name: "lema-mcp", Version: "0.15.0"},
 		&mcp.ServerOptions{Instructions: authedServerInstructions},
 	)
 	mcp.AddTool(server, searchDecisionsTool, searchDecisions)

@@ -107,3 +107,37 @@ func TestSignificantTokens(t *testing.T) {
 		}
 	}
 }
+
+// Prod false positive, 2026-07-08 (the d_20d515 dogfood FP): a topic about
+// building a rest-state conflicts scan false-fired ruled_out against the
+// killed option "Also condense the authed tool surface now" purely on the
+// generic nouns "authed"+"surface". Those are surface-area vocabulary, never
+// an option's identity — the identity of that ruling is "condense".
+func TestGuardMatchGenericSurfaceNouns(t *testing.T) {
+	// Real-shaped corpus: IDF needs neighbors to make a rare term distinctive
+	// (a 1-atom corpus caps any single-token weight below MatchThreshold).
+	corpus := append(evalCorpus(), source.Atom{
+		ID:       "d_20d515-rej-0",
+		MatchKey: "Also condense the authed tool surface now",
+		Type:     "rejected_alternative",
+	})
+
+	fp := "Build a rest-state conflict scan over the recorded decisions plus an internal authed web surface that lists contradictions, duplicate captures, and pending amendments between decisions (the Precedent Scan / conflicts view)"
+	if hits := Match(corpus, fp, MatchThreshold); len(hits) != 0 {
+		t.Errorf("generic-noun overlap false-fired: %q matched %q", fp, hits[0].MatchKey)
+	}
+
+	// Recall guard: actually re-proposing the killed option must still fire —
+	// its identity survives on "condense".
+	relit := "let's condense the authed tool surface in this release"
+	if hits := Match(corpus, relit, MatchThreshold); len(hits) != 1 {
+		t.Errorf("true relitigation of the condense ruling must still match, got %d hits", len(hits))
+	}
+
+	// Tokenize doesn't stem — the plural forms must be stopworded too, or the
+	// same FP class re-fires on "surfaces"/"tools" phrasing.
+	fpPlural := "an internal authed web surfaces page listing the agent tools and pending amendments"
+	if hits := Match(corpus, fpPlural, MatchThreshold); len(hits) != 0 {
+		t.Errorf("plural generic-noun overlap false-fired: matched %q", hits[0].MatchKey)
+	}
+}

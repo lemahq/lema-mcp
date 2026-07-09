@@ -285,6 +285,8 @@ func planGuardRun(args []string, out io.Writer) int {
 	if capturePath == "" {
 		capturePath = ".lema/decisions.jsonl"
 	}
+	// Linked git worktree -> enforce the main checkout's store (capture_path.go).
+	capturePath = resolveCaptureFile(capturePath)
 	hits := scanPlan(plan, loadPlanGuardClosed(capturePath))
 
 	if md := emitReview(hits); md != "" {

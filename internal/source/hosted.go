@@ -107,6 +107,10 @@ type AskSource struct {
 	// confidence; nil when the atom has no dense distance (fts-only).
 	RejectedAlternatives []string `json:"rejected_alternatives,omitempty"`
 	Relevance            *float64 `json:"relevance,omitempty"`
+	// DecisionURL is the citation's stable public permalink ({web}/d/{id},
+	// week-1 spread floor) — present only on public-corpus answers
+	// (/ask-public); the authed /ask never serves a public URL.
+	DecisionURL string `json:"decision_url,omitempty"`
 }
 
 // AskUsage is the token meter the hosted /ask returns: the saving side (claims

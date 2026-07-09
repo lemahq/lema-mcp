@@ -69,42 +69,58 @@ type checkOutput struct {
 // calls this and, if anything comes back CLOSED, surfaces the prior decision
 // instead of re-proposing the dead option.
 func checkDecided(ctx context.Context, _ *mcp.CallToolRequest, in checkInput) (*mcp.CallToolResult, checkOutput, error) {
-	if capture == nil {
-		return nil, checkOutput{Topic: in.Topic}, nil
+	out, err := checkDecidedFor(ctx, in.Topic, in.WorkspaceIDs)
+	if err != nil {
+		return nil, out, fmt.Errorf("check_decided: %w", err)
 	}
-	// Enforce off BOTH the capture store and the repo's documented ADRs (ADR-0053),
-	// matched by the distinctiveness-weighted matcher (ADR-0053 recall calibration):
-	// the old all-tokens-AND rule required a query to contain an option's entire
-	// (often full-sentence) name, so recall on natural-language topics was ~zero.
-	// The weighted matcher fires when the query names the option's distinctive
-	// terms, holding precision via the stopword prior (generic words never anchor a
-	// match). NB: this is the natural-language check_decided path; the PreToolUse
-	// guard hook still uses the token matcher (guardMatch) over code-edit text,
-	// which is a different input distribution awaiting its own eval.
+	logUsage("check_decided", in.Topic, len(out.Closed), out)
+	return nil, out, nil
+}
+
+// checkDecidedFor is the ONE acquisition-and-judgment path behind every check
+// surface: the stdio check_decided tool above and the GUI's GET /api/check
+// (serve.go) both call it, so the two doors cannot diverge. (They did: the
+// lema-terminal design debate caught /api/check answering from a local-lexical
+// capture.CheckDecided — no repo-ADR set, no hosted closures, no ADR-0094
+// verdict envelope — while the tool judged the full merged set via
+// verdict.Build; the same topic got two different answers. Its design-lock
+// ruling: one adjudicator, one matcher, at the boundary.)
+//
+// It enforces off BOTH the capture store and the repo's documented ADRs
+// (ADR-0053), matched by the distinctiveness-weighted matcher (ADR-0053 recall
+// calibration): the old all-tokens-AND rule required a query to contain an
+// option's entire (often full-sentence) name, so recall on natural-language
+// topics was ~zero. The weighted matcher fires when the query names the
+// option's distinctive terms, holding precision via the stopword prior
+// (generic words never anchor a match). NB: this is the natural-language check
+// path; the PreToolUse guard hook still uses the token matcher (guardMatch)
+// over code-edit text, which is a different input distribution awaiting its
+// own eval.
+//
+// Hosted mode (build-plan D.1): pull the org's CLOSED set from the hosted
+// graph — rejected alternatives of accepted, non-superseded decisions — so the
+// check enforces the TEAM's record, not just this machine's capture file. A
+// fetch failure FAILS the call with the errored envelope: before this leg,
+// hosted check_decided silently checked local capture only, and a silent
+// degrade back to that is worse than a visible, retryable error (ADR-0094).
+func checkDecidedFor(ctx context.Context, topic string, workspaceIDs []string) (checkOutput, error) {
+	if capture == nil {
+		return checkOutput{Topic: topic}, nil
+	}
 	merged := append([]source.Atom{}, capture.ClosedAtoms()...)
 	if cs, ok := src.(source.ClosedSource); ok {
 		merged = append(merged, cs.ClosedAtoms()...)
 	}
-	// Hosted mode (build-plan D.1): pull the org's CLOSED set from the hosted
-	// graph — rejected alternatives of accepted, non-superseded decisions —
-	// so check_decided enforces the TEAM's record, not just this machine's
-	// capture file. A fetch failure FAILS the tool call: before this leg,
-	// hosted check_decided silently checked local capture only, and a silent
-	// degrade back to that is worse than a visible, retryable error.
 	if cf, ok := src.(source.ClosedFetcher); ok {
-		hostedClosed, err := cf.FetchClosedAtoms(ctx, in.WorkspaceIDs)
+		hostedClosed, err := cf.FetchClosedAtoms(ctx, workspaceIDs)
 		if err != nil {
-			// Fail loud: a fetch failure returns an ERROR verdict, never a confident
-			// answer from local capture alone (ADR-0094 / the pre-existing contract).
 			ev := verdict.NewErrored("hosted closed-decision fetch failed; not answering from local capture alone")
-			out := checkOutput{Topic: in.Topic, Verdict: string(ev.Verdict), GoverningDecisions: ev.GoverningDecisions, Reason: ev.Reason}
-			return nil, out, fmt.Errorf("check_decided: hosted closed-decision fetch failed: %w", err)
+			out := checkOutput{Topic: topic, Verdict: string(ev.Verdict), GoverningDecisions: ev.GoverningDecisions, Reason: ev.Reason}
+			return out, fmt.Errorf("hosted closed-decision fetch failed: %w", err)
 		}
 		merged = append(merged, hostedClosed...)
 	}
-	out := buildCheckOutput(in.Topic, merged)
-	logUsage("check_decided", in.Topic, len(out.Closed), out)
-	return nil, out, nil
+	return buildCheckOutput(topic, merged), nil
 }
 
 // buildCheckOutput is the pure happy-path builder: the legacy fields plus the

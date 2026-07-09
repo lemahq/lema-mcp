@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/lemahq/lema-mcp/internal/adr"
+	"github.com/lemahq/lema-mcp/internal/decisioncheck"
 	"github.com/lemahq/lema-mcp/internal/source"
 	"github.com/lemahq/lema-mcp/internal/verdict"
 )
@@ -194,6 +195,55 @@ func evaluateGuard(closed []source.Atom, query, mode string) (*guardOutput, *sou
 	}}, &top
 }
 
+// changeFromToolInput lifts a decisioncheck.Change from the PreToolUse payload:
+// the target path plus the NEW text a tool writes (Edit new_string / Write
+// content / MultiEdit edits[].new_string / a Bash command). It reads the raw
+// file_path (decisioncheck rules path-scope, e.g. to launch-mode.ts), unlike
+// guardQuery which reduces it to a basename for lexical matching.
+func changeFromToolInput(in map[string]any) decisioncheck.Change {
+	path, _ := in["file_path"].(string)
+	var parts []string
+	for _, k := range []string{"new_string", "content", "command"} {
+		if v, ok := in[k].(string); ok && v != "" {
+			parts = append(parts, v)
+		}
+	}
+	if edits, ok := in["edits"].([]any); ok {
+		for _, e := range edits {
+			if m, ok := e.(map[string]any); ok {
+				if v, ok := m["new_string"].(string); ok && v != "" {
+					parts = append(parts, v)
+				}
+			}
+		}
+	}
+	return decisioncheck.Change{Path: path, NewText: strings.Join(parts, "\n")}
+}
+
+// decisionCheckGuard runs the deterministic tier-1 rules over an edit and, on a
+// hit, returns the PreToolUse response — an "ask" prompt in ask mode, else a
+// non-blocking context nudge — citing the decision the change contradicts.
+// nil = no rule fired (allow silently). Mirrors evaluateGuard's voice/shape.
+func decisionCheckGuard(in map[string]any, mode string) *guardOutput {
+	findings := decisioncheck.Check(changeFromToolInput(in))
+	if len(findings) == 0 {
+		return nil
+	}
+	f := findings[0]
+	if mode == guardModeAsk {
+		return &guardOutput{HookSpecificOutput: hookSpecificOutput{
+			HookEventName:            "PreToolUse",
+			PermissionDecision:       "ask",
+			PermissionDecisionReason: "lema — this change contradicts " + f.Cite + ". " + f.Message,
+		}}
+	}
+	return &guardOutput{HookSpecificOutput: hookSpecificOutput{
+		HookEventName: "PreToolUse",
+		AdditionalContext: "lema decision-check — this change contradicts " + f.Cite + ". " + f.Message +
+			" If you are intentionally superseding it, call record_decision with supersedes; otherwise follow the recorded decision.",
+	}}
+}
+
 // guardADRPattern matches ADR filenames (NNNN-*.md / NNN_*.md) — the server's
 // default; the guard parses the repo's ADRs per-edit for never-reopen (ADR-0053).
 var guardADRPattern = regexp.MustCompile(`^\d{3,4}[-_].+\.md$`)
@@ -234,6 +284,9 @@ func runGuard(args []string) {
 			capturePath = args[i+1]
 		}
 	}
+	// In a linked git worktree the hook must enforce the repo's ONE store (the
+	// main checkout's), not a frozen worktree copy (capture_path.go).
+	capturePath = resolveCaptureFile(capturePath)
 
 	type readResult struct {
 		data []byte
@@ -269,11 +322,25 @@ func runGuard(args []string) {
 		}
 		return
 	}
+	query := guardQuery(in.ToolInput)
+	// Tier-1 deterministic decision-checks (decisioncheck) run FIRST, before the
+	// capture store is even loaded — a zero-FP rule that cites a specific closed
+	// decision is a higher-confidence, more-actionable nudge than the lexical
+	// never-reopen matcher, needs no capture store (so ADR enforcement holds even
+	// in a repo with none), and is deliberately kept separate from verdict.Match
+	// (d_045d82). The judged constraint tier is elsewhere behind its own eval;
+	// this is only the deterministic lint. Design: docs/design/decision-quality-loop/.
+	if out := decisionCheckGuard(in.ToolInput, mode); out != nil {
+		guardLog(in, out, query, nil)
+		if b, err := json.Marshal(out); err == nil {
+			fmt.Println(string(b))
+		}
+		return
+	}
 	store, err := source.NewCaptureStore(capturePath)
 	if err != nil {
 		return
 	}
-	query := guardQuery(in.ToolInput)
 	// Enforce off BOTH the forward-capture store and the repo's documented ADRs
 	// (ADR-0053): a new engineer's agent should be stopped by a decision the team
 	// recorded in an ADR even if it was never captured live.

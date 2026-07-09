@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -351,4 +352,109 @@ func firstH1(body string) string {
 		}
 	}
 	return ""
+}
+
+// genericHeadings are RFC/ADR template section words that must never become a
+// decision's display title. The load-bearing case (#361): the react/vue RFC
+// templates open with `# Summary` (an H1, unlike rust's `## Summary` H2), so
+// ParseBytes' firstH1 puts "Summary" in Title — the string every react/vue
+// decision was titled on the public permalinks. The rest are the standard
+// RFC-2119/MADR section headers, denied defensively so a template that leads
+// with any of them can't leak the section word as the title either. Match is
+// exact (normalized), so a real title that merely *starts* with one of these
+// words — go's "Proposal: Goroutine leak detection…" — is kept.
+var genericHeadings = map[string]bool{
+	"summary":                     true,
+	"motivation":                  true,
+	"abstract":                    true,
+	"overview":                    true,
+	"background":                  true,
+	"introduction":                true,
+	"context":                     true,
+	"goals":                       true,
+	"non-goals":                   true,
+	"proposal":                    true,
+	"basic example":               true,
+	"detailed design":             true,
+	"guide-level explanation":     true,
+	"reference-level explanation": true,
+	"drawbacks":                   true,
+	"alternatives":                true,
+	"rationale and alternatives":  true,
+	"prior art":                   true,
+	"unresolved questions":        true,
+	"future possibilities":        true,
+	"how we teach this":           true,
+	"adoption strategy":           true,
+}
+
+// isGenericHeading reports whether s is nothing but a template section heading
+// (case-insensitive, trailing colon tolerated) and so must not be used as a title.
+func isGenericHeading(s string) bool {
+	norm := strings.ToLower(strings.TrimSpace(s))
+	norm = strings.TrimSpace(strings.TrimRight(norm, ":"))
+	return genericHeadings[norm]
+}
+
+// titleMetaRe matches a `Title:` metadata line — a dash/star bullet or a bare
+// line, with optional bold markers (`- Title:`, `* **Title**:`, `Title:`) — the
+// value is the display title. Some RFC templates carry it; react/vue/rust do
+// not (they use Start Date / Feature Name / RFC PR), so this is a fallback that
+// only fires for formats that provide it.
+var titleMetaRe = regexp.MustCompile(`(?i)^\s*[-*]?\s*\**title\**\s*:\s*(.+)$`)
+
+// titleFromMetadata scans the leading metadata block (everything above the first
+// markdown heading) for a `Title:` line and returns its value. It stops at the
+// first heading so a "Title:" written inside later prose is never mistaken for
+// the record's title — the same block-scoping statusFromBody uses.
+func titleFromMetadata(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			break // reached the first heading; the metadata block is above it
+		}
+		if m := titleMetaRe.FindStringSubmatch(line); m != nil {
+			return strings.TrimSpace(m[1])
+		}
+	}
+	return ""
+}
+
+// humanizeSlug turns a filename slug into a fallback title: separators to
+// spaces, collapsed whitespace, first letter upper (sentence case, e.g.
+// "0068-react-hooks" parsed to slug "react-hooks" → "React hooks"). The
+// filename's NNNN-<slug>.md is always descriptive, so the slug is a faithful
+// title source when a doc carries no usable heading or metadata title.
+func humanizeSlug(slug string) string {
+	s := strings.NewReplacer("-", " ", "_", " ").Replace(strings.TrimSpace(slug))
+	s = strings.Join(strings.Fields(s), " ")
+	if s == "" {
+		return ""
+	}
+	r := []rune(s)
+	r[0] = unicode.ToUpper(r[0])
+	return string(r)
+}
+
+// DeriveTitle chooses the best display title for a parsed decision record,
+// preferring, in order: (a) the parsed Title (a YAML/frontmatter title or the
+// document's H1, as set by ParseBytes) when it is not a generic section
+// heading; (b) a `Title:` metadata line from the body; (c) the humanized
+// filename slug. It NEVER returns a generic section heading (Summary, Motivation,
+// Detailed design, …) — that is the #361 bug: flat-rfc react/vue docs open with
+// `# Summary`, which ParseBytes' firstH1 would otherwise hand back as the title.
+// Returns "" only when there is genuinely nothing to name the record (no usable
+// title AND no slug), which callers treat as skip.
+//
+// This is the single title-derivation used by the public-corpus seeders
+// (cmd/lema-sync, cmd/lema-demo-seed). ParseBytes' own firstH1 assignment is
+// left unchanged so the hosted-import and local-wedge parse paths are untouched.
+func DeriveTitle(a ADR) string {
+	if t := strings.TrimSpace(a.Title); t != "" && !isGenericHeading(t) {
+		return t
+	}
+	if t := titleFromMetadata(a.Body); t != "" && !isGenericHeading(t) {
+		return t
+	}
+	return humanizeSlug(a.Slug)
 }
