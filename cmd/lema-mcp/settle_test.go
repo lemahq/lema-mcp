@@ -143,9 +143,10 @@ func TestSettleAcceptResolvesHandoffStylePrefix(t *testing.T) {
 	srv, appended := newSettleTestServer(t)
 	settleEnv(t, srv.URL)
 
-	// "77c99992" is exactly how ids appear in HANDOFF notes; "d_77c99992" is
-	// the search_decisions locator form. Both must resolve.
-	for _, form := range []string{"77c99992", "d_77c99992", "lema:d_77c99992"} {
+	// "77c99992" is exactly how ids appear in HANDOFF notes — a genuine UUID
+	// prefix. (d_ locators are content hashes and are REFUSED — see
+	// TestSettleRefusesDLocators.)
+	for _, form := range []string{"77c99992", "77c99992-1111-2222-3333-444455556666"} {
 		*appended = nil
 		out := captureStdout(t, func() {
 			if err := runSettle([]string{"accept", form}); err != nil {
@@ -157,6 +158,52 @@ func TestSettleAcceptResolvesHandoffStylePrefix(t *testing.T) {
 		}
 		if !strings.Contains(out, settleTestID) {
 			t.Fatalf("output for %q missing resolved id", form)
+		}
+	}
+}
+
+// A d_xxxxxx locator is a 24-bit content hash (fnv32a over title+chosen),
+// NOT a UUID prefix — matching it against UUIDs would resolve to nothing
+// or, rarely, the WRONG decision. settle must refuse it with an explanation
+// and write nothing.
+func TestSettleRefusesDLocators(t *testing.T) {
+	srv, appended := newSettleTestServer(t)
+	settleEnv(t, srv.URL)
+
+	for _, form := range []string{"d_b517ed", "lema:d_b517ed"} {
+		err := runSettle([]string{"reject", form, "--reason", "x"})
+		if err == nil || !strings.Contains(err.Error(), "content hash") {
+			t.Fatalf("%q must be refused as a content hash, got %v", form, err)
+		}
+	}
+	if len(*appended) != 0 {
+		t.Fatal("a refused d_ locator must never reach the server")
+	}
+}
+
+// reject and supersede take effect immediately server-side — there is no
+// draft and no Confirm-ruling step for them. The output must say APPLIED
+// and must NOT promise a browser bind (the accept-only contract).
+func TestSettleRejectAndSupersedeOutputSaysApplied(t *testing.T) {
+	srv, _ := newSettleTestServer(t)
+	settleEnv(t, srv.URL)
+
+	out := captureStdout(t, func() {
+		if err := runSettle([]string{"reject", settleOtherID, "--reason", "dup"}); err != nil {
+			t.Fatalf("reject: %v", err)
+		}
+	})
+	out += captureStdout(t, func() {
+		if err := runSettle([]string{"supersede", settleTestID, "--by", settleOtherID}); err != nil {
+			t.Fatalf("supersede: %v", err)
+		}
+	})
+	if !strings.Contains(out, "APPLIED") || !strings.Contains(out, "took effect immediately") {
+		t.Fatalf("reject/supersede output must state immediate effect:\n%s", out)
+	}
+	for _, banned := range []string{"DRAFT", "Confirm ruling", "never binds"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("reject/supersede output must not claim %q:\n%s", banned, out)
 		}
 	}
 }

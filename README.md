@@ -286,12 +286,15 @@ create binding rulings, by design).
 
 ```
 lema settle accept <decision-id>...              # draft an accept, print the bind link
-lema settle reject <decision-id> --reason <why>  # proposed drafts only
-lema settle supersede <decision-id> --by <decision-id>
+lema settle reject <decision-id> --reason <why>  # proposed drafts only; takes effect immediately
+lema settle supersede <decision-id> --by <decision-id>  # takes effect immediately
 ```
 
-Decision ids can be full UUIDs or unique 6+ character prefixes. Requires
-hosted credentials (`LEMA_API_URL`, `LEMA_API_TOKEN`, `LEMA_WORKSPACE_ID`).
+`accept` drafts; `reject` and `supersede` apply on the server in the same
+request (no browser confirm step exists for them — the command says so).
+Decision ids are full UUIDs or unique 6+ character UUID prefixes (`d_xxxxxx`
+locators are content hashes and are refused). Requires hosted credentials
+(`LEMA_API_URL`, `LEMA_API_TOKEN`, `LEMA_WORKSPACE_ID`).
 
 ---
 
