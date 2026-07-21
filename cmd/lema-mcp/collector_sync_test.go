@@ -23,7 +23,7 @@ type syncCapture struct {
 func newSyncTestServer(t *testing.T, cap *syncCapture, eventStatus int) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /workspaces/ws-1/runs", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/runs", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer tok" {
 			t.Errorf("missing bearer token")
 		}
@@ -42,7 +42,7 @@ func newSyncTestServer(t *testing.T, cap *syncCapture, eventStatus int) *httptes
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(`{"run":{"id":"11111111-1111-1111-1111-111111111111"},"created":true,"rung":7}`))
 	})
-	mux.HandleFunc("POST /workspaces/ws-1/runs/11111111-1111-1111-1111-111111111111/events", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/runs/11111111-1111-1111-1111-111111111111/events", func(w http.ResponseWriter, r *http.Request) {
 		var req map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		cap.events = append(cap.events, req)
@@ -56,7 +56,7 @@ func setSyncEnv(t *testing.T, url string) {
 	t.Helper()
 	t.Setenv("LEMA_API_URL", url)
 	t.Setenv("LEMA_API_TOKEN", "tok")
-	t.Setenv("LEMA_WORKSPACE_ID", "ws-1")
+	t.Setenv("LEMA_WORKSPACE_ID", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 }
 
 func writeTestCheckpoint(t *testing.T, dir, runID string) collectorCheckpoint {
@@ -192,5 +192,91 @@ func TestSyncCheckpointEventRejectedIsAnError(t *testing.T) {
 	defer cancel()
 	if err := s.syncCheckpoint(ctx, "claude-code", cp); err == nil {
 		t.Fatal("a rejected event must surface as an error to the (ignoring) caller")
+	}
+}
+
+// The dogfood-found bug (2026-07-21): the authed API parses the workspace
+// path param as a UUID, but the configured value is commonly a SLUG — the
+// first live sync 400'd silently. The syncer must resolve slug→id via the
+// credential's own workspace listing; a workspace the credential cannot see
+// resolves to nothing and NOTHING syncs (this is also what stops a
+// wrong-org token from writing anywhere).
+func TestSyncResolvesSlugWorkspace(t *testing.T) {
+	workspaceUUIDMu.Lock()
+	workspaceUUIDCache = map[string]string{}
+	workspaceUUIDMu.Unlock()
+
+	cap := &syncCapture{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /workspaces", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"workspaces":[{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","slug":"lemahq-lema","name":"lemahq/lema"}]}`))
+	})
+	mux.HandleFunc("POST /workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/runs", func(w http.ResponseWriter, r *http.Request) {
+		cap.runCreates++
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"run":{"id":"11111111-1111-1111-1111-111111111111"},"created":true,"rung":7}`))
+	})
+	mux.HandleFunc("POST /workspaces/11111111-1111-1111-1111-111111111111/events", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("unexpected path")
+	})
+	mux.HandleFunc("POST /workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/runs/11111111-1111-1111-1111-111111111111/events", func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		cap.events = append(cap.events, req)
+		w.WriteHeader(http.StatusCreated)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Setenv("LEMA_API_URL", srv.URL)
+	t.Setenv("LEMA_API_TOKEN", "tok")
+	t.Setenv("LEMA_WORKSPACE_ID", "lemahq-lema") // the slug, exactly as configured in the wild
+
+	dir := t.TempDir()
+	writeTestCheckpoint(t, dir, "sess-slug")
+	syncOnBoundary(dir, "claude-code", mkEnv("sess-slug", "stop", nil))
+	if cap.runCreates != 1 || len(cap.events) != 1 {
+		t.Fatalf("slug must resolve and sync: creates=%d events=%d", cap.runCreates, len(cap.events))
+	}
+}
+
+func TestSyncSkipsInvisibleWorkspace(t *testing.T) {
+	workspaceUUIDMu.Lock()
+	workspaceUUIDCache = map[string]string{}
+	workspaceUUIDMu.Unlock()
+
+	hits := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /workspaces", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"workspaces":[{"id":"other","slug":"someone-else"}]}`))
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/workspaces" {
+			hits++
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Setenv("LEMA_API_URL", srv.URL)
+	t.Setenv("LEMA_API_TOKEN", "vestige-tok")
+	t.Setenv("LEMA_WORKSPACE_ID", "lemahq-lema")
+
+	dir := t.TempDir()
+	writeTestCheckpoint(t, dir, "sess-wrongorg")
+	syncOnBoundary(dir, "claude-code", mkEnv("sess-wrongorg", "stop", nil))
+	if hits != 0 {
+		t.Fatalf("a workspace this credential cannot see must sync NOTHING, got %d writes", hits)
+	}
+}
+
+func TestLooksLikeUUID(t *testing.T) {
+	if !looksLikeUUID("11111111-1111-1111-1111-111111111111") {
+		t.Fatal("canonical uuid must pass")
+	}
+	for _, bad := range []string{"lemahq-lema", "", "11111111-1111-1111-1111-11111111111Z", "111111111111111111111111111111111111"} {
+		if looksLikeUUID(bad) {
+			t.Fatalf("%q must not pass", bad)
+		}
 	}
 }

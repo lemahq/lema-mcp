@@ -130,6 +130,11 @@ func getStateBrief(ctx context.Context, req *mcp.CallToolRequest, in stateBriefI
 			Note: "state brief unavailable: hosted mode is not configured (LEMA_API_URL / LEMA_API_TOKEN / LEMA_WORKSPACE_ID)",
 		}, nil
 	}
+	if wsUUID, err := s.resolveWorkspaceUUID(ctx); err != nil {
+		return nil, stateBriefOutput{Note: "state brief unavailable: " + err.Error()}, nil
+	} else {
+		s.workspaceID = wsUUID
+	}
 	runID := strings.TrimSpace(in.Run)
 	note := "explicit run id"
 	if runID == "" {

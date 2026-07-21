@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -55,6 +56,69 @@ func newCollectorSyncer() *collectorSyncer {
 		apiURL: apiURL, token: token, workspaceID: workspaceID,
 		client: &http.Client{Timeout: collectorSyncTimeout},
 	}
+}
+
+// looksLikeUUID reports whether s has the canonical 8-4-4-4-12 hex shape.
+// The authed /workspaces/{id}/... group parses the path param as a UUID, so
+// a slug-configured LEMA_WORKSPACE_ID must resolve to the id first.
+func looksLikeUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, c := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// workspaceUUIDCache memoizes slug→id resolutions per (apiURL, value) so the
+// long-lived MCP server pays one listing per target; hook processes are
+// one-shot and pay one listing per boundary event, bounded by the 5s budget.
+var (
+	workspaceUUIDMu    sync.Mutex
+	workspaceUUIDCache = map[string]string{}
+)
+
+// resolveWorkspaceUUID turns the configured workspace value into the UUID the
+// API's path parser requires. A UUID passes through untouched; anything else
+// is matched against GET /workspaces by slug or id. A value this credential
+// cannot see resolves to an error — which is also the guard that stops a
+// wrong-org token from syncing anywhere (the workspace simply isn't in its
+// listing).
+func (s *collectorSyncer) resolveWorkspaceUUID(ctx context.Context) (string, error) {
+	v := s.workspaceID
+	if looksLikeUUID(v) {
+		return v, nil
+	}
+	key := s.apiURL + "|" + v
+	workspaceUUIDMu.Lock()
+	cached, ok := workspaceUUIDCache[key]
+	workspaceUUIDMu.Unlock()
+	if ok {
+		return cached, nil
+	}
+	all, err := fetchWorkspaces(ctx, s.client, s.apiURL, s.token)
+	if err != nil {
+		return "", err
+	}
+	for _, w := range all {
+		if strings.EqualFold(w.Slug, v) || w.ID == v {
+			workspaceUUIDMu.Lock()
+			workspaceUUIDCache[key] = w.ID
+			workspaceUUIDMu.Unlock()
+			return w.ID, nil
+		}
+	}
+	return "", fmt.Errorf("workspace %q is not visible to this credential", v)
 }
 
 func (s *collectorSyncer) post(ctx context.Context, path string, body any) (int, []byte, error) {
@@ -110,6 +174,11 @@ func (s *collectorSyncer) ensureRun(ctx context.Context, harness, externalRunID,
 // Every failure path returns an error the caller ignores (fail-open); the
 // server's in-tx subsumption makes repeated syncs safe.
 func (s *collectorSyncer) syncCheckpoint(ctx context.Context, harness string, cp collectorCheckpoint) error {
+	uuid, err := s.resolveWorkspaceUUID(ctx)
+	if err != nil {
+		return err
+	}
+	s.workspaceID = uuid
 	runID, err := s.ensureRun(ctx, harness, cp.RunID, cp.CWD)
 	if err != nil {
 		return err

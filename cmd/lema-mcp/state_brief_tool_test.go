@@ -21,7 +21,7 @@ func newBriefTestServer(t *testing.T, wantHarness string, briefStatus int) (*htt
 	t.Helper()
 	cap := &syncCapture{}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /workspaces/ws-1/runs", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/runs", func(w http.ResponseWriter, r *http.Request) {
 		var req map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if req["harness"] != wantHarness {
@@ -31,7 +31,7 @@ func newBriefTestServer(t *testing.T, wantHarness string, briefStatus int) (*htt
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"run":{"id":"22222222-2222-2222-2222-222222222222"},"created":false,"rung":7}`))
 	})
-	mux.HandleFunc("GET /workspaces/ws-1/brief", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/brief", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer tok" {
 			t.Errorf("missing bearer token")
 		}
