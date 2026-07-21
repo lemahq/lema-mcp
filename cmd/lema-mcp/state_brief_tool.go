@@ -1,0 +1,172 @@
+// state_brief_tool.go is the hosted-only `get_state_brief` MCP verb (pivot
+// B2, PIVOT_SPEC §4): the scoped State Brief for this run — a thin reader of
+// the server's GET /workspaces/{id}/brief?run=. Alias-then-deprecate posture:
+// the existing tools are untouched; this is the first of the three end-state
+// verbs to land.
+//
+// Run resolution: an explicit hosted run UUID wins; otherwise the verb
+// resolves the PRIOR run for this project from the local F4 checkpoint
+// (cwd-keyed) and ensures its hosted identity (idempotent on
+// harness+external_run_id) — the relay read: a fresh session asks for the
+// state it is resuming. No checkpoint and no explicit run = an honest
+// "no prior run known", never a fabricated scope.
+//
+// Workspace resolution matches the REST of the MCP server (env then the
+// per-user credentials file): this is an explicitly configured, per-project
+// server the operator launched — not the ambient hook, whose env-only rule
+// (collector_sync.go) exists because a hook fires everywhere unattended.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+type stateBriefInput struct {
+	Run string `json:"run,omitempty" jsonschema:"optional hosted run UUID; omit to resolve this project's prior run from the local checkpoint"`
+}
+
+// stateBriefOutput passes the server's brief through verbatim (scope,
+// sections, silences, as_of) plus a note on how the run was resolved.
+type stateBriefOutput struct {
+	Scope    string          `json:"scope,omitempty"`
+	Sections json.RawMessage `json:"sections,omitempty"`
+	Silences json.RawMessage `json:"silences,omitempty"`
+	AsOf     string          `json:"as_of,omitempty"`
+	Note     string          `json:"note,omitempty"`
+}
+
+var getStateBriefTool = &mcp.Tool{
+	Name: "get_state_brief",
+	Description: "Returns the scoped State Brief for a run: objective, last checkpoint, files in flight, " +
+		"settled decisions in scope (cited), binding rejected approaches, related active runs — " +
+		"composed deterministically from the recorded state, with every unavailable section named " +
+		"in silences. Omitting run resolves this project's prior session (the relay read).",
+	Annotations: readOnlyExternal("Get the State Brief (hosted)"),
+}
+
+const stateBriefTimeout = 10 * time.Second
+
+// briefClient reuses the collector syncer's HTTP shape with the MCP server's
+// own workspace resolution (see the file header for why they differ).
+func newBriefClient() *collectorSyncer {
+	apiURL, token, _ := resolveHostedConfig()
+	workspaceID := resolveWorkspaceID()
+	if apiURL == "" || token == "" || workspaceID == "" {
+		return nil
+	}
+	return &collectorSyncer{
+		apiURL: apiURL, token: token, workspaceID: workspaceID,
+		client: &http.Client{Timeout: stateBriefTimeout},
+	}
+}
+
+func (s *collectorSyncer) get(ctx context.Context, path string) (int, []byte, error) {
+	url := strings.TrimRight(s.apiURL, "/") + "/workspaces/" + s.workspaceID + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+s.token)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, body, nil
+}
+
+// resolvePriorRun finds this project's prior run via the local F4 checkpoint
+// and returns its hosted run UUID (creating the identity idempotently).
+func resolvePriorRun(ctx context.Context, s *collectorSyncer) (runID, note string, err error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", "", fmt.Errorf("cwd unresolvable: %w", err)
+	}
+	dir, err := collectorDir()
+	if err != nil {
+		return "", "", err
+	}
+	cp, ok := readCollectorCheckpoint(dir, cwd, time.Now())
+	if !ok {
+		// The checkpoint was written from a hook's self-reported cwd, which
+		// can differ from this process's Getwd across symlinks — retry with
+		// the resolved path before concluding there is no prior run.
+		if resolved, rerr := filepath.EvalSymlinks(cwd); rerr == nil && resolved != cwd {
+			cp, ok = readCollectorCheckpoint(dir, resolved, time.Now())
+		}
+	}
+	if !ok {
+		return "", "", fmt.Errorf("no prior run known for this project (no local checkpoint under %s)", cwd)
+	}
+	harness := cp.Harness
+	if harness == "" {
+		// Checkpoints written before the harness field existed: the collector
+		// shipped with only this adapter, so the key is stable.
+		harness = "claude-code"
+	}
+	hosted, err := s.ensureRun(ctx, harness, cp.RunID, cp.CWD)
+	if err != nil {
+		return "", "", err
+	}
+	return hosted, fmt.Sprintf("resolved from this project's prior session %s (%s)", cp.RunID, harness), nil
+}
+
+func getStateBrief(ctx context.Context, req *mcp.CallToolRequest, in stateBriefInput) (*mcp.CallToolResult, stateBriefOutput, error) {
+	s := newBriefClient()
+	if s == nil {
+		return nil, stateBriefOutput{
+			Note: "state brief unavailable: hosted mode is not configured (LEMA_API_URL / LEMA_API_TOKEN / LEMA_WORKSPACE_ID)",
+		}, nil
+	}
+	runID := strings.TrimSpace(in.Run)
+	note := "explicit run id"
+	if runID == "" {
+		var err error
+		runID, note, err = resolvePriorRun(ctx, s)
+		if err != nil {
+			return nil, stateBriefOutput{Note: "state brief unavailable: " + err.Error()}, nil
+		}
+	}
+	status, body, err := s.get(ctx, "/brief?run="+url.QueryEscape(runID))
+	if err != nil {
+		return nil, stateBriefOutput{Note: "state brief unavailable: " + err.Error()}, nil
+	}
+	switch status {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		// The dark flag and an unknown run are indistinguishable by design
+		// (the surface 404s while lema-state-brief is off) — say both.
+		return nil, stateBriefOutput{
+			Note: "state brief unavailable: the server has no brief for this run (the surface may not be enabled yet, or the run is unknown)",
+		}, nil
+	default:
+		return nil, stateBriefOutput{Note: fmt.Sprintf("state brief unavailable: HTTP %d", status)}, nil
+	}
+	var wire struct {
+		Scope    string          `json:"scope"`
+		Sections json.RawMessage `json:"sections"`
+		Silences json.RawMessage `json:"silences"`
+		AsOf     string          `json:"as_of"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return nil, stateBriefOutput{Note: "state brief unavailable: unreadable server response"}, nil
+	}
+	out := stateBriefOutput{
+		Scope: wire.Scope, Sections: wire.Sections, Silences: wire.Silences,
+		AsOf: wire.AsOf, Note: note,
+	}
+	logUsage("get_state_brief", note, 1, out)
+	return nil, out, nil
+}

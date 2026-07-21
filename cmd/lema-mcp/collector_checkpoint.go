@@ -26,9 +26,13 @@ const (
 
 // collectorCheckpoint is the distilled handoff state for one project dir.
 // RunID records which run produced it, so the injected block is attributable.
+// Harness rides along because the hosted run identity is keyed on
+// (harness, external_run_id) — a resolver using a different harness value
+// would mint a second identity for the same session.
 type collectorCheckpoint struct {
 	CWD           string   `json:"cwd"`
 	RunID         string   `json:"run_id"`
+	Harness       string   `json:"harness,omitempty"`
 	UpdatedAt     string   `json:"updated_at"`
 	Summary       string   `json:"summary"`
 	RecentPrompts []string `json:"recent_prompts,omitempty"`
@@ -63,6 +67,9 @@ func distillEnvelopes(envs []collectorEnvelope, cwd string) collectorCheckpoint 
 	for _, ev := range envs {
 		if cp.RunID == "" {
 			cp.RunID = ev.RunID
+		}
+		if cp.Harness == "" {
+			cp.Harness = ev.Evidence["harness"]
 		}
 		if fp := ev.Payload["file_path"]; fp != "" && !seen[fp] {
 			seen[fp] = true

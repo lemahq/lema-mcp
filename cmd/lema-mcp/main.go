@@ -692,6 +692,9 @@ func main() {
 	// search_decisions for the agent's own model to synthesize.
 	if hostedSrc != nil {
 		mcp.AddTool(server, askTool, askHosted)
+		// Pivot B2 §4: the first end-state verb — the scoped State Brief
+		// reader. Alias-then-deprecate: every existing tool stays registered.
+		mcp.AddTool(server, getStateBriefTool, getStateBrief)
 	}
 
 	// Project-docs retrieval (ADR-0055) — registered only when a local tree was

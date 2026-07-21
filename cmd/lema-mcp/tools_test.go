@@ -39,6 +39,7 @@ func TestToolsMeetDirectoryCriteria(t *testing.T) {
 	mcp.AddTool(server, askTool, askHosted)
 	mcp.AddTool(server, searchDocsTool, searchDocs)
 	mcp.AddTool(server, getDocTool, getDoc)
+	mcp.AddTool(server, getStateBriefTool, getStateBrief)
 
 	clientT, serverT := mcp.NewInMemoryTransports()
 	ss, err := server.Connect(ctx, serverT, nil)
