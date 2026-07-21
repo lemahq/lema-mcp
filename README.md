@@ -276,6 +276,23 @@ Your agent calls these over MCP.
 In your own repo the full server registers the read + capture tools (and the public
 `check_approach` too); the `npx lema-mcp try` server runs the public door only.
 
+### `lema settle` — rule from the terminal (hosted mode)
+
+The package also installs a `lema` command. `settle` is the terminal half of
+adjudication: it **drafts** a ruling on a hosted decision and prints the deep
+link where your **browser click binds it** — a terminal credential never
+binds anything (that split is structural: programmatic principals cannot
+create binding rulings, by design).
+
+```
+lema settle accept <decision-id>...              # draft an accept, print the bind link
+lema settle reject <decision-id> --reason <why>  # proposed drafts only
+lema settle supersede <decision-id> --by <decision-id>
+```
+
+Decision ids can be full UUIDs or unique 6+ character prefixes. Requires
+hosted credentials (`LEMA_API_URL`, `LEMA_API_TOKEN`, `LEMA_WORKSPACE_ID`).
+
 ---
 
 ## Why lema is different (the honest part)
