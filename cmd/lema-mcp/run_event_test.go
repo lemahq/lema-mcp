@@ -1,11 +1,34 @@
 package main
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// captureStderr redirects os.Stderr for the duration of f and returns what was
+// written. The package's tests run sequentially (no t.Parallel), so the
+// process-global swap is safe.
+func captureStderr(t *testing.T, f func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	f()
+	_ = w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	return buf.String()
+}
 
 func TestSanitizeTabID(t *testing.T) {
 	if got := sanitizeTabID("session-2"); got != "session-2" {
@@ -149,5 +172,25 @@ func TestRunRunEventSessionStartNoCheckpoint(t *testing.T) {
 	runRunEvent([]string{"SessionStart"})
 	if _, err := os.Stat(spoolPath(dir, "main")); err != nil {
 		t.Fatalf("expected spool file: %v", err)
+	}
+}
+
+// TestRunEventDeprecationNotice pins the ADR-0110 deprecation-note-first signal:
+// SessionStart surfaces the deprecation notice to stderr even when the feature
+// is DISABLED (so a dormant-but-wired run-event still gets warned to migrate to
+// `collect`), and non-boundary hook events stay silent (one notice per session,
+// not per hook).
+func TestRunEventDeprecationNotice(t *testing.T) {
+	// Disabled: run-event is a no-op today, but the boundary still warns.
+	t.Setenv(runLedgerEnv, "0")
+	got := captureStderr(t, func() { runRunEvent([]string{"SessionStart"}) })
+	if !strings.Contains(got, "DEPRECATED") || !strings.Contains(got, "collect") {
+		t.Fatalf("SessionStart must surface the deprecation notice, got %q", got)
+	}
+
+	// A non-boundary event must not repeat the notice (no per-hook spam).
+	quiet := captureStderr(t, func() { runRunEvent([]string{"PostToolUse"}) })
+	if strings.Contains(quiet, "DEPRECATED") {
+		t.Fatalf("non-SessionStart events must stay silent, got %q", quiet)
 	}
 }

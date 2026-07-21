@@ -3,6 +3,15 @@
 // checkpoint; SessionStart injects it as additionalContext. Dark unless
 // LEMA_RUN_LEDGER=1 in the hook process env (set per-PTY by lema-terminal).
 // Fail-open everywhere; always exit 0.
+//
+// DEPRECATED (ADR-0110 deprecation-note-first cadence, pivot B2): superseded by
+// the `collect` subcommand (F3/F4 — the open collector: adapter-normalized run
+// identity, per-run expiring spool, hosted sync + honest-provenance injection),
+// and unwired from the lema hooks by F5. This slice is kept for ONE release so a
+// stale LEMA_RUN_LEDGER wiring keeps working (fail-open), and is scheduled for
+// removal in the next release. Do not add callers or new features here — build
+// them on `collect`. A deprecation notice is surfaced to stderr on SessionStart
+// (see runRunEvent); the stdout hook protocol is untouched.
 package main
 
 import (
@@ -23,6 +32,12 @@ const (
 	runMaxPromptKeep = 3
 	runMaxFileKeep   = 8
 )
+
+// runEventDeprecationNotice is the ADR-0110 deprecation-note-first signal for
+// the retired run-event subcommand — surfaced to stderr, so the stdout hook
+// protocol (additionalContext JSON) is never corrupted. One line, actionable:
+// migrate the wiring to `collect` before the removal release.
+const runEventDeprecationNotice = "lema-mcp run-event: DEPRECATED (ADR-0110) — superseded by `lema-mcp collect` (pivot B2 F3/F4) and unwired from the lema hooks by F5. Kept for one release for any stale LEMA_RUN_LEDGER wiring; scheduled for removal in the next release. Migrate hooks to `collect`."
 
 // runEventInput is the union of Claude Code hook stdin fields run-event reads.
 type runEventInput struct {
@@ -264,12 +279,20 @@ func emitAdditionalContext(hookEvent, msg string) {
 }
 
 func runRunEvent(args []string) {
-	if !runEventEnabled() {
-		return
-	}
 	hookEvent := "SessionStart"
 	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
 		hookEvent = strings.TrimSpace(args[0])
+	}
+	// Deprecation notice (ADR-0110): surface once per session — on the
+	// SessionStart boundary only, so a still-wired run-event does not spam it on
+	// every hook event — and BEFORE the enabled gate, so even a dormant wiring
+	// (LEMA_RUN_LEDGER unset) is warned to migrate to `collect` before removal.
+	// stderr only; fail-open; the enabled no-op path below is otherwise unchanged.
+	if hookEvent == "SessionStart" {
+		fmt.Fprintln(os.Stderr, runEventDeprecationNotice)
+	}
+	if !runEventEnabled() {
+		return
 	}
 	dir, err := runEventSpoolDir()
 	if err != nil {
