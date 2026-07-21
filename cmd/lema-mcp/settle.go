@@ -37,8 +37,8 @@ const settleUsage = `usage:
   lema settle supersede <decision-id> --by <decision-id> [--reason <text>]
 
 <decision-id> is a full UUID, or a unique UUID prefix (6+ hex chars, as ids
-appear in HANDOFF notes or the decision URL) resolved against the
-workspace's most recent decisions. "d_xxxxxx" locators are content hashes,
+appear in HANDOFF notes or the decision URL) resolved against the whole
+workspace. "d_xxxxxx" locators are content hashes,
 not UUIDs — they cannot be resolved here; use the UUID from the decision
 page or search_decisions.
 
@@ -144,11 +144,17 @@ func (c *settleClient) getDecision(id string) (settleDecision, error) {
 	return d, nil
 }
 
-func (c *settleClient) listDecisions() ([]settleDecision, error) {
+// listDecisions asks the server for decisions whose UUID starts with the
+// given dashless hex prefix (id_prefix searches the WHOLE workspace — the
+// 2026-07-21 dogfood run proved recency-window reads can't resolve ids). A
+// server predating id_prefix ignores the param and returns its recent page;
+// the caller's local prefix filter still applies, so behavior degrades to
+// the old capped resolution instead of breaking.
+func (c *settleClient) listDecisions(prefix string) ([]settleDecision, error) {
 	if c.workspaceID == "" {
 		return nil, fmt.Errorf("no workspace configured (set %s) — pass the full decision UUID instead of a prefix", workspaceIDEnv)
 	}
-	status, body, err := c.do(http.MethodGet, "/workspaces/"+c.workspaceID+"/decisions?limit=100", nil)
+	status, body, err := c.do(http.MethodGet, "/workspaces/"+c.workspaceID+"/decisions?limit=100&id_prefix="+prefix, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -201,10 +207,15 @@ func (c *settleClient) resolveDecisionID(raw string) (settleDecision, error) {
 	if !hexPrefixRe.MatchString(compact) {
 		return settleDecision{}, fmt.Errorf("%q is not a decision id: pass a full UUID or a 6+ hex-char prefix", raw)
 	}
-	list, err := c.listDecisions()
+	list, err := c.listDecisions(compact)
 	if err != nil {
 		return settleDecision{}, err
 	}
+	// Filter locally even though the server filters too: an older server
+	// ignores id_prefix and returns its recent page, and the response shape
+	// doesn't say which happened. A response holding non-matching decisions
+	// IS the tell — the server ignored the param, so only the 100 most
+	// recently updated records were actually searched.
 	var matches []settleDecision
 	for _, d := range list {
 		if strings.HasPrefix(strings.ReplaceAll(strings.ToLower(d.ID), "-", ""), compact) {
@@ -215,7 +226,10 @@ func (c *settleClient) resolveDecisionID(raw string) (settleDecision, error) {
 	case 1:
 		return matches[0], nil
 	case 0:
-		return settleDecision{}, fmt.Errorf("no decision in the workspace's latest 100 matches prefix %q — pass the full UUID (the list read is capped, older records need the full id)", raw)
+		if len(list) > 0 {
+			return settleDecision{}, fmt.Errorf("no decision among the workspace's 100 most recently updated matches prefix %q — this server predates whole-workspace prefix lookup, so older records need the full UUID", raw)
+		}
+		return settleDecision{}, fmt.Errorf("no decision in the workspace matches prefix %q — check the id, or pass the full UUID", raw)
 	default:
 		var ids []string
 		for _, m := range matches {

@@ -208,6 +208,98 @@ func TestSettleRejectAndSupersedeOutputSaysApplied(t *testing.T) {
 	}
 }
 
+// newSettlePrefixTestServer stubs a server that honors the id_prefix query
+// param on the workspace decisions list — the post-fix hosted contract. The
+// UNFILTERED list returns only filler decisions (the target is outside the
+// recent window, the first-dogfood failure of 2026-07-21), so resolution
+// succeeds only if the client actually sends id_prefix.
+func newSettlePrefixTestServer(t *testing.T) (*httptest.Server, *[]map[string]any) {
+	t.Helper()
+	var appended []map[string]any
+	compact := func(id string) string { return strings.ReplaceAll(id, "-", "") }
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /workspaces/", func(w http.ResponseWriter, r *http.Request) {
+		var out []map[string]any
+		if p := r.URL.Query().Get("id_prefix"); p != "" {
+			for _, d := range []map[string]any{
+				{"id": settleTestID, "title": "B1 internal order", "current_status": "proposed"},
+				{"id": settleOtherID, "title": "a proposed draft", "current_status": "proposed"},
+			} {
+				if strings.HasPrefix(compact(d["id"].(string)), p) {
+					out = append(out, d)
+				}
+			}
+		} else {
+			for i := 0; i < 100; i++ {
+				out = append(out, map[string]any{
+					"id": fmt.Sprintf("ffffff%02x-0000-0000-0000-000000000000", i), "title": "filler", "current_status": "accepted"})
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"decisions": out})
+	})
+	mux.HandleFunc("POST /decisions/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/decisions/"), "/events")
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		req["_decision_id"] = id
+		appended = append(appended, req)
+		json.NewEncoder(w).Encode(map[string]any{"id": id, "current_status": "accepted"})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, &appended
+}
+
+// The first real dogfood run (2026-07-21) had all seven pivot decisions fail
+// prefix resolution: a backfill had bumped 109 older records above them, so
+// the recent-window read never contained the targets. Resolution must not
+// depend on recency — the client asks the server to search by id_prefix.
+func TestSettlePrefixResolvesOutsideRecentWindow(t *testing.T) {
+	srv, appended := newSettlePrefixTestServer(t)
+	settleEnv(t, srv.URL)
+
+	if err := runSettle([]string{"accept", "77c99992"}); err != nil {
+		t.Fatalf("runSettle accept: %v", err)
+	}
+	if len(*appended) != 1 || (*appended)[0]["_decision_id"] != settleTestID {
+		t.Fatalf("prefix did not resolve to %s via id_prefix lookup; appended=%v", settleTestID, *appended)
+	}
+}
+
+// A prefix that matches nothing must fail with copy that matches what the
+// server actually searched: a filtering server searched the whole workspace
+// (no cap to blame); a pre-fix server ignored id_prefix and returned a page
+// of non-matching decisions — the copy must say the read covered only the
+// 100 MOST RECENTLY UPDATED records ("latest" undersold the recency trap).
+func TestSettlePrefixMissErrorCopy(t *testing.T) {
+	// New server: id_prefix honored, whole workspace searched, empty result.
+	// The search was exhaustive — the copy must not blame a recency cap.
+	srv, _ := newSettlePrefixTestServer(t)
+	settleEnv(t, srv.URL)
+	err := runSettle([]string{"reject", "deadbeef", "--reason", "x"})
+	if err == nil || !strings.Contains(err.Error(), "no decision in the workspace matches") {
+		t.Fatalf("exhaustive miss must say the whole workspace was searched, got %v", err)
+	}
+	if strings.Contains(err.Error(), "100") {
+		t.Fatalf("exhaustive miss must not blame a cap, got %v", err)
+	}
+
+	// Old server: id_prefix ignored, a page of non-matching recent decisions
+	// returned — only the 100 most recently updated were actually covered.
+	old, _ := newSettleTestServer(t)
+	settleEnv(t, old.URL)
+	errOld := runSettle([]string{"reject", "deadbeef", "--reason", "x"})
+	if errOld == nil || !strings.Contains(errOld.Error(), "most recently updated") {
+		t.Fatalf("old-server miss must name the most-recently-updated cap, got %v", errOld)
+	}
+	if strings.Contains(errOld.Error(), "latest 100") {
+		t.Fatalf("old copy 'latest 100' must be gone, got %v", errOld)
+	}
+}
+
 func TestSettleAcceptAmbiguousPrefixFailsHonestly(t *testing.T) {
 	srv, appended := newSettleTestServer(t)
 	settleEnv(t, srv.URL)
