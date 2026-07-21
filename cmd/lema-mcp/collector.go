@@ -262,10 +262,12 @@ func runCollect(args []string) {
 	// F4: a run boundary distills the pre-boundary spool into the project
 	// checkpoint (the lifecycle marker itself is not "activity" — same order
 	// run_event.go uses); a session start injects the prior checkpoint (the
-	// collector's only stdout, and only here).
+	// collector's only stdout, and only here). Boundaries then sync the fresh
+	// checkpoint hosted when credentials exist — silent local-only otherwise.
 	checkpointOnBoundary(dir, ev)
 	if err := appendEnvelope(dir, ev); err != nil {
 		return
 	}
 	injectOnStart(dir, ev)
+	syncOnBoundary(dir, adapter.name(), ev)
 }
