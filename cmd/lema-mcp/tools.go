@@ -57,7 +57,7 @@ var (
 	}
 	recordDecisionTool = &mcp.Tool{
 		Name:        "record_decision",
-		Description: "Records a settled decision to this repo's local decision store: the chosen option and the rejected alternatives (with why each was killed), plus optional rationale, refs, constraint, consequence, and ids of decisions it supersedes. Rejected and superseded options are marked CLOSED, so they later surface as ruled out via check_decided and search_decisions. Appends to the store — it does not delete or overwrite existing decisions.",
+		Description: "Records a settled decision to this repo's local decision store: the chosen option and the rejected alternatives (with why each was killed), plus optional rationale, refs, constraint, consequence, and ids of decisions it supersedes. Rejected and superseded options are marked CLOSED, so they later surface as ruled out via check_decided and search_decisions. Appends to the store — it does not delete or overwrite existing decisions. Deprecation note: this tool is the legacy alias of propose, which persists the identical capture; both remain registered during the deprecation window.",
 		Annotations: writerLocal("Record decision"),
 	}
 	checkDecidedTool = &mcp.Tool{
@@ -104,5 +104,5 @@ var directoryTools = []*mcp.Tool{
 	searchDecisionsTool, getDecisionTool, listDecisionsTool, getDecisionGraphTool,
 	recordDecisionTool, checkDecidedTool,
 	checkApproachTool, askTool, searchDocsTool, getDocTool,
-	getStateBriefTool, resolveTool,
+	getStateBriefTool, resolveTool, proposeTool,
 }
