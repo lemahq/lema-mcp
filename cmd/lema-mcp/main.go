@@ -366,9 +366,11 @@ func main() {
 			runFrontload(os.Args[2:])
 			return
 		case "run-event":
-			// Run-ledger hooks (run-ledger v1 local slice): spool session events per tab,
-			// distill on PreCompact, inject checkpoint on SessionStart. Dark unless
-			// LEMA_RUN_LEDGER=1 (set per-PTY by lema-terminal); fail-open; always exit 0.
+			// DEPRECATED (ADR-0110, pivot B2): the run-ledger v1 local slice —
+			// superseded by `collect` (F3/F4) and unwired from the lema hooks by F5.
+			// Kept one release for any stale LEMA_RUN_LEDGER wiring; emits a
+			// stderr deprecation notice on SessionStart; scheduled for removal next
+			// release. Dark unless LEMA_RUN_LEDGER=1; fail-open; always exit 0.
 			runRunEvent(os.Args[2:])
 			return
 		case "collect":
