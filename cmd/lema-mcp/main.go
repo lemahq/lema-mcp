@@ -348,6 +348,16 @@ func main() {
 			// always exit 0; never blocks the stop.
 			runPush(os.Args[2:])
 			return
+		case "distill":
+			// Stop hook (ADR-0140, Stage 3 — the session-end distiller): scan +
+			// SCRUB the session transcript locally and POST the free-form
+			// deliberation to the hosted /ingest-session, where the server extracts
+			// `proposed` atoms (the amnesia fix). Dark unless the env-wide WorkOS flag
+			// lema-session-distill is on (checked via GET /session-distill-enabled,
+			// BEFORE any read); the local binary stays LLM-free/no-network for model
+			// work; fail-open; always exit 0; never blocks the stop.
+			runDistill(os.Args[2:])
+			return
 		case "frontload":
 			// UserPromptSubmit hook (agent-session-loop P1, the loop's reader): retrieve
 			// the recorded decisions relevant to the prompt and inject them as context
@@ -378,6 +388,15 @@ func main() {
 		case "try":
 			if err := runTry(os.Args[2:]); err != nil {
 				log.Fatalf("lema-mcp try: %v", err)
+			}
+			return
+		case "settle":
+			// Terminal adjudication (pivot B1, F15 per A2): accept/reject/
+			// supersede DRAFTS the ruling via the hosted API and prints the
+			// deep link; the browser "Confirm ruling" click is the only
+			// binding act (ADR-0125 — a programmatic credential never binds).
+			if err := runSettle(os.Args[2:]); err != nil {
+				log.Fatalf("lema settle: %v", err)
 			}
 			return
 		case "serve":
@@ -631,7 +650,7 @@ func main() {
 	// already uses (try.go) — it shipped nil, priming agents with nothing (ADR-0124,
 	// the v1 read wedge). Steering rides instructions, never the tool descriptions.
 	server := mcp.NewServer(
-		&mcp.Implementation{Name: "lema-mcp", Version: "0.15.0"},
+		&mcp.Implementation{Name: "lema-mcp", Version: "0.16.0"},
 		&mcp.ServerOptions{Instructions: authedServerInstructions},
 	)
 	mcp.AddTool(server, searchDecisionsTool, searchDecisions)

@@ -84,6 +84,11 @@ func buildScopeQuery(in frontloadInput) string {
 type frontloadRunner struct {
 	ask      func(ctx context.Context, query string) (source.AskResult, error)
 	canQuery bool // credentials + workspace resolved
+	// knowledge fetches the workspace's knowledge-file audit (decision
+	// e886b49f) — nil when unwired. Its block is independent of the prompt
+	// scope: a stale rule is worth knowing about regardless of what the turn
+	// asks. Fail-open like everything here.
+	knowledge func(ctx context.Context) ([]kfAuditFile, error)
 }
 
 // run executes the frontload for one hook event and returns the context block to
@@ -95,19 +100,45 @@ func (r frontloadRunner) run(ctx context.Context, in frontloadInput) string {
 	if !r.canQuery {
 		return "" // nowhere to query — fail-open
 	}
-	query := buildScopeQuery(in)
-	if query == "" {
-		return "" // no scope signal in this event
+	// The knowledge fetch runs CONCURRENTLY with the ask (review finding): both
+	// share the single frontloadTimeout deadline, and run serially a slow /ask
+	// synthesis would starve the stale-rule block — silently dropping the
+	// warning on exactly the turn that was about to trust a dead rule. It is
+	// also independent of prompt scope (decision e886b49f): a stale rule is
+	// worth knowing about regardless of what the turn asks. The server abstains
+	// by 404 while dark (negatively cached, see knowledgeFetcher); errors fail
+	// open.
+	type knowledgeOut struct {
+		files []kfAuditFile
+		err   error
 	}
-	res, err := r.ask(ctx, query)
-	if err != nil {
-		return "" // a retrieval failure must not wedge the turn
+	var kfCh chan knowledgeOut
+	if r.knowledge != nil {
+		kfCh = make(chan knowledgeOut, 1)
+		go func() {
+			files, err := r.knowledge(ctx)
+			kfCh <- knowledgeOut{files: files, err: err}
+		}()
 	}
-	sources := capSources(res.Sources, frontloadMaxSources)
-	if len(sources) == 0 {
-		return "" // the engine abstained server-side — inject nothing
+
+	var parts []string
+	if query := buildScopeQuery(in); query != "" {
+		if res, err := r.ask(ctx, query); err == nil {
+			// err != nil: a retrieval failure must not wedge the turn.
+			if sources := capSources(res.Sources, frontloadMaxSources); len(sources) > 0 {
+				// empty: the engine abstained server-side — inject nothing.
+				parts = append(parts, renderFrontload(res.Answer, sources))
+			}
+		}
 	}
-	return renderFrontload(res.Answer, sources)
+	if kfCh != nil {
+		if out := <-kfCh; out.err == nil {
+			if block := renderKnowledgeFrontload(out.files); block != "" {
+				parts = append(parts, block)
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // capSources keeps at most max sources, preserving the server's relevance order.
@@ -183,6 +214,7 @@ func runFrontload(args []string) {
 		ask: func(ctx context.Context, query string) (source.AskResult, error) {
 			return hosted.Ask(ctx, query, scopeWorkspaceIDs(workspaceID))
 		},
+		knowledge: newKnowledgeFetcher(client, apiURL, token, workspaceID).fetch,
 		canQuery: apiURL != "" && token != "" && workspaceID != "",
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), frontloadTimeout)
