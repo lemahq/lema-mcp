@@ -209,7 +209,7 @@ func (s *CaptureStore) Record(in DecisionRecord) (DecisionRecord, error) {
 }
 
 // RecordDraft persists a decision with status proposed — the hosted-fallback
-// write (cmd/lema-mcp/record_decision.go): a capture whose hosted push failed
+// write (record_decision.go in github.com/lemahq/lema-mcp): a capture whose hosted push failed
 // is preserved durably and searchably, but NON-BINDING. Its rejected
 // alternatives do not enforce never-reopen and its supersedes edges do not
 // close their targets, because no human and no server trust tier has accepted

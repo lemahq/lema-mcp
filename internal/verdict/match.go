@@ -1,5 +1,5 @@
 // Package verdict holds the shared decision-adjudication judgment used by both
-// the MCP check_decided tool (cmd/lema-mcp) and the in-app proposemode tool.
+// the MCP check_decided tool (github.com/lemahq/lema-mcp) and the in-app proposemode tool.
 // The matcher here was moved out of package main (was guard_match.go) so both
 // surfaces judge through one implementation; parity is then structural.
 //

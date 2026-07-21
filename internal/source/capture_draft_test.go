@@ -10,7 +10,7 @@ import (
 // (status proposed): durable and searchable, but non-binding — its rejected
 // alternatives must not enforce never-reopen, because no human and no server
 // trust tier has accepted it (the "a local accepted write would bind a draft
-// the team has not accepted" rationale in cmd/lema-mcp/record_decision.go).
+// the team has not accepted" rationale in record_decision.go, github.com/lemahq/lema-mcp).
 func TestCaptureRecordDraftIsProposedAndNonBinding(t *testing.T) {
 	s, err := NewCaptureStore(filepath.Join(t.TempDir(), "decisions.jsonl"))
 	if err != nil {

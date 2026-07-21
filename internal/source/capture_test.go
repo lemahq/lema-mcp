@@ -444,7 +444,7 @@ func TestCaptureRefsSurfaceOnClosedAtom(t *testing.T) {
 //     assert under it. A regression that lifts either cap fails here.
 //
 // Both sub-cases marshal through the SAME shape the production wire uses
-// (cmd/lema-mcp/serve.go's writeJSONResp: json.NewEncoder + SetEscapeHTML(false)),
+// (serve.go's writeJSONResp in github.com/lemahq/lema-mcp: json.NewEncoder + SetEscapeHTML(false)),
 // not the default json.Marshal, because they differ exactly where this test's math
 // lives: default json.Marshal HTML-escapes <, >, and & to a 6-byte \u00XX each, so
 // 200 such chars per ref would marshal to ~9.6KB and demand a ~10KB bound that does
@@ -510,7 +510,7 @@ func TestAtomMarshalSizeBounded(t *testing.T) {
 }
 
 // wireMarshal marshals v exactly as the production MCP wire does
-// (cmd/lema-mcp/serve.go's writeJSONResp): a json.Encoder with HTML escaping
+// (serve.go's writeJSONResp in github.com/lemahq/lema-mcp): a json.Encoder with HTML escaping
 // turned off. It trims the encoder's trailing newline so callers compare against
 // the response body bytes. Using this — not the default json.Marshal — means the
 // size bound and the byte-for-byte pin both guard the real serialized path.

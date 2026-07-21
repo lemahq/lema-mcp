@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 #
 # Guard against publishing stale bits: this dist's extracted Go source MUST match
-# a fresh extraction from the monorepo — the single source of truth (ADR-0033 §3).
-# Run by scripts/publish.sh before it builds/publishes. On drift the remedy depends
-# on DIRECTION: re-extract if the monorepo is ahead, but PORT BACK first if dist has
-# Go the monorepo lacks (e.g. a fix merged here via PR) — re-extract OVERWRITES dist Go.
+# a fresh extraction from the monorepo — the source of truth for the SHARED
+# INTERNAL PACKAGES (ADR-0033 §3). Run by scripts/publish.sh before it builds/
+# publishes. On drift the remedy depends on DIRECTION: re-extract if the monorepo
+# is ahead, but PORT BACK first if dist has Go the monorepo lacks (e.g. a fix
+# merged here via PR) — re-extract OVERWRITES dist Go.
+#
+# cmd/lema-mcp is NOT checked: this repo OWNS it since the pivot B2 entry gate
+# (D1 7978b83e) retired the monorepo copy — there is nothing to compare against.
 #
 #   Bypass (intentional, rare):       LEMA_SKIP_EXTRACT_CHECK=1
 #   Point at a non-default monorepo:  LEMA_MONOREPO=/path/to/lema
@@ -26,7 +30,7 @@ SRC="$MONOREPO/apps/api"
 OLD="github.com/lemahq/lema/apps/api"
 NEW="github.com/lemahq/lema-mcp"
 # The exact set the monorepo extracts (kept in lockstep with extract-lema-mcp.sh).
-DIRS="cmd/lema-mcp internal/adr internal/source internal/openspec internal/docs internal/verdict internal/decisioncheck"
+DIRS="internal/adr internal/source internal/openspec internal/docs internal/verdict internal/decisioncheck"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
