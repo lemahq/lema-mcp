@@ -668,6 +668,13 @@ func main() {
 	mcp.AddTool(server, recordDecisionTool, recordDecision)
 	mcp.AddTool(server, checkDecidedTool, checkDecided)
 
+	// Pivot B2 §4: the `resolve` verb — one cited read under a declared intent.
+	// Registered UNCONDITIONALLY (like check_decided): approach- and id-mode
+	// serve over the local record, and why-mode returns an honest hosted-only
+	// note when LEMA_API_URL is unset. Alias-then-deprecate: every mode routes
+	// to its existing handler, which stays registered below/above unchanged.
+	mcp.AddTool(server, resolveTool, resolve)
+
 	// Public demo read path (tokenless) — registered UNCONDITIONALLY, unlike the
 	// authed `ask`: no account needed, so the no-account wedge pulls cited upstream
 	// context (React/k8s/Rust/Vue/Go) in the agent loop. check_approach is the ONE public
