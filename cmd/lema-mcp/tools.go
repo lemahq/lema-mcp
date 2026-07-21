@@ -104,5 +104,5 @@ var directoryTools = []*mcp.Tool{
 	searchDecisionsTool, getDecisionTool, listDecisionsTool, getDecisionGraphTool,
 	recordDecisionTool, checkDecidedTool,
 	checkApproachTool, askTool, searchDocsTool, getDocTool,
-	getStateBriefTool,
+	getStateBriefTool, resolveTool,
 }
