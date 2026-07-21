@@ -116,10 +116,16 @@ func TestSyncRefusesFileSourcedWorkspace(t *testing.T) {
 		[]byte("LEMA_API_URL="+srv.URL+"\nLEMA_API_TOKEN=tok\nLEMA_WORKSPACE_ID=vestige-ws\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Env supplies nothing — everything would have to come from the file.
+	// Env supplies URL/token from the file but no workspace pin. The workspace
+	// is then DERIVED from the git remote — never read from the per-user file.
+	// Stub the git read to find nothing, so the file's vestige-ws is provably
+	// never the target: no pin, no derivable remote → nothing syncs.
 	t.Setenv("LEMA_API_URL", "")
 	t.Setenv("LEMA_API_TOKEN", "")
 	t.Setenv("LEMA_WORKSPACE_ID", "")
+	restoreGit := gitRemoteURL
+	t.Cleanup(func() { gitRemoteURL = restoreGit })
+	gitRemoteURL = func(string) (string, bool) { return "", false }
 
 	dir := t.TempDir()
 	writeTestCheckpoint(t, dir, "sess-v")
@@ -128,6 +134,71 @@ func TestSyncRefusesFileSourcedWorkspace(t *testing.T) {
 	})
 	if out != "" {
 		t.Fatalf("sync paths must write nothing to stdout, got %q", out)
+	}
+}
+
+// Zero-config multi-repo (decision d_d9caf0): with no LEMA_WORKSPACE_ID pin,
+// the sync derives the workspace from the run's git remote — owner/repo →
+// slug (owner-repo) → the credential's own listing → the id — and syncs there.
+func TestSyncDerivesWorkspaceFromGitRemote(t *testing.T) {
+	workspaceUUIDMu.Lock()
+	workspaceUUIDCache = map[string]string{}
+	workspaceUUIDMu.Unlock()
+
+	cap := &syncCapture{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /workspaces", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"workspaces":[{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","slug":"lemahq-lema","name":"lemahq/lema"}]}`))
+	})
+	mux.HandleFunc("POST /workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/runs", func(w http.ResponseWriter, r *http.Request) {
+		cap.runCreates++
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"run":{"id":"11111111-1111-1111-1111-111111111111"},"created":true,"rung":7}`))
+	})
+	mux.HandleFunc("POST /workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/runs/11111111-1111-1111-1111-111111111111/events", func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		cap.events = append(cap.events, req)
+		w.WriteHeader(http.StatusCreated)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Setenv("LEMA_API_URL", srv.URL)
+	t.Setenv("LEMA_API_TOKEN", "tok")
+	t.Setenv("LEMA_WORKSPACE_ID", "") // no pin — derive
+	restoreGit := gitRemoteURL
+	t.Cleanup(func() { gitRemoteURL = restoreGit })
+	gitRemoteURL = func(string) (string, bool) { return "git@github.com:lemahq/lema.git", true }
+
+	dir := t.TempDir()
+	writeTestCheckpoint(t, dir, "sess-derive")
+	syncOnBoundary(dir, "claude-code", mkEnv("sess-derive", "stop", nil))
+	if cap.runCreates != 1 || len(cap.events) != 1 {
+		t.Fatalf("derived workspace must resolve and sync: creates=%d events=%d", cap.runCreates, len(cap.events))
+	}
+}
+
+// The env pin is the override: when LEMA_WORKSPACE_ID is set, the git remote is
+// never consulted (decision d_d9caf0 — pin wins).
+func TestSyncEnvPinOverridesDerivation(t *testing.T) {
+	cap := &syncCapture{}
+	srv := newSyncTestServer(t, cap, http.StatusCreated)
+	defer srv.Close()
+	setSyncEnv(t, srv.URL) // pins LEMA_WORKSPACE_ID to the aaaa… UUID
+
+	restoreGit := gitRemoteURL
+	t.Cleanup(func() { gitRemoteURL = restoreGit })
+	gitRemoteURL = func(string) (string, bool) {
+		t.Error("git remote must not be read when LEMA_WORKSPACE_ID pins the workspace")
+		return "git@github.com:someone/else.git", true
+	}
+
+	dir := t.TempDir()
+	writeTestCheckpoint(t, dir, "sess-pin")
+	syncOnBoundary(dir, "claude-code", mkEnv("sess-pin", "stop", nil))
+	if len(cap.events) != 1 {
+		t.Fatalf("the pinned workspace must sync: events=%d", len(cap.events))
 	}
 }
 
