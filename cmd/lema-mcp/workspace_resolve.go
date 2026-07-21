@@ -84,6 +84,44 @@ func fetchWorkspaces(ctx context.Context, client *http.Client, apiURL, token str
 	return out.Workspaces, nil
 }
 
+// resolveWorkspaceValueUUID turns a configured workspace value (a UUID, or a
+// slug/id to look up) into the UUID the authed /workspaces/{id}/... path parser
+// requires. A UUID passes through untouched; anything else is matched against
+// GET /workspaces by slug or id, memoized per (apiURL, value). A value this
+// credential cannot see resolves to an error — which is also the guard that
+// stops a wrong-org token from writing anywhere (the workspace simply isn't in
+// its listing). This is the single implementation shared by the collector sync,
+// get_state_brief (both via collectorSyncer.resolveWorkspaceUUID), and the
+// record_decision / import-decisions push (pushDecisions), so any repo config —
+// slug or UUID — resolves identically. Found by the first live dogfood run
+// (2026-07-21): a slug-configured LEMA_WORKSPACE_ID 400'd "invalid workspaceID"
+// on the collector path (fixed in a9ca2c5); the push path had the same gap.
+func resolveWorkspaceValueUUID(ctx context.Context, client *http.Client, apiURL, token, v string) (string, error) {
+	if looksLikeUUID(v) {
+		return v, nil
+	}
+	key := apiURL + "|" + v
+	workspaceUUIDMu.Lock()
+	cached, ok := workspaceUUIDCache[key]
+	workspaceUUIDMu.Unlock()
+	if ok {
+		return cached, nil
+	}
+	all, err := fetchWorkspaces(ctx, client, apiURL, token)
+	if err != nil {
+		return "", err
+	}
+	for _, w := range all {
+		if strings.EqualFold(w.Slug, v) || w.ID == v {
+			workspaceUUIDMu.Lock()
+			workspaceUUIDCache[key] = w.ID
+			workspaceUUIDMu.Unlock()
+			return w.ID, nil
+		}
+	}
+	return "", fmt.Errorf("workspace %q is not visible to this credential", v)
+}
+
 // workspaceIDHint is the one sentence every resolution error carries: where a
 // workspace id can be configured. Shared so the guidance cannot drift apart
 // across the error paths.

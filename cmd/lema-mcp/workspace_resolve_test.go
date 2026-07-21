@@ -132,8 +132,11 @@ func TestRecordAutoResolveNoWorkspaces(t *testing.T) {
 // a SUCCESSFUL resolution is memoized, so steady state costs one extra GET
 // total, not one per capture.
 func TestRecordAutoResolveRetriesAfterFetchFailureThenMemoizes(t *testing.T) {
+	// The id is a real UUID (as the server always returns) so the downstream
+	// pushDecisions slug→UUID resolve short-circuits and adds no GET — the two
+	// hits counted below are the auto-resolver's own failed+memoized attempts.
 	f := &fakeWorkspacesAPI{t: t, workspaces: []map[string]any{
-		{"id": "ws-live", "slug": "lemahq-lema", "name": "lemahq/lema"},
+		{"id": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", "slug": "lemahq-lema", "name": "lemahq/lema"},
 	}}
 	f.listStatus = http.StatusInternalServerError
 	ts := f.server()
