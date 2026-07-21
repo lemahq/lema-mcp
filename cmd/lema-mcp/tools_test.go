@@ -41,6 +41,7 @@ func TestToolsMeetDirectoryCriteria(t *testing.T) {
 	mcp.AddTool(server, getDocTool, getDoc)
 	mcp.AddTool(server, getStateBriefTool, getStateBrief)
 	mcp.AddTool(server, resolveTool, resolve)
+	mcp.AddTool(server, proposeTool, propose)
 
 	clientT, serverT := mcp.NewInMemoryTransports()
 	ss, err := server.Connect(ctx, serverT, nil)
@@ -63,8 +64,9 @@ func TestToolsMeetDirectoryCriteria(t *testing.T) {
 		t.Fatalf("tools/list returned %d tools, want %d (a new tool must be added to directoryTools and meet the criteria)", len(res.Tools), len(directoryTools))
 	}
 
-	// record_decision is the only writer; every other tool is read-only.
-	writers := map[string]bool{"record_decision": true}
+	// record_decision and its end-state verb propose are the writers; every
+	// other tool is read-only.
+	writers := map[string]bool{"record_decision": true, "propose": true}
 	// Phrases that instruct Claude how to behave — rejected at Directory review as
 	// prompt injection. Sibling disambiguation ("use get_decision") is allowed and
 	// deliberately NOT listed here.

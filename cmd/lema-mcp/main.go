@@ -675,6 +675,12 @@ func main() {
 	// to its existing handler, which stays registered below/above unchanged.
 	mcp.AddTool(server, resolveTool, resolve)
 
+	// Pivot B2 §4: the `propose` verb — the write verb, folding record_decision
+	// (which stays registered above as its deprecation-noted alias). Registered
+	// UNCONDITIONALLY like the alias: the recorder wired in this function serves
+	// both tiers (solo local append / hosted server-adjudicated push).
+	mcp.AddTool(server, proposeTool, propose)
+
 	// Public demo read path (tokenless) — registered UNCONDITIONALLY, unlike the
 	// authed `ask`: no account needed, so the no-account wedge pulls cited upstream
 	// context (React/k8s/Rust/Vue/Go) in the agent loop. check_approach is the ONE public
