@@ -279,14 +279,26 @@ func runGuard(args []string) {
 	}
 
 	capturePath := ".lema/decisions.jsonl"
-	for i := 0; i+1 < len(args); i++ {
-		if args[i] == "--capture-file" {
+	refreshCache := false
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--capture-file" && i+1 < len(args):
 			capturePath = args[i+1]
+		case args[i] == "--refresh-cache":
+			refreshCache = true
 		}
 	}
 	// In a linked git worktree the hook must enforce the repo's ONE store (the
 	// main checkout's), not a frozen worktree copy (capture_path.go).
 	capturePath = resolveCaptureFile(capturePath)
+
+	// Refresh mode (F8, guard_cache.go): a SessionStart hook line fetches the
+	// hosted closed set into the local cache and exits — the network stays off
+	// the per-edit path entirely.
+	if refreshCache {
+		runGuardRefresh(capturePath)
+		os.Exit(0)
+	}
 
 	type readResult struct {
 		data []byte
@@ -341,10 +353,13 @@ func runGuard(args []string) {
 	if err != nil {
 		return
 	}
-	// Enforce off BOTH the forward-capture store and the repo's documented ADRs
-	// (ADR-0053): a new engineer's agent should be stopped by a decision the team
-	// recorded in an ADR even if it was never captured live.
+	// Enforce off the forward-capture store, the repo's documented ADRs
+	// (ADR-0053), AND the hosted closed-set cache (F8, guard_cache.go): a new
+	// engineer's agent should be stopped by a decision the team recorded in an
+	// ADR even if it was never captured live, and by a ruling recorded hosted
+	// even if this machine never saw it land.
 	closed := append(store.ClosedAtoms(), loadADRClosed(".")...)
+	closed = append(closed, loadGuardCacheAtoms(capturePath)...)
 	out, atom := evaluateGuard(closed, query, mode)
 	if out == nil {
 		return // allow silently
