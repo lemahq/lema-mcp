@@ -39,22 +39,24 @@ type collectorSyncer struct {
 }
 
 // newCollectorSyncer resolves hosted config. URL/token follow the usual
-// env-first-then-file precedence (identity is per-user), but the TARGET
-// WORKSPACE must come from process env — the project-scoped .mcp.json
-// channel — never the per-user credentials file: an ambient hook firing in
-// every project would otherwise silently write every project's run state
-// into whatever workspace the global file names (the exact wrong-corpus
-// foot-gun settle warns about interactively; a hook cannot ask, so it
-// refuses instead). nil = not configured — the caller skips silently.
+// env-first-then-file precedence (identity is per-user). The TARGET WORKSPACE
+// comes from process env — the project-scoped .mcp.json channel — never the
+// per-user credentials file: an ambient hook firing in every project would
+// otherwise silently write every project's run state into whatever workspace
+// the global file names (the exact wrong-corpus foot-gun settle warns about
+// interactively; a hook cannot ask, so it refuses instead). When the env pin
+// is unset the workspace is DERIVED from the run's git remote at sync time
+// (decision d_d9caf0) — so an empty workspaceID is NOT a bail-out here, only a
+// missing URL/token is. nil = not configured — the caller skips silently.
 func newCollectorSyncer() *collectorSyncer {
 	apiURL, token, _ := resolveHostedConfig()
-	workspaceID := strings.TrimSpace(os.Getenv(workspaceIDEnv))
-	if apiURL == "" || token == "" || workspaceID == "" {
+	if apiURL == "" || token == "" {
 		return nil
 	}
 	return &collectorSyncer{
-		apiURL: apiURL, token: token, workspaceID: workspaceID,
-		client: &http.Client{Timeout: collectorSyncTimeout},
+		apiURL: apiURL, token: token,
+		workspaceID: strings.TrimSpace(os.Getenv(workspaceIDEnv)), // "" → derived from cwd at sync time
+		client:      &http.Client{Timeout: collectorSyncTimeout},
 	}
 }
 
@@ -96,6 +98,27 @@ func (s *collectorSyncer) resolveWorkspaceUUID(ctx context.Context) (string, err
 	return resolveWorkspaceValueUUID(ctx, s.client, s.apiURL, s.token, s.workspaceID)
 }
 
+// resolveTargetUUID picks the sync's target workspace and resolves it to the
+// UUID the API's path parser requires. The env pin (LEMA_WORKSPACE_ID, via
+// .mcp.json) is the override and wins whenever set; otherwise the workspace is
+// DERIVED from the run's git remote — the owner/repo in cwd forms the
+// repo-anchored slug (decision d_d9caf0), verified by resolveWorkspaceValueUUID
+// against the credential's listing. No pin and no derivable remote is an error
+// the caller ignores (fail-open) — the env pin stays the escape hatch, and a
+// derived slug this credential cannot see resolves to nothing rather than a
+// wrong-corpus write.
+func (s *collectorSyncer) resolveTargetUUID(ctx context.Context, cwd string) (string, error) {
+	v := strings.TrimSpace(s.workspaceID)
+	if v == "" {
+		slug, ok := deriveWorkspaceSlug(cwd)
+		if !ok {
+			return "", fmt.Errorf("no %s set and no git remote in %q to derive a workspace from", workspaceIDEnv, cwd)
+		}
+		v = slug
+	}
+	return resolveWorkspaceValueUUID(ctx, s.client, s.apiURL, s.token, v)
+}
+
 func (s *collectorSyncer) post(ctx context.Context, path string, body any) (int, []byte, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
@@ -119,9 +142,12 @@ func (s *collectorSyncer) post(ctx context.Context, path string, body any) (int,
 
 // ensureRun creates (or re-finds — CreateRun is idempotent on
 // harness+external_run_id) the hosted run identity and returns its id.
-// v1 sends no repo (the adapter has no owner/name source yet), so the
-// server-side association ladder honestly lands these runs at rung 7 —
-// rungs 3/4 fire only once the adapter supplies repo (named follow-up).
+// This still sends no repo, so the server-side association ladder honestly
+// lands these runs at rung 7. The owner/name source now EXISTS (the same
+// deriveWorkspaceSlug/parseOwnerRepo read this file uses for workspace
+// derivation), so rungs 3/4 are one step away — feeding owner/repo to
+// run-create is the composing repo-on-run-create item (d_d9caf0), kept
+// separate because it changes association behavior on its own.
 func (s *collectorSyncer) ensureRun(ctx context.Context, harness, externalRunID, worktree string) (string, error) {
 	status, body, err := s.post(ctx, "/runs", map[string]string{
 		"harness":         harness,
@@ -149,7 +175,7 @@ func (s *collectorSyncer) ensureRun(ctx context.Context, harness, externalRunID,
 // Every failure path returns an error the caller ignores (fail-open); the
 // server's in-tx subsumption makes repeated syncs safe.
 func (s *collectorSyncer) syncCheckpoint(ctx context.Context, harness string, cp collectorCheckpoint) error {
-	uuid, err := s.resolveWorkspaceUUID(ctx)
+	uuid, err := s.resolveTargetUUID(ctx, cp.CWD)
 	if err != nil {
 		return err
 	}
