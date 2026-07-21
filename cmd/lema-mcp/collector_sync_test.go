@@ -17,6 +17,7 @@ import (
 
 type syncCapture struct {
 	runCreates int
+	runCreate  map[string]string // the last run-create body (harness/external_run_id/repo/branch/worktree)
 	events     []map[string]any
 }
 
@@ -32,6 +33,7 @@ func newSyncTestServer(t *testing.T, cap *syncCapture, eventStatus int) *httptes
 		if req["harness"] != "claude-code" || req["external_run_id"] == "" {
 			t.Errorf("run create body = %#v", req)
 		}
+		cap.runCreate = req
 		// First create → 201; adapter retry → 200 with the same identity
 		// (the server contract createRun documents).
 		status := http.StatusCreated
@@ -97,6 +99,37 @@ func TestSyncCheckpointPostsRunThenEvent(t *testing.T) {
 	payload, _ := ev["payload"].(map[string]any)
 	if payload["summary"] == "" || payload["cwd"] != "/repo/proj" {
 		t.Fatalf("payload = %#v", payload)
+	}
+}
+
+// TestSyncSendsRepoAndBranchOnRunCreate pins repo-on-run-create (decision
+// 5025ffb7): run-create now carries repo (lowercased owner/name) + branch +
+// worktree(=cwd), so the server ladder can reach rungs 3/4 instead of always
+// landing rung 7.
+func TestSyncSendsRepoAndBranchOnRunCreate(t *testing.T) {
+	restoreRemote, restoreBranch := gitRemoteURL, gitCurrentBranch
+	t.Cleanup(func() { gitRemoteURL, gitCurrentBranch = restoreRemote, restoreBranch })
+	gitRemoteURL = func(string) (string, bool) { return "git@github.com:LemaHQ/Lema.git", true }
+	gitCurrentBranch = func(string) (string, bool) { return "feat/x", true }
+
+	cap := &syncCapture{}
+	srv := newSyncTestServer(t, cap, http.StatusCreated)
+	defer srv.Close()
+	setSyncEnv(t, srv.URL)
+
+	dir := t.TempDir()
+	writeTestCheckpoint(t, dir, "sess-repo") // checkpoint cwd = "/repo/proj"
+	syncOnBoundary(dir, "claude-code", mkEnv("sess-repo", "stop", nil))
+
+	rc := cap.runCreate
+	if rc["repo"] != "lemahq/lema" {
+		t.Errorf("repo = %q, want lowercased owner/name 'lemahq/lema' (rung 3 needs it)", rc["repo"])
+	}
+	if rc["branch"] != "feat/x" {
+		t.Errorf("branch = %q, want feat/x (rung 3)", rc["branch"])
+	}
+	if rc["worktree"] != "/repo/proj" {
+		t.Errorf("worktree = %q, want the run cwd (rung 4)", rc["worktree"])
 	}
 }
 
@@ -179,26 +212,37 @@ func TestSyncDerivesWorkspaceFromGitRemote(t *testing.T) {
 	}
 }
 
-// The env pin is the override: when LEMA_WORKSPACE_ID is set, the git remote is
-// never consulted (decision d_d9caf0 — pin wins).
+// The env pin overrides WORKSPACE derivation: when LEMA_WORKSPACE_ID is set the
+// workspace resolves from the pin, not the git remote (decision d_d9caf0). The
+// run's repo/branch are a SEPARATE concern (repo-on-run-create, 5025ffb7) — they
+// are still derived from git even under the pin, because the pin targets the
+// corpus, not which repo the run is on (the lema dogfood pins the workspace, and
+// its runs must still associate).
 func TestSyncEnvPinOverridesDerivation(t *testing.T) {
 	cap := &syncCapture{}
 	srv := newSyncTestServer(t, cap, http.StatusCreated)
 	defer srv.Close()
 	setSyncEnv(t, srv.URL) // pins LEMA_WORKSPACE_ID to the aaaa… UUID
 
-	restoreGit := gitRemoteURL
-	t.Cleanup(func() { gitRemoteURL = restoreGit })
-	gitRemoteURL = func(string) (string, bool) {
-		t.Error("git remote must not be read when LEMA_WORKSPACE_ID pins the workspace")
-		return "git@github.com:someone/else.git", true
-	}
+	restoreRemote, restoreBranch := gitRemoteURL, gitCurrentBranch
+	t.Cleanup(func() { gitRemoteURL, gitCurrentBranch = restoreRemote, restoreBranch })
+	gitRemoteURL = func(string) (string, bool) { return "git@github.com:someone/else.git", true }
+	gitCurrentBranch = func(string) (string, bool) { return "topic", true }
 
 	dir := t.TempDir()
 	writeTestCheckpoint(t, dir, "sess-pin")
 	syncOnBoundary(dir, "claude-code", mkEnv("sess-pin", "stop", nil))
+
+	// The pin won for the WORKSPACE: the sync hit the pinned aaaa… path (the only
+	// handler registered), so the checkpoint landed rather than 404ing on a
+	// derived-slug path.
 	if len(cap.events) != 1 {
 		t.Fatalf("the pinned workspace must sync: events=%d", len(cap.events))
+	}
+	// ...but the run's repo/branch still come from git — orthogonal to the pin.
+	if cap.runCreate["repo"] != "someone/else" || cap.runCreate["branch"] != "topic" {
+		t.Fatalf("repo-on-run-create must derive repo/branch even under the workspace pin, got repo=%q branch=%q",
+			cap.runCreate["repo"], cap.runCreate["branch"])
 	}
 }
 

@@ -53,3 +53,29 @@ func TestDeriveWorkspaceSlug(t *testing.T) {
 		t.Fatalf("no remote must not derive, got (%q,%v)", slug, ok)
 	}
 }
+
+func TestDeriveRunGitContext(t *testing.T) {
+	restoreRemote, restoreBranch := gitRemoteURL, gitCurrentBranch
+	t.Cleanup(func() { gitRemoteURL, gitCurrentBranch = restoreRemote, restoreBranch })
+
+	// Full context: repo is lowercased owner/name (matches work_units.repo's
+	// lowercase-at-write), branch verbatim.
+	gitRemoteURL = func(string) (string, bool) { return "git@github.com:LemaHQ/Lema.git", true }
+	gitCurrentBranch = func(string) (string, bool) { return "feat/x", true }
+	if repo, branch := deriveRunGitContext("/anywhere"); repo != "lemahq/lema" || branch != "feat/x" {
+		t.Fatalf("derive = (%q,%q), want (lemahq/lema, feat/x)", repo, branch)
+	}
+
+	// Each field is independent + fail-open: no remote → empty repo but branch
+	// still resolves; detached HEAD → empty branch but repo still resolves.
+	gitRemoteURL = func(string) (string, bool) { return "", false }
+	gitCurrentBranch = func(string) (string, bool) { return "main", true }
+	if repo, branch := deriveRunGitContext("/anywhere"); repo != "" || branch != "main" {
+		t.Fatalf("no remote = (%q,%q), want (\"\", main)", repo, branch)
+	}
+	gitRemoteURL = func(string) (string, bool) { return "https://github.com/o/r.git", true }
+	gitCurrentBranch = func(string) (string, bool) { return "", false }
+	if repo, branch := deriveRunGitContext("/anywhere"); repo != "o/r" || branch != "" {
+		t.Fatalf("detached = (%q,%q), want (o/r, \"\")", repo, branch)
+	}
+}
