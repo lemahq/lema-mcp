@@ -378,7 +378,9 @@ func TestPushDecisions_RequestShapeAndAuth(t *testing.T) {
 	defer srv.Close()
 
 	recs := []pushRecord{{ID: "d_x", Title: "Redis", Chosen: "Redis", Status: "proposed", Refs: []string{"cache.go"}}}
-	resp, err := pushDecisions(context.Background(), srv.Client(), srv.URL, "lema_live_abc", "ws_123", recs)
+	// A UUID workspace short-circuits resolution (no GET /workspaces round-trip),
+	// so this single-handler server exercises the import POST directly.
+	resp, err := pushDecisions(context.Background(), srv.Client(), srv.URL, "lema_live_abc", "11111111-1111-1111-1111-111111111111", recs)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -386,7 +388,7 @@ func TestPushDecisions_RequestShapeAndAuth(t *testing.T) {
 	if gotMethod != http.MethodPost {
 		t.Errorf("method = %s, want POST", gotMethod)
 	}
-	if gotPath != "/workspaces/ws_123/import-decisions" {
+	if gotPath != "/workspaces/11111111-1111-1111-1111-111111111111/import-decisions" {
 		t.Errorf("path = %s", gotPath)
 	}
 	if gotAuth != "Bearer lema_live_abc" {
@@ -406,6 +408,50 @@ func TestPushDecisions_RequestShapeAndAuth(t *testing.T) {
 	}
 }
 
+// The dogfood-found bug (2026-07-21): record_decision / the import-decisions push
+// hit /workspaces/{id}/import-decisions with the RAW configured LEMA_WORKSPACE_ID,
+// but the authed route parses {id} as a UUID — a slug (lemahq-lema) 400'd and the
+// capture fell back to a silent local draft (surfaces in search, never binds, not
+// in the team corpus). pushDecisions must resolve slug→id via the credential's own
+// GET /workspaces listing before building the URL — the same fix the collector sync
+// got in a9ca2c5.
+func TestPushDecisions_ResolvesSlugWorkspace(t *testing.T) {
+	workspaceUUIDMu.Lock()
+	workspaceUUIDCache = map[string]string{}
+	workspaceUUIDMu.Unlock()
+
+	const wsUUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	var gotImportPath string
+	var listed int
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /workspaces", func(w http.ResponseWriter, r *http.Request) {
+		listed++
+		_, _ = w.Write([]byte(`{"workspaces":[{"id":"` + wsUUID + `","slug":"lemahq-lema","name":"lemahq/lema"}]}`))
+	})
+	mux.HandleFunc("POST /workspaces/"+wsUUID+"/import-decisions", func(w http.ResponseWriter, r *http.Request) {
+		gotImportPath = r.URL.Path
+		_ = json.NewEncoder(w).Encode(pushResponse{Created: 1, RecordedBy: "agent",
+			Results: []pushResult{{LocalID: "d_x", Status: "created"}}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	recs := []pushRecord{{ID: "d_x", Title: "Redis", Chosen: "Redis", Status: "proposed"}}
+	resp, err := pushDecisions(context.Background(), srv.Client(), srv.URL, "lema_live_abc", "lemahq-lema", recs)
+	if err != nil {
+		t.Fatalf("slug must resolve and push, got err: %v", err)
+	}
+	if gotImportPath != "/workspaces/"+wsUUID+"/import-decisions" {
+		t.Fatalf("import must hit the resolved UUID path, got %q", gotImportPath)
+	}
+	if resp.Created != 1 {
+		t.Fatalf("created = %d, want 1", resp.Created)
+	}
+	if listed != 1 {
+		t.Fatalf("workspace listing should be fetched exactly once (memoized), got %d", listed)
+	}
+}
+
 // A non-2xx from the server is an error, never a silent success — the hook decides
 // to swallow it (fail-open), but the client must surface it.
 func TestPushDecisions_Non2xxIsError(t *testing.T) {
@@ -414,7 +460,7 @@ func TestPushDecisions_Non2xxIsError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := pushDecisions(context.Background(), srv.Client(), srv.URL, "t", "ws", []pushRecord{{ID: "d", Status: "proposed"}})
+	_, err := pushDecisions(context.Background(), srv.Client(), srv.URL, "t", "22222222-2222-2222-2222-222222222222", []pushRecord{{ID: "d", Status: "proposed"}})
 	if err == nil {
 		t.Fatal("want an error on HTTP 400, got nil")
 	}

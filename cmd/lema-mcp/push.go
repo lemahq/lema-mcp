@@ -706,6 +706,17 @@ func pushDecisions(ctx context.Context, client *http.Client, apiURL, token, work
 	if len(records) == 0 {
 		return pushResponse{}, nil
 	}
+	// Resolve a slug-configured workspace to the UUID the authed
+	// /workspaces/{id}/import-decisions path parser requires. Without this a slug
+	// (e.g. lemahq-lema, the canonical .mcp.json value) 400s "invalid workspaceID"
+	// and record_decision falls back to a silent local draft — surfaces in search,
+	// never binds, not in the team corpus. Shared with the collector sync path
+	// (a9ca2c5); a value already in UUID form passes through with no extra call.
+	uuid, err := resolveWorkspaceValueUUID(ctx, client, apiURL, token, workspaceID)
+	if err != nil {
+		return pushResponse{}, err
+	}
+	workspaceID = uuid
 	body, err := json.Marshal(pushRequest{
 		SchemaVersion: pushSchemaVersion,
 		ActorName:     pushActorName,

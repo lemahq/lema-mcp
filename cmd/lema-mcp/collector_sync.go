@@ -89,36 +89,11 @@ var (
 )
 
 // resolveWorkspaceUUID turns the configured workspace value into the UUID the
-// API's path parser requires. A UUID passes through untouched; anything else
-// is matched against GET /workspaces by slug or id. A value this credential
-// cannot see resolves to an error — which is also the guard that stops a
-// wrong-org token from syncing anywhere (the workspace simply isn't in its
-// listing).
+// API's path parser requires. Thin receiver-bound wrapper over
+// resolveWorkspaceValueUUID — the shared implementation the push path also uses
+// (workspace_resolve.go), so slug resolution can never drift apart across paths.
 func (s *collectorSyncer) resolveWorkspaceUUID(ctx context.Context) (string, error) {
-	v := s.workspaceID
-	if looksLikeUUID(v) {
-		return v, nil
-	}
-	key := s.apiURL + "|" + v
-	workspaceUUIDMu.Lock()
-	cached, ok := workspaceUUIDCache[key]
-	workspaceUUIDMu.Unlock()
-	if ok {
-		return cached, nil
-	}
-	all, err := fetchWorkspaces(ctx, s.client, s.apiURL, s.token)
-	if err != nil {
-		return "", err
-	}
-	for _, w := range all {
-		if strings.EqualFold(w.Slug, v) || w.ID == v {
-			workspaceUUIDMu.Lock()
-			workspaceUUIDCache[key] = w.ID
-			workspaceUUIDMu.Unlock()
-			return w.ID, nil
-		}
-	}
-	return "", fmt.Errorf("workspace %q is not visible to this credential", v)
+	return resolveWorkspaceValueUUID(ctx, s.client, s.apiURL, s.token, s.workspaceID)
 }
 
 func (s *collectorSyncer) post(ctx context.Context, path string, body any) (int, []byte, error) {
