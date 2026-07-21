@@ -5,7 +5,8 @@
 // from the ADAPTER (e.g. Claude Code's session_id) — never LEMA_RUN_TAB_ID,
 // which belongs to the paused run-event/lema-terminal mechanism. No env gate:
 // collecting is default behavior. Fail-open everywhere; always exit 0 — a hook
-// must never block the harness.
+// must never block the harness. The only stdout is the F4 SessionStart
+// checkpoint injection (collector_checkpoint.go); every other path is silent.
 //
 // Hosted sync (envelopes → the runs/run_events API when credentials exist) is
 // a named follow-up riding the same envelope; v1 spools locally only.
@@ -258,5 +259,13 @@ func runCollect(args []string) {
 	// about to write (a dormant run's expired spool is pruned here, then the
 	// new envelope starts a fresh file).
 	pruneExpiredRuns(dir, time.Now())
-	_ = appendEnvelope(dir, ev)
+	// F4: a run boundary distills the pre-boundary spool into the project
+	// checkpoint (the lifecycle marker itself is not "activity" — same order
+	// run_event.go uses); a session start injects the prior checkpoint (the
+	// collector's only stdout, and only here).
+	checkpointOnBoundary(dir, ev)
+	if err := appendEnvelope(dir, ev); err != nil {
+		return
+	}
+	injectOnStart(dir, ev)
 }
