@@ -371,6 +371,13 @@ func main() {
 			// LEMA_RUN_LEDGER=1 (set per-PTY by lema-terminal); fail-open; always exit 0.
 			runRunEvent(os.Args[2:])
 			return
+		case "collect":
+			// F3 open collector (pivot B2): `collect <harness> <hook-event>` normalizes
+			// one harness event through its adapter into the run-identity envelope and
+			// appends it to the per-run expiring spool. Run identity comes from the
+			// adapter (never LEMA_RUN_TAB_ID); no env gate; fail-open; always exit 0.
+			runCollect(os.Args[2:])
+			return
 		case "plan-guard":
 			// Strata Phase-0 spike (ADR-0090): match a `terraform show -json` plan
 			// against the closed-decision store and emit an advisory review.
