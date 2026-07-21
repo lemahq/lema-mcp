@@ -76,11 +76,25 @@ analytics over a graph you own.
 
 ## Install
 
-**One click — installs the no-account public demo** (React's recorded decisions, zero setup):
+**No-account public demo** (React's recorded decisions, zero setup):
 
 [![Add lema to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=lema&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsImxlbWEtbWNwQGxhdGVzdCJdLCJlbnYiOnsiTEVNQV9NQ1BfTU9ERSI6InB1YmxpYyIsIkxFTUFfUFVCTElDX1JFUE8iOiJyZWFjdC1yZmNzIn19) &nbsp; [![Install lema in VS Code](https://img.shields.io/badge/VS_Code-Install_lema-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect?url=vscode%3Amcp%2Finstall%3F%257B%2522name%2522%253A%2522lema%2522%252C%2522command%2522%253A%2522npx%2522%252C%2522args%2522%253A%255B%2522-y%2522%252C%2522lema-mcp%2540latest%2522%255D%252C%2522env%2522%253A%257B%2522LEMA_MCP_MODE%2522%253A%2522public%2522%252C%2522LEMA_PUBLIC_REPO%2522%253A%2522react-rfcs%2522%257D%257D)
 
-The button drops you straight into React's public record — ask *"why did React rule out X?"* and get a cited answer, no account. To wire **your own repo** for capture, or point the demo at Kubernetes or Rust, use the per-client setup below.
+If the Cursor button doesn't open an install prompt (common when the browser can't hand off the `cursor://` deeplink), paste this into `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global):
+
+```json
+{
+  "mcpServers": {
+    "lema": {
+      "command": "npx",
+      "args": ["-y", "lema-mcp@latest"],
+      "env": { "LEMA_MCP_MODE": "public", "LEMA_PUBLIC_REPO": "react-rfcs" }
+    }
+  }
+}
+```
+
+That drops you into React's public record — ask *"why did React rule out X?"* and get a cited answer, no account. To wire **your own repo** for capture, or point the demo at Kubernetes or Rust, use the per-client setup below.
 
 `npx` needs only Node — no Go toolchain, no account. Two commands cover both ways
 to use lema:
