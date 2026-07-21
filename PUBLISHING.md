@@ -77,6 +77,8 @@ It is **off until you opt in** (mirrors the npm-publish gate):
   root `README.md` + `LICENSE` into `npm/lema-mcp/` so the npm page renders them
   (npm only reads a README that sits in the published package dir). Both copies are
   gitignored — edit the **root** `README.md`, never `npm/lema-mcp/README.md`.
-- The Go source under `cmd/` + `internal/` is mechanically synced from the
-  monorepo by `scripts/extract-lema-mcp.sh`; do not hand-edit it here. The npm
-  packaging and README are dist-native and ARE maintained here.
+- The Go source under `internal/` is mechanically synced from the monorepo by
+  `scripts/extract-lema-mcp.sh`; do not hand-edit it here. `cmd/lema-mcp` is
+  OWNED by this repo since the pivot B2 entry gate (D1 7978b83e) retired the
+  monorepo copy — edit it here directly. The npm packaging and README are also
+  dist-native and maintained here.
