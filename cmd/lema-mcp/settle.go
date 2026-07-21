@@ -1,15 +1,19 @@
 package main
 
 // lema settle v1 (pivot B1 — F15 as amended by adjudication A2 77c99992 and
-// packaging ruling D7 a4c9d177): terminal-initiated adjudication. The
-// subcommand DRAFTS the ruling — accept / reject / supersede — through the
-// existing hosted write door (POST /decisions/{id}/events) and prints the
-// deep link where the operator's browser click BINDS it. A programmatic
-// token can never bind (ADR-0125: eventProvenance stamps every API-key
-// principal actor_kind='agent'; the 0039 binding predicate is untouched), so
-// the split is structural, not stylistic: the terminal moves the ruling to
-// where the work is; the interactive in-app "Confirm ruling" click stays the
-// only binding act. No new server surface, zero predicate change.
+// packaging ruling D7 a4c9d177): terminal-initiated adjudication through the
+// existing hosted write door (POST /decisions/{id}/events). No new server
+// surface, zero predicate change — which means the three verbs inherit the
+// server's EXISTING semantics, and those differ:
+//
+//   - accept DRAFTS: a programmatic accepted event lands actor_kind='agent'
+//     (ADR-0125 eventProvenance) and can never bind — the printed deep
+//     link's in-app "Confirm ruling" click is the only binding act.
+//   - reject and supersede TAKE EFFECT IMMEDIATELY: the server flips
+//     current_status in the same request, and no browser confirm step
+//     exists for those statuses. The command says so — it must never
+//     describe them as drafts. (Whether they should require a confirm gate
+//     is the attestation-bar question A2 deferred to B3 planning.)
 //
 // Invoked as `lema settle ...` via the npm bin alias (the launcher forwards
 // argv to this same binary) or `lema-mcp settle ...` directly.
@@ -32,12 +36,16 @@ const settleUsage = `usage:
   lema settle reject <decision-id> --reason <text> [--category withdrawn|declined]
   lema settle supersede <decision-id> --by <decision-id> [--reason <text>]
 
-<decision-id> is a full UUID, or a unique id prefix (6+ hex chars, "d_"
-prefix accepted) resolved against the workspace's most recent decisions.
+<decision-id> is a full UUID, or a unique UUID prefix (6+ hex chars, as ids
+appear in HANDOFF notes or the decision URL) resolved against the
+workspace's most recent decisions. "d_xxxxxx" locators are content hashes,
+not UUIDs — they cannot be resolved here; use the UUID from the decision
+page or search_decisions.
 
-Every verb records a DRAFT adjudication — a programmatic credential never
-binds. The printed deep link opens the decision in the browser, where
-"Confirm ruling" is the binding click.`
+accept records a DRAFT — a programmatic credential never binds; the printed
+deep link opens the decision in the browser, where "Confirm ruling" is the
+binding click. reject and supersede take effect immediately on the server
+(no browser confirm step exists for them).`
 
 // settleWebURLEnv overrides the web-app base used for bind deep links.
 const settleWebURLEnv = "LEMA_WEB_URL"
@@ -174,13 +182,18 @@ func (c *settleClient) appendEvent(decisionID, eventType string, payload map[str
 var uuidRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 var hexPrefixRe = regexp.MustCompile(`^[0-9a-f]{6,}$`)
 
-// resolveDecisionID turns operator input — a full UUID, or a 6+ hex-char id
-// prefix as it appears in HANDOFF notes ("77c99992") or search locators
-// ("d_b517ed", "lema:d_b517ed") — into one decision id, or fails honestly.
+// resolveDecisionID turns operator input — a full UUID, or a 6+ hex-char
+// UUID prefix as ids appear in HANDOFF notes ("77c99992") — into one
+// decision id, or fails honestly. "d_xxxxxx" locators are REFUSED with an
+// explanation: that form is a content hash (fnv32a over title+chosen,
+// internal/source decisionID), not a UUID prefix — matching it against
+// UUIDs would silently resolve to nothing or, worse, the wrong decision.
 func (c *settleClient) resolveDecisionID(raw string) (settleDecision, error) {
 	in := strings.ToLower(strings.TrimSpace(raw))
 	in = strings.TrimPrefix(in, "lema:")
-	in = strings.TrimPrefix(in, "d_")
+	if strings.HasPrefix(in, "d_") {
+		return settleDecision{}, fmt.Errorf("%q is a d_ locator — a content hash, not a UUID: open the decision page (or search_decisions) and pass the UUID from its URL", raw)
+	}
 	if uuidRe.MatchString(in) {
 		return c.getDecision(in)
 	}
@@ -238,16 +251,30 @@ func settleWebURL() string {
 	return defaultSettleWebURL
 }
 
-// printSettleResult is the one honest output shape: what was drafted, what
-// it did NOT do (bind), and the single next action.
-func printSettleResult(w io.Writer, verb string, d settleDecision, extra string) {
-	fmt.Fprintf(w, "✓ %s drafted — %s\n", verb, d.Title)
+// printDraftResult is accept's honest output: what was drafted, what it did
+// NOT do (bind), and the single next action.
+func printDraftResult(w io.Writer, d settleDecision, extra string) {
+	fmt.Fprintf(w, "✓ accept drafted — %s\n", d.Title)
 	fmt.Fprintf(w, "  id: %s\n", d.ID)
 	if extra != "" {
 		fmt.Fprintf(w, "  %s\n", extra)
 	}
 	fmt.Fprintf(w, "  This is a DRAFT adjudication: a terminal credential never binds.\n")
 	fmt.Fprintf(w, "  Bind it in the browser — open and click \"Confirm ruling\":\n")
+	fmt.Fprintf(w, "    %s/decisions/%s\n", settleWebURL(), d.ID)
+}
+
+// printAppliedResult is reject/supersede's honest output: the server has
+// already flipped the status — there is no draft and no confirm step to
+// promise. The link is for review, not for binding.
+func printAppliedResult(w io.Writer, verb string, d settleDecision, extra string) {
+	fmt.Fprintf(w, "✓ %s APPLIED — %s\n", verb, d.Title)
+	fmt.Fprintf(w, "  id: %s\n", d.ID)
+	if extra != "" {
+		fmt.Fprintf(w, "  %s\n", extra)
+	}
+	fmt.Fprintf(w, "  This took effect immediately on the server (no browser confirm step\n")
+	fmt.Fprintf(w, "  exists for %s). Review it here:\n", verb)
 	fmt.Fprintf(w, "    %s/decisions/%s\n", settleWebURL(), d.ID)
 }
 
@@ -292,7 +319,7 @@ func runSettle(args []string) error {
 				failed = append(failed, raw)
 				continue
 			}
-			printSettleResult(os.Stdout, "accept", d, statusNote(d))
+			printDraftResult(os.Stdout, d, statusNote(d))
 		}
 		if len(failed) > 0 {
 			return fmt.Errorf("%d of %d accepts failed: %s", len(failed), len(ids), strings.Join(failed, ", "))
@@ -324,7 +351,7 @@ func runSettle(args []string) error {
 		}); err != nil {
 			return err
 		}
-		printSettleResult(os.Stdout, "reject", d, "")
+		printAppliedResult(os.Stdout, "reject", d, "")
 		return nil
 
 	case "supersede":
@@ -353,7 +380,7 @@ func runSettle(args []string) error {
 		}); err != nil {
 			return err
 		}
-		printSettleResult(os.Stdout, "supersede", d,
+		printAppliedResult(os.Stdout, "supersede", d,
 			fmt.Sprintf("superseded by: %s (%s)", successor.ID, successor.Title))
 		return nil
 
