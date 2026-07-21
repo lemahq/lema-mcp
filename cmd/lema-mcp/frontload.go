@@ -215,7 +215,7 @@ func runFrontload(args []string) {
 			return hosted.Ask(ctx, query, scopeWorkspaceIDs(workspaceID))
 		},
 		knowledge: newKnowledgeFetcher(client, apiURL, token, workspaceID).fetch,
-		canQuery: apiURL != "" && token != "" && workspaceID != "",
+		canQuery:  apiURL != "" && token != "" && workspaceID != "",
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), frontloadTimeout)
 	defer cancel()
