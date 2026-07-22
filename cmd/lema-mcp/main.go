@@ -48,7 +48,7 @@ var (
 // local compatibility metrics. PUBLISHING.md keeps this source default aligned
 // with npm/lema-mcp/package.json; build-npm.sh injects that package version via
 // -ldflags so published artifacts cannot silently retain a development value.
-var Version = "0.21.0"
+var Version = "0.21.1"
 
 func lemaMCPImplementation() *mcp.Implementation {
 	return &mcp.Implementation{Name: "lema-mcp", Version: Version}
