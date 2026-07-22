@@ -218,6 +218,33 @@ For the public demo, set `LEMA_MCP_MODE=public` and `LEMA_PUBLIC_REPO=react-rfcs
 The public config sets only `LEMA_MCP_MODE` + `LEMA_PUBLIC_REPO`
 (`react-rfcs` · `k8s-enhancements` · `rust-rfcs`) — the API URL is compiled in.
 
+### Hosted teams: sign in once; the repository resolves automatically
+
+After you sign in to Lema, save one Organization-scoped credential outside your
+repositories. The normal setup contains identity credentials, not a copied
+workspace UUID:
+
+```text
+# ~/.config/lema/credentials
+LEMA_API_URL=https://api.lema.sh
+LEMA_API_TOKEN=lema_live_...
+```
+
+```bash
+chmod 600 ~/.config/lema/credentials
+npx lema-mcp@latest doctor context
+```
+
+Restart the coding agent after changing MCP configuration. From then on, Lema
+matches the checkout's verified Git remote to a Repository, finds its Project,
+and passes one immutable target receipt to every operation. Opening two
+repositories in parallel does not create a mutable “active repository,” and
+each user keeps their own Organization-scoped credential.
+
+For multi-repo Projects, ambiguity recovery, repositories without a remote,
+worktrees, and compatibility overrides, read
+[Target context: Projects, repositories, and Runs](./docs/target-context.md).
+
 ---
 
 ## Two ways to use it
@@ -286,6 +313,7 @@ Your agent calls these over MCP.
 | **`get_decision`** · **`list_decisions`** · **`get_decision_graph`** | One decision's full body; the list by status; traversal of typed edges (`supersedes`, `depends_on`, …). |
 | **`search_docs`** · **`get_doc`** | Sectioned, budgeted retrieval over the repo's project markdown (local mode, once a doc tree is indexed) — the matching sections, not whole files. |
 | **`ask`** | One cited, synthesized answer over your team's **hosted** decision graph (hosted mode). |
+| **`get_state_brief`** | Resume a hosted Run with a Project-scoped brief: primary-repository state first, then ACL-filtered context from other visible repositories. |
 
 In your own repo the full server registers the read + capture tools (and the public
 `check_approach` too); the `npx lema-mcp try` server runs the public door only.
@@ -307,8 +335,9 @@ lema settle supersede <decision-id> --by <decision-id>  # takes effect immediate
 `accept` drafts; `reject` and `supersede` apply on the server in the same
 request (no browser confirm step exists for them — the command says so).
 Decision ids are full UUIDs or unique 6+ character UUID prefixes (`d_xxxxxx`
-locators are content hashes and are refused). Requires hosted credentials
-(`LEMA_API_URL`, `LEMA_API_TOKEN`, `LEMA_WORKSPACE_ID`).
+locators are content hashes and are refused). Requires hosted identity
+credentials (`LEMA_API_URL` and `LEMA_API_TOKEN`). `LEMA_WORKSPACE_ID` is an
+optional CI, recovery, or ambiguity override—not normal repository setup.
 
 ---
 
@@ -359,6 +388,10 @@ team-specific. Full method and every raw trial:
   Otherwise queries are scrubbed for credential-shaped substrings before logging.
 - **`LEMA_USAGE_LOG` / `LEMA_QUESTION_LOG` / `LEMA_GUARD_LOG`** — opt-in local log
   files; all off unless set.
+- **`LEMA_API_URL` + `LEMA_API_TOKEN`** — hosted identity credentials. Environment
+  values take precedence over `~/.config/lema/credentials`.
+- **`LEMA_WORKSPACE_ID`** — validated explicit target for CI, recovery, or
+  ambiguity compatibility. Leave it unset for normal Git-backed repositories.
 
 <details>
 <summary><b>Subcommands & flags</b></summary>
@@ -372,8 +405,14 @@ team-specific. Full method and every raw trial:
   (nothing written to your repo). The fastest way to see the CLOSED behavior.
 - **`guard`** / **`nudge`** — the hook bodies `init` installs; advisory, fail-open,
   always exit 0. You don't call them directly.
-- **`serve`** (≡ `--http`, default `:4321`) — serve the same engine over localhost
-  HTTP for the lema Workbench desktop GUI instead of stdio MCP.
+- **`doctor context`** — resolve the current target and print only privacy-safe
+  evidence, redacted ID suffixes, and one corrective action.
+- **`context link --project ID --repository ID`** / **`context unlink`** — add or
+  recoverably remove a validated repository-local association for non-Git,
+  no-remote, or ambiguous checkouts.
+- **`serve`** (≡ `--http`, default `:4321`) — serve the engine over localhost
+  HTTP for the Lema Workbench GUI. This is not an MCP Streamable HTTP endpoint;
+  the supported MCP transport in this release is local stdio.
 
 With no flags, lema auto-discovers a decisions directory (`docs/adr`, `doc/adr`,
 `docs/adrs`, `docs/decisions`, `docs/architecture/decisions`,

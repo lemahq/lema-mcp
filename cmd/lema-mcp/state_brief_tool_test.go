@@ -13,58 +13,92 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// get_state_brief's contract: explicit run wins; otherwise the project's
-// prior run resolves from the local F4 checkpoint using the SAME harness key
-// the collector synced with (a different key would mint a second hosted
-// identity); a dark server (404) and missing config are honest notes, never
-// errors or fabricated scope.
+const (
+	briefProjectID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	briefRepoID    = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	briefRunID     = "22222222-2222-2222-2222-222222222222"
+)
 
-func newBriefTestServer(t *testing.T, wantHarness string, briefStatus int) (*httptest.Server, *syncCapture) {
-	t.Helper()
-	cap := &syncCapture{}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /workspaces", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer tok" {
-			t.Errorf("missing bearer token on workspace validation")
-		}
-		_, _ = w.Write([]byte(`{"workspaces":[{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}]}`))
-	})
-	mux.HandleFunc("POST /workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/runs", func(w http.ResponseWriter, r *http.Request) {
-		var req map[string]string
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		if req["harness"] != wantHarness {
-			t.Errorf("harness = %q, want %q (a drifted key mints a second identity)", req["harness"], wantHarness)
-		}
-		cap.runCreates++
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"run":{"id":"22222222-2222-2222-2222-222222222222"},"created":false,"rung":7}`))
-	})
-	mux.HandleFunc("GET /workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/brief", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer tok" {
-			t.Errorf("missing bearer token")
-		}
-		cap.events = append(cap.events, map[string]any{"run": r.URL.Query().Get("run")})
-		w.WriteHeader(briefStatus)
-		_, _ = w.Write([]byte(`{"scope":"work unit wu-1","sections":[{"name":"objective","lines":[{"text":"ship it","cite":"work_unit:wu-1"}]}],"silences":["test status — not captured in v1"],"as_of":"2026-07-21T00:00:00Z"}`))
-	})
-	return httptest.NewServer(mux), cap
+// get_state_brief's Target Context contract: resolve one receipt before any
+// run or brief operation; explicit target evidence wins without a Git fallback;
+// otherwise verified Git may resolve the Project; every non-resolved or
+// malformed receipt stops before operation HTTP. Runs and /brief are both
+// Project-homed while the receipt keeps the primary repository provenance.
+
+type stateBriefCapture struct {
+	requests   int
+	paths      []string
+	runCreates int
+	runCreate  map[string]string
+	briefRuns  []string
 }
 
-// TestGetStateBriefOverMCPSessionNonEmptyBrief drives get_state_brief through
-// a real in-memory MCP client/server session — the path where the go-sdk
-// validates the tool's structured output against its inferred output schema.
-// The direct-call tests above bypass that validation, which is exactly how the
-// 0.21.0 regression shipped: stateBriefOutput declared Sections/Silences as
-// json.RawMessage ([]byte), the SDK inferred {type: array, items: {type:
-// integer}} for them, and its own output validation then rejected EVERY brief
-// whose sections were non-empty ("has type \"object\", want \"integer\"",
-// observed live during the settlement-rail verification). This test pins that
-// a non-empty brief — objects in sections, strings in silences — survives the
-// session round-trip with the wire content intact.
-func TestGetStateBriefOverMCPSessionNonEmptyBrief(t *testing.T) {
+func stateBriefRoutingContext() targetContext {
+	receipt := validRoutingContext()
+	receipt.ProjectWorkspaceID = briefProjectID
+	receipt.RepositoryWorkspaceID = briefRepoID
+	receipt.VisibleRepositoryWorkspaceIDs = []string{briefRepoID}
+	receipt.Repository = repositoryIdentity{
+		Host: "github.com", Owner: "acme", Name: "payments-api",
+		Canonical: "git:github.com/acme/payments-api",
+	}
+	return receipt
+}
+
+func newBriefTestServer(t *testing.T, wantHarness string, briefStatus int) (*httptest.Server, *stateBriefCapture) {
+	t.Helper()
+	return newBriefTestServerForProject(t, briefProjectID, wantHarness, briefStatus)
+}
+
+func newBriefTestServerForProject(t *testing.T, projectID, wantHarness string, briefStatus int) (*httptest.Server, *stateBriefCapture) {
+	t.Helper()
+	cap := &stateBriefCapture{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cap.requests++
+		cap.paths = append(cap.paths, r.URL.Path)
+		if got := r.Header.Get("Authorization"); got != "Bearer lema_live_routing_secret" {
+			t.Errorf("authorization = %q, want bearer token", got)
+		}
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/workspaces/"+projectID+"/runs":
+			var req map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req["harness"] != wantHarness {
+				t.Errorf("harness = %q, want %q (a drifted key mints a second identity)", req["harness"], wantHarness)
+			}
+			cap.runCreates++
+			cap.runCreate = req
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"run":{"id":"` + briefRunID + `"},"created":false,"rung":7}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/workspaces/"+projectID+"/brief":
+			cap.briefRuns = append(cap.briefRuns, r.URL.Query().Get("run"))
+			w.WriteHeader(briefStatus)
+			_, _ = w.Write([]byte(`{"scope":"work unit wu-1","sections":[{"name":"objective","lines":[{"text":"ship it","cite":"work_unit:wu-1"}]}],"silences":["test status — not captured in v1"],"as_of":"2026-07-21T00:00:00Z"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	return server, cap
+}
+
+func installStateBriefRuntime(t *testing.T, provider targetProvider, server *httptest.Server, input resolveTargetInput) hostedWriteRuntime {
+	t.Helper()
+	runtime := testHostedReadRuntime(provider, server)
+	runtime.targetInput = input
+	installHostedReadRuntime(t, runtime)
+	return runtime
+}
+
+// TestStateBriefOverMCPSessionNonEmptyBrief drives get_state_brief through a
+// real in-memory MCP client/server session — the path where the go-sdk validates
+// the tool's structured output against its inferred output schema. Keep this
+// regression on permissive `any`: typed client mirrors of the server-owned wire
+// contract are deliberately rejected by lema:d_94d86f.
+func TestStateBriefOverMCPSessionNonEmptyBrief(t *testing.T) {
 	srv, _ := newBriefTestServer(t, "", http.StatusOK)
 	defer srv.Close()
-	setSyncEnv(t, srv.URL)
+	provider := &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: stateBriefRoutingContext()}}
+	installStateBriefRuntime(t, provider, srv, resolveTargetInput{CWD: "/private/operator/payments-api"})
 
 	ctx := context.Background()
 	server := mcp.NewServer(&mcp.Implementation{Name: "lema-mcp", Version: "test"}, nil)
@@ -84,7 +118,7 @@ func TestGetStateBriefOverMCPSessionNonEmptyBrief(t *testing.T) {
 
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "get_state_brief",
-		Arguments: map[string]any{"run": "22222222-2222-2222-2222-222222222222"},
+		Arguments: map[string]any{"run": briefRunID},
 	})
 	if err != nil {
 		t.Fatalf("a non-empty brief must survive the SDK's output-schema validation: %v", err)
@@ -93,8 +127,6 @@ func TestGetStateBriefOverMCPSessionNonEmptyBrief(t *testing.T) {
 		t.Fatalf("tool errored over the session: %+v", res.Content)
 	}
 
-	// The wire content must pass through bit-identically in meaning: same
-	// section objects, same silence strings, as the stub server sent.
 	got, err := json.Marshal(res.StructuredContent)
 	if err != nil {
 		t.Fatal(err)
@@ -127,35 +159,102 @@ func TestGetStateBriefOverMCPSessionNonEmptyBrief(t *testing.T) {
 	}
 }
 
-func TestGetStateBriefExplicitRun(t *testing.T) {
-	srv, cap := newBriefTestServer(t, "", http.StatusOK)
+func TestStateBriefExplicitValidOverrideWinsAndRoutesProject(t *testing.T) {
+	srv, cap := newBriefTestServerForProject(t, "project-payments", "", http.StatusOK)
 	defer srv.Close()
-	setSyncEnv(t, srv.URL)
+	base := resolverFixture(t)
+	base.parents = []string{"project-payments"}
+	base.git = gitTargetEvidence{RemoteURL: "https://github.com/acme/wrong-repository.git", Root: "/private/wrong"}
+	runtime := installStateBriefRuntime(t, base.resolver(), srv, resolveTargetInput{
+		ExplicitWorkspaceID: "repo-api",
+		CWD:                 "/private/operator/payments-api",
+	})
 
-	_, out, err := getStateBrief(context.Background(), nil, stateBriefInput{Run: "22222222-2222-2222-2222-222222222222"})
+	_, out, err := getStateBrief(context.Background(), nil, stateBriefInput{Run: briefRunID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Scope != "work unit wu-1" || !strings.Contains(out.Note, "explicit") {
+	if out.Scope != "work unit wu-1" || !strings.Contains(out.Note, "explicit run id") {
 		t.Fatalf("out = %+v", out)
 	}
-	if cap.runCreates != 0 {
-		t.Fatal("an explicit run must not touch run creation")
+	if base.gitCalls != 0 {
+		t.Fatalf("valid explicit override consulted Git %d time(s), want zero", base.gitCalls)
 	}
-	sections, ok := out.Sections.([]any)
-	if !ok || len(sections) != 1 {
-		t.Fatalf("sections must pass through verbatim: %v", out.Sections)
+	if cap.runCreates != 0 || strings.Join(cap.paths, ",") != "/workspaces/project-payments/brief" {
+		t.Fatalf("paths = %v, run creates=%d; want Project /brief only", cap.paths, cap.runCreates)
 	}
-	silences, ok := out.Silences.([]any)
-	if !ok || len(silences) == 0 {
-		t.Fatal("silences must pass through — they are the honesty half")
+	for _, want := range []string{"primary repository git:github.com/acme/api", "repository UUID ending [redacted]", "resolved by explicit"} {
+		if !strings.Contains(out.Note, want) {
+			t.Errorf("redacted receipt diagnostic missing %q: %q", want, out.Note)
+		}
+	}
+	for _, secret := range []string{runtime.apiURL, runtime.token, runtime.targetInput.CWD, "repo-api", "project-payments"} {
+		if strings.Contains(out.Note, secret) {
+			t.Errorf("receipt diagnostic leaked %q: %q", secret, out.Note)
+		}
 	}
 }
 
-func TestGetStateBriefResolvesPriorRunFromCheckpoint(t *testing.T) {
+func TestStateBriefStaleExplicitOverrideSendsNoOperationAndDoesNotFallbackToGit(t *testing.T) {
+	srv, cap := newBriefTestServerForProject(t, "project-payments", "", http.StatusOK)
+	defer srv.Close()
+	base := resolverFixture(t)
+	base.parents = []string{"project-payments"}
+	installStateBriefRuntime(t, base.resolver(), srv, resolveTargetInput{
+		ExplicitWorkspaceID: "removed-repository",
+		CWD:                 "/private/operator/payments-api",
+	})
+
+	_, out, err := getStateBrief(context.Background(), nil, stateBriefInput{Run: briefRunID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cap.requests != 0 {
+		t.Fatalf("stale explicit target sent %d operation request(s), want zero", cap.requests)
+	}
+	if base.gitCalls != 0 {
+		t.Fatalf("stale explicit target fell back to Git %d time(s), want zero", base.gitCalls)
+	}
+	if out.Scope != "" || !strings.Contains(out.Note, "target lookup stale") {
+		t.Fatalf("out = %+v, want redacted stale diagnostic", out)
+	}
+	if strings.Contains(out.Note, "removed-repository") {
+		t.Fatalf("stale diagnostic leaked the explicit target: %q", out.Note)
+	}
+}
+
+func TestStateBriefWithoutPinResolvesVerifiedGitAndRoutesProject(t *testing.T) {
+	srv, cap := newBriefTestServerForProject(t, "project-payments", "", http.StatusOK)
+	defer srv.Close()
+	base := resolverFixture(t)
+	base.parents = []string{"project-payments"}
+	installStateBriefRuntime(t, base.resolver(), srv, resolveTargetInput{CWD: "/private/operator/payments-api"})
+
+	_, out, err := getStateBrief(context.Background(), nil, stateBriefInput{Run: briefRunID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.gitCalls != 1 {
+		t.Fatalf("Git resolutions = %d, want one verified resolution", base.gitCalls)
+	}
+	if cap.runCreates != 0 || strings.Join(cap.paths, ",") != "/workspaces/project-payments/brief" {
+		t.Fatalf("paths = %v, run creates=%d; want Project /brief only", cap.paths, cap.runCreates)
+	}
+	if !strings.Contains(out.Note, "primary repository git:github.com/acme/api") || !strings.Contains(out.Note, "resolved by canonical_git") {
+		t.Fatalf("output lost primary repository receipt provenance: %+v", out)
+	}
+}
+
+func TestStateBriefResolvesPriorRunThenCreatesAndReadsUnderOneProjectReceipt(t *testing.T) {
 	srv, cap := newBriefTestServer(t, "claude-code", http.StatusOK)
 	defer srv.Close()
-	setSyncEnv(t, srv.URL)
+	provider := &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: stateBriefRoutingContext()}}
+	installStateBriefRuntime(t, provider, srv, resolveTargetInput{CWD: "/private/operator/payments-api"})
+
+	restoreRemote, restoreBranch := gitRemoteURL, gitCurrentBranch
+	t.Cleanup(func() { gitRemoteURL, gitCurrentBranch = restoreRemote, restoreBranch })
+	gitRemoteURL = func(string) (string, bool) { return "git@github.com:acme/payments-api.git", true }
+	gitCurrentBranch = func(string) (string, bool) { return "feat/context", true }
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -179,19 +278,84 @@ func TestGetStateBriefResolvesPriorRunFromCheckpoint(t *testing.T) {
 	if !strings.Contains(out.Note, "sess-prior") {
 		t.Fatalf("note must attribute the resolved prior run: %+v", out)
 	}
-	if cap.runCreates != 1 {
-		t.Fatalf("prior-run resolution must ensure the hosted identity once, got %d", cap.runCreates)
+	if provider.calls != 1 {
+		t.Fatalf("target resolutions = %d, want one receipt before prior-Run resolution", provider.calls)
 	}
-	if len(cap.events) != 1 || cap.events[0]["run"] != "22222222-2222-2222-2222-222222222222" {
-		t.Fatalf("brief must be fetched for the ensured hosted run: %v", cap.events)
+	if cap.runCreates != 1 || cap.runCreate["repo"] != "acme/payments-api" || cap.runCreate["branch"] != "feat/context" {
+		t.Fatalf("run create = %#v, count=%d; want primary repository provenance", cap.runCreate, cap.runCreates)
+	}
+	wantPaths := "/workspaces/" + briefProjectID + "/runs,/workspaces/" + briefProjectID + "/brief"
+	if got := strings.Join(cap.paths, ","); got != wantPaths {
+		t.Fatalf("operation paths = %q, want Project-homed %q", got, wantPaths)
+	}
+	if len(cap.briefRuns) != 1 || cap.briefRuns[0] != briefRunID {
+		t.Fatalf("brief must be fetched for the ensured hosted run: %v", cap.briefRuns)
 	}
 }
 
-func TestGetStateBriefHonestWhenUnavailable(t *testing.T) {
+func TestStateBriefEveryNonResolvedOrMalformedReceiptSendsNoOperation(t *testing.T) {
+	tests := []struct {
+		name   string
+		result resolutionResult
+	}{
+		{"unresolved", resolutionResult{Status: resolutionUnresolved, Reason: hiddenReadWorkspaceID}},
+		{"ambiguous", resolutionResult{Status: resolutionAmbiguous, Reason: hiddenReadWorkspaceID}},
+		{"forbidden", resolutionResult{Status: resolutionForbidden, Reason: hiddenReadWorkspaceID}},
+		{"stale", resolutionResult{Status: resolutionStale, Reason: hiddenReadWorkspaceID}},
+		{"malformed", resolutionResult{Status: resolutionResolved, Context: targetContext{}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, cap := newBriefTestServer(t, "", http.StatusOK)
+			defer srv.Close()
+			provider := &fakeTargetProvider{result: tc.result}
+			runtime := installStateBriefRuntime(t, provider, srv, resolveTargetInput{CWD: "/private/operator/payments-api"})
+
+			_, out, err := getStateBrief(context.Background(), nil, stateBriefInput{Run: briefRunID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cap.requests != 0 {
+				t.Fatalf("hosted operation requests = %d, want zero", cap.requests)
+			}
+			if out.Scope != "" || !strings.Contains(out.Note, "state brief unavailable: target lookup") {
+				t.Fatalf("out = %+v, want honest redacted unavailability", out)
+			}
+			for _, hidden := range []string{hiddenReadWorkspaceID, tc.result.Reason, runtime.apiURL, runtime.token, runtime.targetInput.CWD} {
+				if hidden != "" && strings.Contains(out.Note, hidden) {
+					t.Fatalf("diagnostic leaked %q: %q", hidden, out.Note)
+				}
+			}
+		})
+	}
+}
+
+func TestStateBriefOperationFailureDiagnosticIsRedacted(t *testing.T) {
+	srv, _ := newBriefTestServer(t, "", http.StatusOK)
+	provider := &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: stateBriefRoutingContext()}}
+	runtime := installStateBriefRuntime(t, provider, srv, resolveTargetInput{CWD: "/private/operator/payments-api"})
+	srv.Close()
+
+	_, out, err := getStateBrief(context.Background(), nil, stateBriefInput{Run: briefRunID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.Note, "state brief unavailable") || !strings.Contains(out.Note, "primary repository git:github.com/acme/payments-api") {
+		t.Fatalf("failure lost honest state or safe receipt provenance: %+v", out)
+	}
+	for _, secret := range []string{runtime.apiURL, runtime.token, runtime.targetInput.CWD, briefProjectID, briefRepoID} {
+		if strings.Contains(out.Note, secret) {
+			t.Errorf("operation failure diagnostic leaked %q: %q", secret, out.Note)
+		}
+	}
+}
+
+func TestStateBriefHonestWhenUnavailable(t *testing.T) {
 	// No checkpoint for this project → honest note, no fabricated scope.
 	srv, _ := newBriefTestServer(t, "claude-code", http.StatusOK)
 	defer srv.Close()
-	setSyncEnv(t, srv.URL)
+	provider := &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: stateBriefRoutingContext()}}
+	installStateBriefRuntime(t, provider, srv, resolveTargetInput{CWD: "/private/operator/payments-api"})
 	t.Setenv(collectorDirEnv, t.TempDir())
 	_, out, err := getStateBrief(context.Background(), nil, stateBriefInput{})
 	if err != nil {
@@ -200,12 +364,15 @@ func TestGetStateBriefHonestWhenUnavailable(t *testing.T) {
 	if out.Scope != "" || !strings.Contains(out.Note, "no prior run known") {
 		t.Fatalf("out = %+v", out)
 	}
+	if cwd, cwdErr := os.Getwd(); cwdErr == nil && strings.Contains(out.Note, cwd) {
+		t.Fatalf("no-checkpoint diagnostic leaked cwd %q: %q", cwd, out.Note)
+	}
 
 	// Dark surface (404 while lema-state-brief is off) → honest note.
 	dark, _ := newBriefTestServer(t, "", http.StatusNotFound)
 	defer dark.Close()
-	setSyncEnv(t, dark.URL)
-	_, out, err = getStateBrief(context.Background(), nil, stateBriefInput{Run: "22222222-2222-2222-2222-222222222222"})
+	installStateBriefRuntime(t, provider, dark, resolveTargetInput{CWD: "/private/operator/payments-api"})
+	_, out, err = getStateBrief(context.Background(), nil, stateBriefInput{Run: briefRunID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,16 +380,14 @@ func TestGetStateBriefHonestWhenUnavailable(t *testing.T) {
 		t.Fatalf("dark surface must be an honest note: %+v", out)
 	}
 
-	// No hosted config at all.
-	t.Setenv("LEMA_API_URL", "")
-	t.Setenv("LEMA_API_TOKEN", "")
-	t.Setenv("LEMA_WORKSPACE_ID", "")
-	t.Setenv("HOME", t.TempDir())
+	// No process-hosted runtime at all. A workspace pin is no longer required.
+	processHostedRuntime = nil
+	processTargetProvider = nil
 	_, out, err = getStateBrief(context.Background(), nil, stateBriefInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Note, "not configured") {
-		t.Fatalf("missing config must be named: %+v", out)
+	if !strings.Contains(out.Note, "hosted mode is not configured") || strings.Contains(out.Note, "LEMA_WORKSPACE_ID") {
+		t.Fatalf("missing runtime must be named without requiring a workspace pin: %+v", out)
 	}
 }

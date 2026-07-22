@@ -42,10 +42,9 @@ func recordDecision(ctx context.Context, _ *mcp.CallToolRequest, in recordInput)
 
 type checkInput struct {
 	Topic string `json:"topic" jsonschema:"the direction or option you are about to propose — checked against decisions already settled and closed"`
-	// WorkspaceIDs optionally scopes the check to specific workspaces. Omit to
-	// check every workspace you can see; pass the repo's own workspace so a check
-	// never trips on an unrelated repo's rejected option (cross-repo false ruled_out).
-	WorkspaceIDs []string `json:"workspace_ids,omitempty" jsonschema:"optional workspace ids to scope the check to; omit to check every workspace you can see"`
+	// WorkspaceIDs can only narrow a hosted check within the repository leaves
+	// named by the resolved Project receipt. Omission uses that complete set.
+	WorkspaceIDs []string `json:"workspace_ids,omitempty" jsonschema:"workspace ids may only narrow within the resolved Project repository set; omit to use the complete resolved Project repository set"`
 }
 
 type checkOutput struct {
@@ -104,15 +103,23 @@ func checkDecided(ctx context.Context, _ *mcp.CallToolRequest, in checkInput) (*
 // hosted check_decided silently checked local capture only, and a silent
 // degrade back to that is worse than a visible, retryable error (ADR-0094).
 func checkDecidedFor(ctx context.Context, topic string, workspaceIDs []string) (checkOutput, error) {
-	if capture == nil {
-		return checkOutput{Topic: topic}, nil
+	merged := []source.Atom{}
+	if capture != nil {
+		merged = append(merged, capture.ClosedAtoms()...)
 	}
-	merged := append([]source.Atom{}, capture.ClosedAtoms()...)
 	if cs, ok := src.(source.ClosedSource); ok {
 		merged = append(merged, cs.ClosedAtoms()...)
 	}
 	if cf, ok := src.(source.ClosedFetcher); ok {
-		hostedClosed, err := cf.FetchClosedAtoms(ctx, workspaceIDs)
+		runtime, err := currentHostedRuntime()
+		if err != nil {
+			ev := verdict.NewErrored("hosted closed-decision fetch failed; not answering from local capture alone")
+			out := checkOutput{Topic: topic, Verdict: string(ev.Verdict), GoverningDecisions: ev.GoverningDecisions, Reason: ev.Reason}
+			return out, err
+		}
+		hostedClosed, err := withHostedReadScope(ctx, runtime, workspaceIDs, func(ctx context.Context, scope []string, _ targetContext) ([]source.Atom, error) {
+			return cf.FetchClosedAtoms(ctx, scope)
+		})
 		if err != nil {
 			ev := verdict.NewErrored("hosted closed-decision fetch failed; not answering from local capture alone")
 			out := checkOutput{Topic: topic, Verdict: string(ev.Verdict), GoverningDecisions: ev.GoverningDecisions, Reason: ev.Reason}

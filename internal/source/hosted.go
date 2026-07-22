@@ -43,8 +43,9 @@ func NewHosted(baseURL, token string, hc *http.Client) *Hosted {
 }
 
 type hostedRetrieveReq struct {
-	Query string `json:"query"`
-	K     int    `json:"k"`
+	Query        string   `json:"query"`
+	K            int      `json:"k"`
+	WorkspaceIDs []string `json:"workspace_ids,omitempty"`
 }
 
 type hostedRetrieveResp struct {
@@ -59,7 +60,14 @@ type hostedRetrieveResp struct {
 // Search posts the query to the hosted /retrieve and maps the atoms into the
 // MCP's consumption shape.
 func (h *Hosted) Search(ctx context.Context, query string, k int) ([]Atom, error) {
-	body, err := json.Marshal(hostedRetrieveReq{Query: query, K: k})
+	return h.SearchScoped(ctx, query, k, nil)
+}
+
+// SearchScoped is the receipt-scoped hosted retrieval path used by resolve's
+// id-query mode. Search remains the DecisionSource-compatible wrapper for local
+// callers; hosted operation handlers always pass a non-empty validated scope.
+func (h *Hosted) SearchScoped(ctx context.Context, query string, k int, workspaceIDs []string) ([]Atom, error) {
+	body, err := json.Marshal(hostedRetrieveReq{Query: query, K: k, WorkspaceIDs: workspaceIDs})
 	if err != nil {
 		return nil, err
 	}
@@ -262,6 +270,14 @@ func (h *Hosted) Graph(context.Context, int, int) (Graph, error) {
 }
 
 var _ DecisionSource = (*Hosted)(nil)
+
+// ScopedSearcher is an additive capability for network sources whose API can
+// constrain retrieval to a validated immutable receipt.
+type ScopedSearcher interface {
+	SearchScoped(ctx context.Context, query string, k int, workspaceIDs []string) ([]Atom, error)
+}
+
+var _ ScopedSearcher = (*Hosted)(nil)
 
 // ClosedFetcher is the context-aware, fallible sibling of ClosedSource: the
 // capability a network-backed DecisionSource exposes when it can fetch the

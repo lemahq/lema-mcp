@@ -17,7 +17,7 @@ import (
 
 type askInput struct {
 	Query        string   `json:"query" jsonschema:"the natural-language question about your team's decisions"`
-	WorkspaceIDs []string `json:"workspace_ids,omitempty" jsonschema:"optional workspace ids to focus the search; omit to search every workspace you can see"`
+	WorkspaceIDs []string `json:"workspace_ids,omitempty" jsonschema:"workspace ids may only narrow within the resolved Project repository set; omit to use the complete resolved Project repository set"`
 }
 
 // askSourceOut is one cited source behind a [n] in the answer. source.AskSource
@@ -67,18 +67,29 @@ func askHosted(ctx context.Context, _ *mcp.CallToolRequest, in askInput) (*mcp.C
 	if hostedSrc == nil {
 		return nil, askOutput{}, fmt.Errorf("ask is hosted-only; run lema-mcp with LEMA_API_URL set")
 	}
-	res, err := hostedSrc.Ask(ctx, in.Query, in.WorkspaceIDs)
+	runtime, err := currentHostedRuntime()
 	if err != nil {
 		return nil, askOutput{}, err
 	}
-	sources := make([]askSourceOut, len(res.Sources))
-	for i, s := range res.Sources {
-		sources[i] = toAskSourceOut(s)
-	}
-	out := askOutput{
-		Scope: res.Scope, Answer: res.Answer, Sources: sources, Usage: res.Usage,
-		ROINote: roiNote(res.Usage, len(res.Sources) == 0),
-	}
-	logUsage("ask", in.Query, len(sources), out)
-	return nil, out, nil
+	out, err := askHostedWithRuntime(ctx, runtime, in)
+	return nil, out, err
+}
+
+func askHostedWithRuntime(ctx context.Context, runtime hostedWriteRuntime, in askInput) (askOutput, error) {
+	return withHostedReadScope(ctx, runtime, in.WorkspaceIDs, func(ctx context.Context, scope []string, _ targetContext) (askOutput, error) {
+		res, err := runtime.hosted.Ask(ctx, in.Query, scope)
+		if err != nil {
+			return askOutput{}, err
+		}
+		sources := make([]askSourceOut, len(res.Sources))
+		for i, s := range res.Sources {
+			sources[i] = toAskSourceOut(s)
+		}
+		out := askOutput{
+			Scope: res.Scope, Answer: res.Answer, Sources: sources, Usage: res.Usage,
+			ROINote: roiNote(res.Usage, len(res.Sources) == 0),
+		}
+		logUsage("ask", in.Query, len(sources), out)
+		return out, nil
+	})
 }

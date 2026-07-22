@@ -44,6 +44,23 @@ var (
 	corpusSize  int        // number of indexed decisions; 0 means empty corpus
 )
 
+// Version is the release version advertised by every MCP mode and recorded in
+// local compatibility metrics. PUBLISHING.md keeps this source default aligned
+// with npm/lema-mcp/package.json; build-npm.sh injects that package version via
+// -ldflags so published artifacts cannot silently retain a development value.
+var Version = "0.21.0"
+
+func lemaMCPImplementation() *mcp.Implementation {
+	return &mcp.Implementation{Name: "lema-mcp", Version: Version}
+}
+
+func newLemaMCPServer(instructions string) *mcp.Server {
+	return mcp.NewServer(
+		lemaMCPImplementation(),
+		&mcp.ServerOptions{Instructions: instructions},
+	)
+}
+
 // defaultPublicAPIURL is the compiled-in public lema-api root for public_ask:
 // api.lema.sh — a Cloud Run domain mapping onto the prod lema-api (ADR-0088).
 // LEMA_PUBLIC_API_URL always overrides it (stage / CI / self-host). So a fresh
@@ -156,9 +173,10 @@ type getOutput struct {
 }
 
 type searchInput struct {
-	Query     string `json:"query" jsonschema:"natural-language question about this repo's decisions"`
-	K         int    `json:"k,omitempty" jsonschema:"max atoms to consider (default 8)"`
-	MaxTokens int    `json:"max_tokens,omitempty" jsonschema:"token budget for the returned atoms (default 1500)"`
+	Query        string   `json:"query" jsonschema:"natural-language question about this repo's decisions"`
+	K            int      `json:"k,omitempty" jsonschema:"max atoms to consider (default 8)"`
+	MaxTokens    int      `json:"max_tokens,omitempty" jsonschema:"token budget for the returned atoms (default 1500)"`
+	WorkspaceIDs []string `json:"workspace_ids,omitempty" jsonschema:"workspace ids may only narrow within the resolved Project repository set; omit to use the complete resolved Project repository set"`
 }
 
 // searchOutput is the ADR-0025 §4 response contract: shared fields once, a
@@ -209,13 +227,28 @@ func getDecision(ctx context.Context, _ *mcp.CallToolRequest, in getInput) (*mcp
 // hybrid retrieval in the hosted backend), bounded by max_tokens. This is the
 // token-efficient surface: tight, sourced atoms instead of whole-ADR bodies.
 func searchDecisions(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, searchOutput, error) {
+	if _, ok := src.(source.ScopedSearcher); ok {
+		runtime, err := currentHostedRuntime()
+		if err != nil {
+			return nil, searchOutput{}, err
+		}
+		out, err := withHostedReadScope(ctx, runtime, in.WorkspaceIDs, func(ctx context.Context, scope []string, _ targetContext) (searchOutput, error) {
+			return searchDecisionsFor(ctx, in, scope)
+		})
+		return nil, out, err
+	}
+	out, err := searchDecisionsFor(ctx, in, nil)
+	return nil, out, err
+}
+
+func searchDecisionsFor(ctx context.Context, in searchInput, workspaceIDs []string) (searchOutput, error) {
 	k := in.K
 	if k <= 0 {
 		k = 8
 	}
-	atoms, err := mergedSearch(ctx, in.Query, k)
+	atoms, err := mergedSearchScoped(ctx, in.Query, k, workspaceIDs)
 	if err != nil {
-		return nil, searchOutput{}, err
+		return searchOutput{}, err
 	}
 	budget := in.MaxTokens
 	if budget <= 0 {
@@ -231,7 +264,7 @@ func searchDecisions(ctx context.Context, _ *mcp.CallToolRequest, in searchInput
 	}
 	logUsage("search_decisions", in.Query, len(kept), out)
 	logQuestion(in.Query, kept)
-	return nil, out, nil
+	return out, nil
 }
 
 // searchNote returns a diagnostic note for the search_decisions response, or nil
@@ -349,7 +382,16 @@ func main() {
 		case "guard":
 			// PreToolUse hook body (ADR-0052): read the tool call on stdin, emit a
 			// never-reopen permission decision on stdout. Fail-open; always exit 0.
-			runGuard(os.Args[2:])
+			var refreshRuntime *hostedWriteRuntime
+			for _, arg := range os.Args[2:] {
+				if arg == "--refresh-cache" {
+					if runtime, _, err := loadHostedWriteRuntime(guardCacheRefreshTimeout); err == nil {
+						refreshRuntime = &runtime
+					}
+					break
+				}
+			}
+			runGuard(os.Args[2:], refreshRuntime)
 			return
 		case "nudge":
 			// PostToolUse capture nudge (ADR-0054): on a dependency-manifest edit,
@@ -384,7 +426,11 @@ func main() {
 			// the recorded decisions relevant to the prompt and inject them as context
 			// before the agent acts. Dark unless LEMA_FUSE_FRONTLOAD; abstains (injects
 			// nothing) when the record is silent; fail-open; always exit 0.
-			runFrontload(os.Args[2:])
+			if frontloadEnabled() {
+				if runtime, _, err := loadHostedWriteRuntime(frontloadTimeout); err == nil {
+					runFrontload(os.Args[2:], runtime)
+				}
+			}
 			return
 		case "run-event":
 			// DEPRECATED (ADR-0110, pivot B2): the run-ledger v1 local slice —
@@ -508,7 +554,8 @@ func main() {
 		// repository-scoped writes enter through withResolvedTarget.
 		writeRuntime = newHostedWriteRuntime(&http.Client{Timeout: recordPushTimeout}, hostedAPIURL, hostedToken, hostedConfig.WorkspaceID, "")
 		processTargetProvider = writeRuntime.targets
-		hostedSrc = source.NewHosted(hostedAPIURL, hostedToken, nil)
+		processHostedRuntime = &writeRuntime
+		hostedSrc = writeRuntime.hosted
 		src = hostedSrc
 		corpusSize = -1 // hosted: remote corpus size is unknown
 		via := ""
@@ -680,10 +727,8 @@ func main() {
 	// The authed server gains the same proactive steering channel the public funnel
 	// already uses (try.go) — it shipped nil, priming agents with nothing (ADR-0124,
 	// the v1 read wedge). Steering rides instructions, never the tool descriptions.
-	server := mcp.NewServer(
-		&mcp.Implementation{Name: "lema-mcp", Version: "0.21.0"},
-		&mcp.ServerOptions{Instructions: authedServerInstructions},
-	)
+	server := newLemaMCPServer(authedServerInstructions)
+	server.AddReceivingMiddleware(stateBriefSchemaMetricMiddleware)
 	mcp.AddTool(server, searchDecisionsTool, searchDecisions)
 	mcp.AddTool(server, getDecisionTool, getDecision)
 	mcp.AddTool(server, listDecisionsTool, listDecisions)
