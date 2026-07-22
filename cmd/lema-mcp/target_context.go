@@ -118,7 +118,37 @@ func withResolvedTarget[T any](ctx context.Context, provider targetProvider, inp
 	if result.Status != resolutionResolved {
 		return zero, &targetResolutionError{status: targetGateStatus(result.Status), rung: "target_provider"}
 	}
+	if !validResolvedTargetContext(result.Context) || operation == nil {
+		return zero, &targetResolutionError{status: resolutionUnresolved, rung: "target_provider"}
+	}
 	return operation(ctx, cloneContext(result.Context))
+}
+
+func validResolvedTargetContext(receipt targetContext) bool {
+	if strings.TrimSpace(receipt.OrganizationID) == "" ||
+		strings.TrimSpace(receipt.ProjectWorkspaceID) == "" ||
+		strings.TrimSpace(receipt.RepositoryWorkspaceID) == "" ||
+		strings.TrimSpace(receipt.Repository.Canonical) == "" ||
+		strings.TrimSpace(receipt.ResolvedBy) == "" ||
+		receipt.ResolvedAt.IsZero() || len(receipt.Evidence) == 0 {
+		return false
+	}
+	primaryVisible := false
+	for _, workspaceID := range receipt.VisibleRepositoryWorkspaceIDs {
+		if workspaceID == receipt.RepositoryWorkspaceID {
+			primaryVisible = true
+			break
+		}
+	}
+	if !primaryVisible {
+		return false
+	}
+	for _, evidence := range receipt.Evidence {
+		if strings.TrimSpace(evidence.Kind) == "" || strings.TrimSpace(evidence.Value) == "" {
+			return false
+		}
+	}
+	return true
 }
 
 func targetGateStatus(status resolutionStatus) resolutionStatus {

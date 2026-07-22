@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeTargetProvider struct {
@@ -49,14 +50,8 @@ func TestHostedTargetProviderBindsCredentialDerivedCacheIdentity(t *testing.T) {
 
 func TestWithResolvedTargetCallsOperationWithAnIsolatedReceipt(t *testing.T) {
 	provider := &fakeTargetProvider{result: resolutionResult{
-		Status: resolutionResolved,
-		Context: targetContext{
-			OrganizationID:                "org-1",
-			ProjectWorkspaceID:            "project-1",
-			RepositoryWorkspaceID:         "repository-1",
-			VisibleRepositoryWorkspaceIDs: []string{"repository-1", "repository-2"},
-			Evidence:                      []resolutionEvidence{{Kind: "canonical_remote", Value: "git:example.test/acme/api"}},
-		},
+		Status:  resolutionResolved,
+		Context: validRoutingContext(),
 	}}
 	var requests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -89,6 +84,30 @@ func TestWithResolvedTargetCallsOperationWithAnIsolatedReceipt(t *testing.T) {
 	}
 	if got := provider.result.Context.Evidence[0].Value; got != "git:example.test/acme/api" {
 		t.Fatalf("operation mutated provider receipt evidence: %q", got)
+	}
+}
+
+func TestWithResolvedTargetRejectsMalformedResolvedReceiptsWithoutRunningOperation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*targetContext)
+	}{
+		{"organization", func(receipt *targetContext) { receipt.OrganizationID = "" }},
+		{"project", func(receipt *targetContext) { receipt.ProjectWorkspaceID = "" }},
+		{"repository workspace", func(receipt *targetContext) { receipt.RepositoryWorkspaceID = "" }},
+		{"canonical repository", func(receipt *targetContext) { receipt.Repository.Canonical = "" }},
+		{"visible primary repository", func(receipt *targetContext) { receipt.VisibleRepositoryWorkspaceIDs = []string{"repository-2"} }},
+		{"resolution rung", func(receipt *targetContext) { receipt.ResolvedBy = "" }},
+		{"evidence", func(receipt *targetContext) { receipt.Evidence = nil }},
+		{"resolution time", func(receipt *targetContext) { receipt.ResolvedAt = time.Time{} }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			receipt := validRoutingContext()
+			test.mutate(&receipt)
+			provider := &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: receipt}}
+			assertTargetGateDoesNotCallOperation(t, provider, resolutionUnresolved)
+		})
 	}
 }
 
@@ -137,5 +156,18 @@ func assertTargetGateDoesNotCallOperation(t *testing.T, provider *fakeTargetProv
 	}
 	if provider.calls != 1 || operations != 0 || requests != 0 {
 		t.Fatalf("provider calls=%d operations=%d outbound requests=%d, want 1/0/0", provider.calls, operations, requests)
+	}
+}
+
+func validRoutingContext() targetContext {
+	return targetContext{
+		OrganizationID:                "org-1",
+		ProjectWorkspaceID:            "project-1",
+		RepositoryWorkspaceID:         "repository-1",
+		VisibleRepositoryWorkspaceIDs: []string{"repository-1", "repository-2"},
+		Repository:                    repositoryIdentity{Canonical: "git:example.test/acme/api"},
+		ResolvedBy:                    "canonical_git",
+		Evidence:                      []resolutionEvidence{{Kind: "canonical_remote", Value: "git:example.test/acme/api"}},
+		ResolvedAt:                    time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC),
 	}
 }
