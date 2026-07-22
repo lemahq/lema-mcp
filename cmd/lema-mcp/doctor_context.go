@@ -30,6 +30,8 @@ type doctorConfig struct {
 	ExplicitWorkspaceID string
 }
 
+const doctorHostedLookupAction = "verify hosted API reachability and response compatibility"
+
 // runDoctorContext resolves the current checkout through the shared typed
 // resolver and writes a deliberately small, non-secret trace. It returns an
 // error for every non-resolved result; callers must not treat its output as
@@ -60,7 +62,7 @@ func runDoctorContext(ctx context.Context, options doctorContextOptions) error {
 		var err error
 		explicitWorkspaceID, err = resolveWorkspaceValueUUID(ctx, client, options.APIURL, options.Token, explicitWorkspaceID)
 		if err != nil {
-			writeDoctorFailure(out, targetResolutionStatusFromError(err), targetResolutionRungFromError(err), "")
+			writeDoctorFailure(out, targetResolutionStatusFromError(err), targetResolutionRungFromError(err), doctorActionForLookupError(err))
 			return fmt.Errorf("target context %s", targetResolutionStatusFromError(err))
 		}
 	}
@@ -74,7 +76,7 @@ func runDoctorContext(ctx context.Context, options doctorContextOptions) error {
 	})
 	if err != nil {
 		status := targetResolutionStatusFromError(err)
-		writeDoctorFailure(out, status, targetResolutionRungFromError(err), "")
+		writeDoctorFailure(out, status, targetResolutionRungFromError(err), doctorActionForLookupError(err))
 		return fmt.Errorf("target context %s", status)
 	}
 	writeDoctorContext(out, result)
@@ -82,6 +84,13 @@ func runDoctorContext(ctx context.Context, options doctorContextOptions) error {
 		return fmt.Errorf("target context %s", result.Status)
 	}
 	return nil
+}
+
+func doctorActionForLookupError(err error) string {
+	if targetResolutionStatusFromError(err) == resolutionUnresolved {
+		return doctorHostedLookupAction
+	}
+	return ""
 }
 
 func runDoctorContextCommand(args []string) error {
@@ -103,9 +112,16 @@ func resolveDoctorConfig() (doctorConfig, error) {
 		Token:               strings.TrimSpace(os.Getenv("LEMA_API_TOKEN")),
 		ExplicitWorkspaceID: strings.TrimSpace(os.Getenv(workspaceIDEnv)),
 	}
+	needsConnectionFallback := config.APIURL == "" || config.Token == ""
 	creds, err := readCredentialsFile(credentialsPath())
-	if err != nil || creds == nil {
-		return config, err
+	if err != nil {
+		if needsConnectionFallback {
+			return config, err
+		}
+		return config, nil
+	}
+	if creds == nil {
+		return config, nil
 	}
 	if config.APIURL == "" {
 		config.APIURL = strings.TrimSpace(creds["LEMA_API_URL"])

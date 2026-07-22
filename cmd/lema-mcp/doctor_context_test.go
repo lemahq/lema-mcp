@@ -106,8 +106,116 @@ func TestDoctorContextFailureIsTypedAndHasOneSafeAction(t *testing.T) {
 	if strings.Count(got, "action         ") != 1 {
 		t.Errorf("diagnostic must print exactly one safe corrective action:\n%s", got)
 	}
+	if !strings.Contains(got, "action         set LEMA_WORKSPACE_ID to a visible repository workspace") {
+		t.Errorf("actual target absence must retain target-pin action:\n%s", got)
+	}
 	if strings.Contains(got, token) || strings.Contains(got, "/private/home/andrew") || strings.Contains(got, credentialFingerprint(token)) {
 		t.Errorf("failure diagnostic leaked sensitive local evidence:\n%s", got)
+	}
+}
+
+func TestDoctorContextLookupFailuresRecommendHostedCompatibility(t *testing.T) {
+	const token = "lema_live_doctor_lookup_failure_token"
+	workspaces := []map[string]any{
+		{"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "org_id": "org-1", "is_repo": true, "repo_url": "https://github.com/acme/payments-api.git"},
+		{"id": "11111111-2222-3333-4444-555555555555", "org_id": "org-1", "is_repo": false},
+	}
+	for _, tc := range []struct {
+		name    string
+		client  *http.Client
+		handler http.HandlerFunc
+		rung    string
+	}{
+		{
+			name: "workspace transport",
+			client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, os.ErrDeadlineExceeded
+			})},
+			rung: "workspace_lookup",
+		},
+		{
+			name:    "workspace non-auth HTTP",
+			handler: func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadGateway) },
+			rung:    "workspace_lookup",
+		},
+		{
+			name:    "workspace decode",
+			handler: func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("not-json")) },
+			rung:    "workspace_lookup",
+		},
+		{
+			name: "link non-auth HTTP",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/workspaces" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"workspaces": workspaces})
+					return
+				}
+				w.WriteHeader(http.StatusBadGateway)
+			},
+			rung: "project_link_lookup",
+		},
+		{
+			name: "link decode",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/workspaces" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"workspaces": workspaces})
+					return
+				}
+				_, _ = w.Write([]byte("not-json"))
+			},
+			rung: "project_link_lookup",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := tc.client
+			apiURL := "https://api.example.test"
+			var server *httptest.Server
+			if tc.handler != nil {
+				server = httptest.NewServer(tc.handler)
+				defer server.Close()
+				client, apiURL = server.Client(), server.URL
+			}
+			var output bytes.Buffer
+			err := runDoctorContext(context.Background(), doctorContextOptions{
+				APIURL: apiURL,
+				Token:  token,
+				CWD:    "/private/home/andrew/work/payments-api",
+				ReadGit: func(context.Context, string) (gitTargetEvidence, error) {
+					return gitTargetEvidence{RemoteURL: "https://github.com/acme/payments-api.git", Root: "/private/home/andrew/work/payments-api"}, nil
+				},
+				Output: &output,
+				Client: client,
+			})
+			if err == nil {
+				t.Fatal("lookup failure returned success")
+			}
+			got := output.String()
+			if !strings.Contains(got, "rung           "+tc.rung) || !strings.Contains(got, "result         unresolved") || !strings.Contains(got, "action         verify hosted API reachability and response compatibility") {
+				t.Fatalf("lookup failure lacks typed hosted correction:\n%s", got)
+			}
+			if strings.Count(got, "action         ") != 1 || strings.Contains(got, workspaceIDEnv) {
+				t.Fatalf("lookup failure must have exactly one non-target-pin action:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestResolveDoctorConfigKeepsCompleteEnvironmentWhenFallbackFileErrors(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".config"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("LEMA_API_URL", "https://env.example.test")
+	t.Setenv("LEMA_API_TOKEN", "lema_live_env_token")
+	t.Setenv(workspaceIDEnv, "env-workspace")
+
+	config, err := resolveDoctorConfig()
+	if err != nil {
+		t.Fatalf("complete environment must not depend on unreadable fallback credentials: %v", err)
+	}
+	if config.APIURL != "https://env.example.test" || config.Token != "lema_live_env_token" || config.ExplicitWorkspaceID != "env-workspace" {
+		t.Fatalf("config = %#v, want complete environment values", config)
 	}
 }
 
@@ -287,4 +395,10 @@ func withoutEnv(env []string, names ...string) []string {
 		}
 	}
 	return filtered
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }
