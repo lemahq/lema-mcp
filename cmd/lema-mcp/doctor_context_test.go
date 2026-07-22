@@ -352,6 +352,115 @@ func TestDoctorContextClassifiesHostedAuthorizationFailure(t *testing.T) {
 	}
 }
 
+func TestDoctorContextStaleHostedAssociationUsesRecoverableUnlinkAction(t *testing.T) {
+	const (
+		token        = "lema_live_stale_association_token"
+		projectID    = "11111111-2222-3333-4444-555555555555"
+		repositoryID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+		organization = "org-private-987654321"
+	)
+	for _, tc := range []struct {
+		name       string
+		archived   bool
+		linkedRepo bool
+	}{
+		{name: "project link removed", linkedRepo: false},
+		{name: "project archived", archived: true, linkedRepo: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			repository := mustRepository(t, "https://github.com/acme/payments-api.git")
+			if err := writeContextAssociation(root, targetContext{
+				OrganizationID:        organization,
+				ProjectWorkspaceID:    projectID,
+				RepositoryWorkspaceID: repositoryID,
+				Repository:            repository,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/workspaces":
+					project := map[string]any{"id": projectID, "org_id": organization, "is_repo": false}
+					if tc.archived {
+						project["archived_at"] = "2026-07-21T00:00:00Z"
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"workspaces": []map[string]any{
+						{"id": repositoryID, "org_id": organization, "is_repo": true, "repo_url": "https://github.com/acme/payments-api.git"},
+						project,
+					}})
+				case "/workspaces/" + projectID + "/links":
+					links := []map[string]string{}
+					if tc.linkedRepo {
+						links = append(links, map[string]string{"workspace_id": repositoryID})
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"links": links})
+				default:
+					t.Fatalf("unexpected request path %q", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+
+			var output bytes.Buffer
+			err := runDoctorContext(context.Background(), doctorContextOptions{
+				APIURL: server.URL,
+				Token:  token,
+				CWD:    root,
+				ReadGit: func(context.Context, string) (gitTargetEvidence, error) {
+					return gitTargetEvidence{RemoteURL: "https://github.com/acme/payments-api.git", Root: root}, nil
+				},
+				Output: &output,
+			})
+			if err == nil {
+				t.Fatal("stale saved association returned success")
+			}
+			got := output.String()
+			for _, want := range []string{
+				"rung           local_association",
+				"result         stale",
+				"action         run lema-mcp context unlink to preserve a backup, then link this repository",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("stale association diagnostic missing %q:\n%s", want, got)
+				}
+			}
+			if strings.Count(got, "action         ") != 1 || strings.Contains(got, workspaceIDEnv) {
+				t.Errorf("stale association must have exactly one association recovery action:\n%s", got)
+			}
+			for _, secret := range []string{token, root, projectID, repositoryID, organization, credentialFingerprint(token)} {
+				if strings.Contains(got, secret) {
+					t.Errorf("stale association diagnostic leaked %q:\n%s", secret, got)
+				}
+			}
+		})
+	}
+}
+
+func TestDoctorContextExplicitStaleWorkspaceKeepsWorkspacePinAction(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"workspaces": []map[string]any{}})
+	}))
+	defer server.Close()
+	var output bytes.Buffer
+	err := runDoctorContext(context.Background(), doctorContextOptions{
+		APIURL:              server.URL,
+		Token:               "lema_live_explicit_stale_token",
+		ExplicitWorkspaceID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		CWD:                 t.TempDir(),
+		Output:              &output,
+	})
+	if err == nil {
+		t.Fatal("invisible explicit workspace returned success")
+	}
+	got := output.String()
+	if !strings.Contains(got, "rung           explicit_workspace") || !strings.Contains(got, "action         update or remove the stale LEMA_WORKSPACE_ID") {
+		t.Fatalf("explicit stale workspace lost its workspace-pin remediation:\n%s", got)
+	}
+	if strings.Count(got, "action         ") != 1 || strings.Contains(got, "context unlink") {
+		t.Fatalf("explicit stale workspace must not use association recovery:\n%s", got)
+	}
+}
+
 func TestDoctorContextLooseCredentialsNeverPrintsRawHomePath(t *testing.T) {
 	home := t.TempDir()
 	credentialsDir := filepath.Join(home, ".config", "lema")

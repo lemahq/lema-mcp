@@ -30,7 +30,10 @@ type doctorConfig struct {
 	ExplicitWorkspaceID string
 }
 
-const doctorHostedLookupAction = "verify hosted API reachability and response compatibility"
+const (
+	doctorHostedLookupAction     = "verify hosted API reachability and response compatibility"
+	doctorStaleAssociationAction = "run lema-mcp context unlink to preserve a backup, then link this repository"
+)
 
 // runDoctorContext resolves the current checkout through the shared typed
 // resolver and writes a deliberately small, non-secret trace. It returns an
@@ -71,7 +74,7 @@ func runDoctorContext(ctx context.Context, options doctorContextOptions) error {
 		association, found, err := loadContextAssociation(options.CWD, options.ReadGit)
 		if err != nil {
 			if found && isContextAssociationStale(err) {
-				writeDoctorFailure(out, resolutionStale, "local_association", "run lema-mcp context unlink to preserve a backup, then link this repository")
+				writeDoctorFailure(out, resolutionStale, "local_association", doctorStaleAssociationAction)
 				return fmt.Errorf("target context stale")
 			}
 			writeDoctorFailure(out, resolutionUnresolved, "local_association", doctorHostedLookupAction)
@@ -95,6 +98,10 @@ func runDoctorContext(ctx context.Context, options doctorContextOptions) error {
 		status := targetResolutionStatusFromError(err)
 		writeDoctorFailure(out, status, targetResolutionRungFromError(err), doctorActionForLookupError(err))
 		return fmt.Errorf("target context %s", status)
+	}
+	if localAssociation != nil && result.Status == resolutionStale {
+		writeDoctorFailure(out, resolutionStale, "local_association", doctorStaleAssociationAction)
+		return fmt.Errorf("target context stale")
 	}
 	writeDoctorContext(out, result)
 	if result.Status != resolutionResolved {
