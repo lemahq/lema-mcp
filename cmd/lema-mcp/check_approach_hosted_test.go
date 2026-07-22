@@ -40,8 +40,18 @@ func TestCheckApproachHostedDescriptionDirectoryClean(t *testing.T) {
 func swapHostedSrc(t *testing.T, h *source.Hosted) {
 	t.Helper()
 	old := hostedSrc
-	t.Cleanup(func() { hostedSrc = old })
+	oldRuntime, oldProvider := processHostedRuntime, processTargetProvider
+	t.Cleanup(func() {
+		hostedSrc = old
+		processHostedRuntime, processTargetProvider = oldRuntime, oldProvider
+	})
 	hostedSrc = h
+	runtime := hostedWriteRuntime{
+		hosted:  h,
+		targets: &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: projectReadContext()}},
+	}
+	processHostedRuntime = &runtime
+	processTargetProvider = runtime.targets
 }
 
 // TestCheckApproachHostedAnswersOwnCorpus pins the #293 MCP routing: in hosted mode
