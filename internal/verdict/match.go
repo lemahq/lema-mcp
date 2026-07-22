@@ -250,3 +250,130 @@ func matchKeyFor(a source.Atom) string {
 	}
 	return a.MatchKey
 }
+
+// --- Structural gate (2026-07-22, decisions a991ec27 + ea22dd9a) ---
+//
+// Match is the lexical REACH layer (ADR-0053): it fires whenever the summed
+// distinctiveness of a query's shared terms clears MatchThreshold. On the
+// check_decided/Build path every closed atom arrives Type="rejected_alternative"
+// (Binding force), so a bare lexical reach became a false ruled_out — a meta-topic
+// like "add a middle verdict to check_decided" shares this corpus's own vocabulary
+// (verdict, closed, atom, decided) or a coincidental rare word (vocabulary, df=1)
+// with dozens of atoms it does not govern, and fired the never-reopen on the first.
+// Build has no cosine (that is check_approach's semantic gate), so ruled_out is
+// gated on lexical STRUCTURE alone.
+//
+// The signal — calibrated against the real 500-atom binding feed, NOT a synthetic
+// fixture — is COVERAGE of the atom's distinctive identity, not per-term rarity: no
+// document-frequency bar separates a coincidental rare word from an identity term
+// (both can be df=1), but a genuine relitigation NAMES most of an option's
+// distinctive terms while a coincidence names a sliver (~2 of an atom's ~11 for the
+// specimen). An atom governs iff the query shares >=2 of its distinctive identity
+// terms covering >=structuralCov, OR shares one distinctive term that is most of a
+// short focused identity (>=structuralCovSolo) — which distinguishes "pinecone"
+// (its option's whole identity) from "vocabulary" (one word of a longer, unrelated
+// option). "Distinctive" is scale-relative (df <= ~1% of the corpus) and used
+// symmetrically in the coverage ratio, so the bar transfers across corpus sizes.
+const (
+	// distinctiveDFFraction/Floor: an identity term appears in at most
+	// max(distinctiveDFFloor, ceil(n*distinctiveDFFraction)) closed options — ~1% of
+	// the corpus. The floor keeps a tiny corpus from admitting nothing distinctive.
+	distinctiveDFFraction = 0.01
+	distinctiveDFFloor    = 2
+	// structuralCov: with >=2 shared distinctive terms, the query must cover this
+	// share of the atom's distinctive identity. structuralCovSolo: with one shared
+	// term, a stricter bar — it must BE most of a focused option's identity.
+	structuralCov     = 0.5
+	structuralCovSolo = 0.7
+)
+
+// distinctiveDF is the highest document frequency a term may have and still count
+// as an identity term for the coverage test — scale-relative, floored so a small
+// corpus still has a distinctive set.
+func distinctiveDF(n int) int {
+	c := int(math.Ceil(float64(n) * distinctiveDFFraction))
+	if c < distinctiveDFFloor {
+		return distinctiveDFFloor
+	}
+	return c
+}
+
+// gateStopwords are function words dropped from the STRUCTURAL GATE's tokenization
+// ONLY (not Match's — Match/BuildConfirmed calibration stays byte-identical). They
+// are rare in terse option match keys, so IDF would otherwise score them as
+// distinctive and let "does"/"not"/"but" carry a false governing match. (The shared
+// guardStopwords is missing these; extending it globally is a separate change that
+// would perturb Match's calibrated eval.)
+var gateStopwords = map[string]bool{
+	"does": true, "not": true, "but": true, "when": true, "where": true, "which": true,
+	"while": true, "then": true, "them": true, "they": true, "their": true, "there": true,
+	"what": true, "who": true, "whom": true, "whose": true, "how": true, "why": true,
+	"than": true, "such": true, "some": true, "each": true, "every": true, "both": true,
+	"more": true, "most": true, "less": true, "many": true, "much": true, "few": true,
+	"one": true, "two": true, "now": true, "here": true, "just": true, "also": true,
+	"still": true, "again": true, "same": true, "other": true, "first": true, "last": true,
+	"next": true, "yet": true, "already": true, "even": true, "re": true, "so": true,
+	"id": true, "v1": true, "over": true, "under": true, "about": true, "across": true,
+}
+
+// gateTerms are the tokens the structural gate scores on: significant tokens minus
+// gateStopwords, deduped.
+func gateTerms(s string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, t := range significantTokens(s) {
+		if gateStopwords[t] || seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	return out
+}
+
+// structuralMatch reports whether the query's lexical hit on atom a is GOVERNING
+// (fit to carry ruled_out), not a vocabulary coincidence. df/n come from OptionDF
+// over the same closed set the matcher scored (gateStopword df entries are never
+// looked up — gateTerms doesn't yield them).
+func structuralMatch(query string, a source.Atom, df map[string]int, n int) bool {
+	q := map[string]bool{}
+	for _, t := range gateTerms(query) {
+		q[t] = true
+	}
+	dd := distinctiveDF(n)
+	atomDistinct, shared := 0, 0
+	for _, t := range gateTerms(matchKeyFor(a)) {
+		if df[t] > dd {
+			continue // common in this corpus — category vocabulary, not identity
+		}
+		atomDistinct++
+		if q[t] {
+			shared++
+		}
+	}
+	if atomDistinct == 0 || shared == 0 {
+		return false
+	}
+	cov := float64(shared) / float64(atomDistinct)
+	return (shared >= 2 && cov >= structuralCov) || cov >= structuralCovSolo
+}
+
+// Governing returns the CLOSED atoms whose option the query STRUCTURALLY reaches —
+// the subset of Match's lexical hits fit to govern a ruled_out, in Match's order.
+// check_decided surfaces these (not raw Match) so the atoms it shows and the
+// verdict it returns cannot disagree. BuildConfirmed (the server settled path) has
+// its own cosine gate and does not go through here.
+func Governing(closed []source.Atom, query string) []source.Atom {
+	matched := Match(closed, query, MatchThreshold)
+	if len(matched) == 0 {
+		return matched
+	}
+	df, n := OptionDF(closed)
+	out := make([]source.Atom, 0, len(matched))
+	for _, a := range matched {
+		if structuralMatch(query, a, df, n) {
+			out = append(out, a)
+		}
+	}
+	return out
+}

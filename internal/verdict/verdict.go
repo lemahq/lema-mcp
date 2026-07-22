@@ -110,12 +110,14 @@ func refOf(a source.Atom) string {
 }
 
 // Build judges a topic against an already-acquired, already-scoped CLOSED set.
-// ruled_out requires a binding match — the only hard stop; advisory/historical
-// matches are surfaced as context under not_ruled_out (the anti-mute rule: an
-// advisory-only hit must not read as a hard stop). For the partial/error cases
-// the caller uses NewIncomplete / NewErrored instead, so the verb fails loud.
+// ruled_out requires a binding match that STRUCTURALLY governs the topic (Governing,
+// not raw Match) — a lexical overlap on this corpus's shared vocabulary is not a
+// ruling; advisory/historical matches are surfaced as context under not_ruled_out
+// (the anti-mute rule: an advisory-only hit must not read as a hard stop). For the
+// partial/error cases the caller uses NewIncomplete / NewErrored instead, so the
+// verb fails loud.
 func Build(closed []source.Atom, topic string) Verdict {
-	return buildFrom(Match(closed, topic, MatchThreshold))
+	return buildFrom(Governing(closed, topic))
 }
 
 // BuildConfirmed is Build plus a semantic gate (ADR-0096): of the lexical matches,

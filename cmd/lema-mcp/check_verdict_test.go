@@ -51,3 +51,32 @@ func TestCheckOutput_NoMatchIsNotRuledOut(t *testing.T) {
 		t.Fatalf("no match → decided=false, closed empty; got decided=%v closed=%d", out.Decided, len(out.Closed))
 	}
 }
+
+// TestCheckOutput_LexicalButNotStructural pins the output reconciliation: several
+// options share a recurring category term (pipeline) but each carries its own
+// identity; a topic naming only the category term REACHES them lexically (Match
+// fires) but governs none. The legacy decided/closed/note must mirror the structural
+// verdict (verdict.Governing), not the raw Match — otherwise the output says
+// "decided:true, do not re-propose" over vocabulary-collision atoms while the verdict
+// reads not_ruled_out. That contradiction over 53 atoms was the reported bug.
+func TestCheckOutput_LexicalButNotStructural(t *testing.T) {
+	merged := []source.Atom{
+		{MatchKey: "identone pipeline schema", Closed: true, Type: "rejected_alternative", Ref: "a1"},
+		{MatchKey: "identtwo pipeline worker", Closed: true, Type: "rejected_alternative", Ref: "a2"},
+		{MatchKey: "identthree pipeline queue", Closed: true, Type: "rejected_alternative", Ref: "a3"},
+		{MatchKey: "identfour adapter ledger", Closed: true, Type: "rejected_alternative", Ref: "a4"},
+		{MatchKey: "identfive boundary beacon", Closed: true, Type: "rejected_alternative", Ref: "a5"},
+		{MatchKey: "identsix registry session", Closed: true, Type: "rejected_alternative", Ref: "a6"},
+		{MatchKey: "identseven token payload", Closed: true, Type: "rejected_alternative", Ref: "a7"},
+		{MatchKey: "identeight envelope snapshot", Closed: true, Type: "rejected_alternative", Ref: "a8"},
+	}
+	// "pipeline" is in 3/8 atoms — rare enough that Match fires, common enough (df 3 >
+	// distinctiveDF 2) that it is not an identity term.
+	out := buildCheckOutput("rework the pipeline flow across services", merged)
+	if out.Verdict != string(verdict.NotRuledOut) {
+		t.Fatalf("vocabulary-only overlap must be not_ruled_out, got %q (reason %s)", out.Verdict, out.Reason)
+	}
+	if out.Decided || len(out.Closed) != 0 || out.Note != "" {
+		t.Fatalf("legacy fields must mirror the gate, not raw Match: decided=%v closed=%d note=%q", out.Decided, len(out.Closed), out.Note)
+	}
+}
