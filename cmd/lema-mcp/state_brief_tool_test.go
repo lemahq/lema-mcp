@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // get_state_brief's contract: explicit run wins; otherwise the project's
@@ -48,6 +50,83 @@ func newBriefTestServer(t *testing.T, wantHarness string, briefStatus int) (*htt
 	return httptest.NewServer(mux), cap
 }
 
+// TestGetStateBriefOverMCPSessionNonEmptyBrief drives get_state_brief through
+// a real in-memory MCP client/server session — the path where the go-sdk
+// validates the tool's structured output against its inferred output schema.
+// The direct-call tests above bypass that validation, which is exactly how the
+// 0.21.0 regression shipped: stateBriefOutput declared Sections/Silences as
+// json.RawMessage ([]byte), the SDK inferred {type: array, items: {type:
+// integer}} for them, and its own output validation then rejected EVERY brief
+// whose sections were non-empty ("has type \"object\", want \"integer\"",
+// observed live during the settlement-rail verification). This test pins that
+// a non-empty brief — objects in sections, strings in silences — survives the
+// session round-trip with the wire content intact.
+func TestGetStateBriefOverMCPSessionNonEmptyBrief(t *testing.T) {
+	srv, _ := newBriefTestServer(t, "", http.StatusOK)
+	defer srv.Close()
+	setSyncEnv(t, srv.URL)
+
+	ctx := context.Background()
+	server := mcp.NewServer(&mcp.Implementation{Name: "lema-mcp", Version: "test"}, nil)
+	mcp.AddTool(server, getStateBriefTool, getStateBrief)
+	clientT, serverT := mcp.NewInMemoryTransports()
+	ss, err := server.Connect(ctx, serverT, nil)
+	if err != nil {
+		t.Fatalf("server.Connect: %v", err)
+	}
+	defer ss.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "test"}, nil)
+	cs, err := client.Connect(ctx, clientT, nil)
+	if err != nil {
+		t.Fatalf("client.Connect: %v", err)
+	}
+	defer cs.Close()
+
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "get_state_brief",
+		Arguments: map[string]any{"run": "22222222-2222-2222-2222-222222222222"},
+	})
+	if err != nil {
+		t.Fatalf("a non-empty brief must survive the SDK's output-schema validation: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool errored over the session: %+v", res.Content)
+	}
+
+	// The wire content must pass through bit-identically in meaning: same
+	// section objects, same silence strings, as the stub server sent.
+	got, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Scope    string `json:"scope"`
+		Sections []struct {
+			Name  string `json:"name"`
+			Lines []struct {
+				Text string `json:"text"`
+				Cite string `json:"cite"`
+			} `json:"lines"`
+		} `json:"sections"`
+		Silences []string `json:"silences"`
+		AsOf     string   `json:"as_of"`
+	}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("structured content unreadable: %v\n%s", err, got)
+	}
+	if out.Scope != "work unit wu-1" || out.AsOf != "2026-07-21T00:00:00Z" {
+		t.Fatalf("scope/as_of drifted: %s", got)
+	}
+	if len(out.Sections) != 1 || out.Sections[0].Name != "objective" ||
+		len(out.Sections[0].Lines) != 1 || out.Sections[0].Lines[0].Text != "ship it" ||
+		out.Sections[0].Lines[0].Cite != "work_unit:wu-1" {
+		t.Fatalf("sections must pass through verbatim: %s", got)
+	}
+	if len(out.Silences) != 1 || out.Silences[0] != "test status — not captured in v1" {
+		t.Fatalf("silences must pass through verbatim: %s", got)
+	}
+}
+
 func TestGetStateBriefExplicitRun(t *testing.T) {
 	srv, cap := newBriefTestServer(t, "", http.StatusOK)
 	defer srv.Close()
@@ -63,11 +142,12 @@ func TestGetStateBriefExplicitRun(t *testing.T) {
 	if cap.runCreates != 0 {
 		t.Fatal("an explicit run must not touch run creation")
 	}
-	var sections []map[string]any
-	if err := json.Unmarshal(out.Sections, &sections); err != nil || len(sections) != 1 {
-		t.Fatalf("sections must pass through verbatim: %s", out.Sections)
+	sections, ok := out.Sections.([]any)
+	if !ok || len(sections) != 1 {
+		t.Fatalf("sections must pass through verbatim: %v", out.Sections)
 	}
-	if len(out.Silences) == 0 {
+	silences, ok := out.Silences.([]any)
+	if !ok || len(silences) == 0 {
 		t.Fatal("silences must pass through — they are the honesty half")
 	}
 }
