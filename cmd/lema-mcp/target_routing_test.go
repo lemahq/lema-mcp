@@ -1,0 +1,173 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+type fakeTargetProvider struct {
+	result resolutionResult
+	err    error
+	calls  int
+	input  resolveTargetInput
+}
+
+func (p *fakeTargetProvider) Resolve(_ context.Context, input resolveTargetInput) (resolutionResult, error) {
+	p.calls++
+	p.input = input
+	return p.result, p.err
+}
+
+func TestHostedTargetProviderBindsCredentialDerivedCacheIdentity(t *testing.T) {
+	resolver := &fakeTargetProvider{result: resolutionResult{Status: resolutionUnresolved}}
+	provider := newBoundHostedTargetProvider(resolver, "https://api.bound.test", "lema_live_bound_token")
+
+	_, err := provider.Resolve(context.Background(), resolveTargetInput{
+		APIURL:                "https://api.spoofed.test",
+		CredentialFingerprint: "spoofed-fingerprint",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolver.calls != 1 {
+		t.Fatalf("resolver calls = %d, want 1", resolver.calls)
+	}
+	if got := resolver.input.APIURL; got != "https://api.bound.test" {
+		t.Fatalf("provider accepted caller API URL %q", got)
+	}
+	if got, want := resolver.input.CredentialFingerprint, credentialFingerprint("lema_live_bound_token"); got != want {
+		t.Fatalf("provider accepted caller credential fingerprint %q", got)
+	}
+	if resolver.input.CredentialFingerprint == "lema_live_bound_token" {
+		t.Fatal("provider forwarded the raw token as a cache key")
+	}
+}
+
+func TestWithResolvedTargetCallsOperationWithAnIsolatedReceipt(t *testing.T) {
+	provider := &fakeTargetProvider{result: resolutionResult{
+		Status:  resolutionResolved,
+		Context: validRoutingContext(),
+	}}
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	got, err := withResolvedTarget(context.Background(), provider, resolveTargetInput{}, func(ctx context.Context, receipt targetContext) (string, error) {
+		if receipt.ProjectWorkspaceID != "project-1" || receipt.RepositoryWorkspaceID != "repository-1" {
+			t.Fatalf("operation receipt = %#v", receipt)
+		}
+		receipt.VisibleRepositoryWorkspaceIDs[0] = "mutated"
+		receipt.Evidence[0].Value = "mutated"
+		response, err := server.Client().Get(server.URL)
+		if err != nil {
+			return "", err
+		}
+		defer response.Body.Close()
+		return "routed", nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "routed" || provider.calls != 1 || requests != 1 {
+		t.Fatalf("result=%q provider calls=%d outbound requests=%d", got, provider.calls, requests)
+	}
+	if got := provider.result.Context.VisibleRepositoryWorkspaceIDs[0]; got != "repository-1" {
+		t.Fatalf("operation mutated provider receipt visible repositories: %q", got)
+	}
+	if got := provider.result.Context.Evidence[0].Value; got != "git:example.test/acme/api" {
+		t.Fatalf("operation mutated provider receipt evidence: %q", got)
+	}
+}
+
+func TestWithResolvedTargetRejectsMalformedResolvedReceiptsWithoutRunningOperation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*targetContext)
+	}{
+		{"organization", func(receipt *targetContext) { receipt.OrganizationID = "" }},
+		{"project", func(receipt *targetContext) { receipt.ProjectWorkspaceID = "" }},
+		{"repository workspace", func(receipt *targetContext) { receipt.RepositoryWorkspaceID = "" }},
+		{"canonical repository", func(receipt *targetContext) { receipt.Repository.Canonical = "" }},
+		{"visible primary repository", func(receipt *targetContext) { receipt.VisibleRepositoryWorkspaceIDs = []string{"repository-2"} }},
+		{"resolution rung", func(receipt *targetContext) { receipt.ResolvedBy = "" }},
+		{"evidence", func(receipt *targetContext) { receipt.Evidence = nil }},
+		{"resolution time", func(receipt *targetContext) { receipt.ResolvedAt = time.Time{} }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			receipt := validRoutingContext()
+			test.mutate(&receipt)
+			provider := &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: receipt}}
+			assertTargetGateDoesNotCallOperation(t, provider, resolutionUnresolved)
+		})
+	}
+}
+
+func TestWithResolvedTargetRefusesEveryNonResolvedResultWithoutRunningOperation(t *testing.T) {
+	statuses := []resolutionStatus{resolutionUnresolved, resolutionAmbiguous, resolutionForbidden, resolutionStale}
+	for _, status := range statuses {
+		t.Run(string(status), func(t *testing.T) {
+			provider := &fakeTargetProvider{result: resolutionResult{Status: status, Reason: "token and local path must stay redacted"}}
+			assertTargetGateDoesNotCallOperation(t, provider, status)
+		})
+	}
+}
+
+func TestWithResolvedTargetRefusesResolverErrorWithoutRunningOperation(t *testing.T) {
+	provider := &fakeTargetProvider{err: &targetResolutionError{status: resolutionForbidden, rung: "workspace_lookup"}}
+	assertTargetGateDoesNotCallOperation(t, provider, resolutionForbidden)
+}
+
+func assertTargetGateDoesNotCallOperation(t *testing.T, provider *fakeTargetProvider, wantStatus resolutionStatus) {
+	t.Helper()
+	var requests, operations int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	_, err := withResolvedTarget(context.Background(), provider, resolveTargetInput{}, func(ctx context.Context, receipt targetContext) (struct{}, error) {
+		operations++
+		response, callErr := server.Client().Get(server.URL)
+		if callErr != nil {
+			return struct{}{}, callErr
+		}
+		defer response.Body.Close()
+		return struct{}{}, nil
+	})
+	if err == nil {
+		t.Fatal("gate accepted a non-resolved target")
+	}
+	var typed *targetResolutionError
+	if !errors.As(err, &typed) || typed.status != wantStatus {
+		t.Fatalf("error = %T %v, want redacted target resolution status %q", err, err, wantStatus)
+	}
+	if strings.Contains(err.Error(), "token") || strings.Contains(err.Error(), "path") {
+		t.Fatalf("gate leaked resolution reason: %q", err)
+	}
+	if provider.calls != 1 || operations != 0 || requests != 0 {
+		t.Fatalf("provider calls=%d operations=%d outbound requests=%d, want 1/0/0", provider.calls, operations, requests)
+	}
+}
+
+func validRoutingContext() targetContext {
+	return targetContext{
+		OrganizationID:                "org-1",
+		ProjectWorkspaceID:            "project-1",
+		RepositoryWorkspaceID:         "repository-1",
+		VisibleRepositoryWorkspaceIDs: []string{"repository-1", "repository-2"},
+		Repository:                    repositoryIdentity{Canonical: "git:example.test/acme/api"},
+		ResolvedBy:                    "canonical_git",
+		Evidence:                      []resolutionEvidence{{Kind: "canonical_remote", Value: "git:example.test/acme/api"}},
+		ResolvedAt:                    time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC),
+	}
+}

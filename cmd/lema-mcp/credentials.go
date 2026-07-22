@@ -98,28 +98,50 @@ func readCredentialsFile(path string) (map[string]string, error) {
 // the per-user credentials file for whatever env leaves unset. usedFile
 // reports whether the file contributed anything, for the startup log line.
 func resolveHostedConfig() (apiURL, token string, usedFile bool) {
-	apiURL = os.Getenv("LEMA_API_URL")
-	token = os.Getenv("LEMA_API_TOKEN")
-	if apiURL != "" && token != "" {
-		return apiURL, token, false
+	config := resolveHostedWriteConfig()
+	return config.APIURL, config.Token, config.UsedFile
+}
+
+type hostedWriteConfig struct {
+	APIURL      string
+	Token       string
+	WorkspaceID string
+	UsedFile    bool
+}
+
+// resolveHostedWriteConfig loads all credential-derived write configuration in
+// one pass at the process/subcommand boundary. Operation helpers receive the
+// resulting runtime and never reopen the credentials file.
+func resolveHostedWriteConfig() hostedWriteConfig {
+	config := hostedWriteConfig{
+		APIURL:      strings.TrimSpace(os.Getenv("LEMA_API_URL")),
+		Token:       strings.TrimSpace(os.Getenv("LEMA_API_TOKEN")),
+		WorkspaceID: strings.TrimSpace(os.Getenv(workspaceIDEnv)),
+	}
+	if config.APIURL != "" && config.Token != "" && config.WorkspaceID != "" {
+		return config
 	}
 	creds, err := readCredentialsFile(credentialsPath())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lema-mcp: could not read credentials file: %v\n", err)
-		return apiURL, token, false
+		return config
 	}
 	if creds == nil {
-		return apiURL, token, false
+		return config
 	}
-	if apiURL == "" && creds["LEMA_API_URL"] != "" {
-		apiURL = creds["LEMA_API_URL"]
-		usedFile = true
+	if config.APIURL == "" && creds["LEMA_API_URL"] != "" {
+		config.APIURL = strings.TrimSpace(creds["LEMA_API_URL"])
+		config.UsedFile = true
 	}
-	if token == "" && creds["LEMA_API_TOKEN"] != "" {
-		token = creds["LEMA_API_TOKEN"]
-		usedFile = true
+	if config.Token == "" && creds["LEMA_API_TOKEN"] != "" {
+		config.Token = strings.TrimSpace(creds["LEMA_API_TOKEN"])
+		config.UsedFile = true
 	}
-	return apiURL, token, usedFile
+	if config.WorkspaceID == "" && creds[workspaceIDEnv] != "" {
+		config.WorkspaceID = strings.TrimSpace(creds[workspaceIDEnv])
+		config.UsedFile = true
+	}
+	return config
 }
 
 // resolveWorkspaceID resolves the hosted capture/frontload target workspace:

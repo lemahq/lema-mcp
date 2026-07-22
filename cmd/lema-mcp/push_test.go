@@ -368,12 +368,6 @@ func TestPushDecisions_RequestShapeAndAuth(t *testing.T) {
 	var gotMethod, gotPath, gotAuth, gotCT string
 	var gotReq pushRequest
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /workspaces", func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer lema_live_abc" {
-			t.Errorf("workspace validation auth = %q", got)
-		}
-		_, _ = w.Write([]byte(`{"workspaces":[{"id":"11111111-1111-1111-1111-111111111111"}]}`))
-	})
 	mux.HandleFunc("POST /workspaces/11111111-1111-1111-1111-111111111111/import-decisions", func(w http.ResponseWriter, r *http.Request) {
 		gotMethod, gotPath = r.Method, r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
@@ -386,8 +380,6 @@ func TestPushDecisions_RequestShapeAndAuth(t *testing.T) {
 	defer srv.Close()
 
 	recs := []pushRecord{{ID: "d_x", Title: "Redis", Chosen: "Redis", Status: "proposed", Refs: []string{"cache.go"}}}
-	// UUIDs are explicit identifiers, not authority: the visible listing must
-	// validate one before the import POST is built.
 	resp, err := pushDecisions(context.Background(), srv.Client(), srv.URL, "lema_live_abc", "11111111-1111-1111-1111-111111111111", recs)
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -413,48 +405,6 @@ func TestPushDecisions_RequestShapeAndAuth(t *testing.T) {
 	}
 	if resp.RecordedBy != "agent" {
 		t.Errorf("recordedBy = %q, want agent (client must render the honest provenance)", resp.RecordedBy)
-	}
-}
-
-// The dogfood-found bug (2026-07-21): record_decision / the import-decisions push
-// hit /workspaces/{id}/import-decisions with the RAW configured LEMA_WORKSPACE_ID,
-// but the authed route parses {id} as a UUID — a slug (lemahq-lema) 400'd and the
-// capture fell back to a silent local draft (surfaces in search, never binds, not
-// in the team corpus). pushDecisions must resolve slug→id via the credential's own
-// GET /workspaces listing before building the URL — the same fix the collector sync
-// got in a9ca2c5.
-func TestPushDecisions_ResolvesSlugWorkspace(t *testing.T) {
-	resetWorkspaceUUIDCache(t)
-
-	const wsUUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-	var gotImportPath string
-	var listed int
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /workspaces", func(w http.ResponseWriter, r *http.Request) {
-		listed++
-		_, _ = w.Write([]byte(`{"workspaces":[{"id":"` + wsUUID + `","slug":"lemahq-lema","name":"lemahq/lema"}]}`))
-	})
-	mux.HandleFunc("POST /workspaces/"+wsUUID+"/import-decisions", func(w http.ResponseWriter, r *http.Request) {
-		gotImportPath = r.URL.Path
-		_ = json.NewEncoder(w).Encode(pushResponse{Created: 1, RecordedBy: "agent",
-			Results: []pushResult{{LocalID: "d_x", Status: "created"}}})
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	recs := []pushRecord{{ID: "d_x", Title: "Redis", Chosen: "Redis", Status: "proposed"}}
-	resp, err := pushDecisions(context.Background(), srv.Client(), srv.URL, "lema_live_abc", "lemahq-lema", recs)
-	if err != nil {
-		t.Fatalf("slug must resolve and push, got err: %v", err)
-	}
-	if gotImportPath != "/workspaces/"+wsUUID+"/import-decisions" {
-		t.Fatalf("import must hit the resolved UUID path, got %q", gotImportPath)
-	}
-	if resp.Created != 1 {
-		t.Fatalf("created = %d, want 1", resp.Created)
-	}
-	if listed != 1 {
-		t.Fatalf("workspace listing should be fetched exactly once (memoized), got %d", listed)
 	}
 }
 

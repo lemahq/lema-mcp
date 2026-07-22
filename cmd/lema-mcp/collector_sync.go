@@ -36,27 +36,33 @@ type collectorSyncer struct {
 	token       string
 	workspaceID string
 	client      *http.Client
+	runtime     *hostedWriteRuntime
 }
 
-// newCollectorSyncer resolves hosted config. URL/token follow the usual
-// env-first-then-file precedence (identity is per-user). The TARGET WORKSPACE
-// comes from process env — the project-scoped .mcp.json channel — never the
-// per-user credentials file: an ambient hook firing in every project would
-// otherwise silently write every project's run state into whatever workspace
-// the global file names (the exact wrong-corpus foot-gun settle warns about
-// interactively; a hook cannot ask, so it refuses instead). When the env pin
-// is unset the workspace is DERIVED from the run's git remote at sync time
-// (decision d_d9caf0) — so an empty workspaceID is NOT a bail-out here, only a
-// missing URL/token is. nil = not configured — the caller skips silently.
+// newCollectorSyncer constructs the shared write runtime once for callers that
+// do not already have checkpoint cwd evidence. Boundary sync uses
+// newCollectorSyncerForCWD so a local association is loaded against the
+// checkpoint's immutable evidence rather than the hook process's ambient cwd.
 func newCollectorSyncer() *collectorSyncer {
-	apiURL, token, _ := resolveHostedConfig()
-	if apiURL == "" || token == "" {
+	return newCollectorSyncerForCWD("")
+}
+
+// newCollectorSyncerForCWD loads credentials once and builds the same hosted
+// target provider used by every other state-changing operation. A workspace
+// value from the credentials file is intentionally not treated as a collector
+// target: only the process environment is an explicit hook override.
+func newCollectorSyncerForCWD(cwd string) *collectorSyncer {
+	config := resolveHostedWriteConfig()
+	if config.APIURL == "" || config.Token == "" {
 		return nil
 	}
+	client := &http.Client{Timeout: collectorSyncTimeout}
+	runtime := newHostedWriteRuntime(client, config.APIURL, config.Token, strings.TrimSpace(os.Getenv(workspaceIDEnv)), cwd)
 	return &collectorSyncer{
-		apiURL: apiURL, token: token,
-		workspaceID: strings.TrimSpace(os.Getenv(workspaceIDEnv)), // "" → derived from cwd at sync time
-		client:      &http.Client{Timeout: collectorSyncTimeout},
+		apiURL:  runtime.apiURL,
+		token:   runtime.token,
+		client:  runtime.client,
+		runtime: &runtime,
 	}
 }
 
@@ -167,33 +173,16 @@ func (s *collectorSyncer) resolveWorkspaceUUID(ctx context.Context) (string, err
 	return resolveWorkspaceValueUUID(ctx, s.client, s.apiURL, s.token, s.workspaceID)
 }
 
-// resolveTargetUUID picks the sync's target workspace and resolves it to the
-// UUID the API's path parser requires. The env pin (LEMA_WORKSPACE_ID, via
-// .mcp.json) is the override and wins whenever set; otherwise the workspace is
-// DERIVED from the run's git remote — the owner/repo in cwd forms the
-// repo-anchored slug (decision d_d9caf0), verified by resolveWorkspaceValueUUID
-// against the credential's listing. No pin and no derivable remote is an error
-// the caller ignores (fail-open) — the env pin stays the escape hatch, and a
-// derived slug this credential cannot see resolves to nothing rather than a
-// wrong-corpus write.
-func (s *collectorSyncer) resolveTargetUUID(ctx context.Context, cwd string) (string, error) {
-	v := strings.TrimSpace(s.workspaceID)
-	if v == "" {
-		slug, ok := deriveWorkspaceSlug(cwd)
-		if !ok {
-			return "", fmt.Errorf("no %s set and no git remote in %q to derive a workspace from", workspaceIDEnv, cwd)
-		}
-		v = slug
-	}
-	return resolveWorkspaceValueUUID(ctx, s.client, s.apiURL, s.token, v)
+func (s *collectorSyncer) post(ctx context.Context, path string, body any) (int, []byte, error) {
+	return s.postToWorkspace(ctx, s.workspaceID, path, body)
 }
 
-func (s *collectorSyncer) post(ctx context.Context, path string, body any) (int, []byte, error) {
+func (s *collectorSyncer) postToWorkspace(ctx context.Context, workspaceID, path string, body any) (int, []byte, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return 0, nil, err
 	}
-	url := strings.TrimRight(s.apiURL, "/") + "/workspaces/" + s.workspaceID + path
+	url := strings.TrimRight(s.apiURL, "/") + "/workspaces/" + workspaceID + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
 	if err != nil {
 		return 0, nil, err
@@ -209,6 +198,11 @@ func (s *collectorSyncer) post(ctx context.Context, path string, body any) (int,
 	return resp.StatusCode, respBody, nil
 }
 
+type collectorRunIdentity struct {
+	ID         string
+	WorkUnitID string
+}
+
 // ensureRun creates (or re-finds — CreateRun is idempotent on
 // harness+external_run_id) the hosted run identity and returns its id. It feeds
 // the server-side association ladder its rung-3/4 inputs: repo ("owner/name")
@@ -218,8 +212,13 @@ func (s *collectorSyncer) post(ctx context.Context, path string, body any) (int,
 // empty repo/branch and the run lands rung-7 exactly as before (decision
 // 5025ffb7, implementing d_d9caf0 — repo-on-run-create).
 func (s *collectorSyncer) ensureRun(ctx context.Context, harness, externalRunID, cwd string) (string, error) {
+	identity, err := s.ensureRunInWorkspace(ctx, s.workspaceID, harness, externalRunID, cwd)
+	return identity.ID, err
+}
+
+func (s *collectorSyncer) ensureRunInWorkspace(ctx context.Context, workspaceID, harness, externalRunID, cwd string) (collectorRunIdentity, error) {
 	repo, branch := deriveRunGitContext(cwd)
-	status, body, err := s.post(ctx, "/runs", map[string]string{
+	status, body, err := s.postToWorkspace(ctx, workspaceID, "/runs", map[string]string{
 		"harness":         harness,
 		"external_run_id": externalRunID,
 		"repo":            repo,
@@ -227,58 +226,69 @@ func (s *collectorSyncer) ensureRun(ctx context.Context, harness, externalRunID,
 		"worktree":        cwd,
 	})
 	if err != nil {
-		return "", err
+		return collectorRunIdentity{}, err
 	}
 	if status != http.StatusOK && status != http.StatusCreated {
-		return "", fmt.Errorf("create run: HTTP %d", status)
+		return collectorRunIdentity{}, fmt.Errorf("create run: HTTP %d", status)
 	}
 	var out struct {
 		Run struct {
-			ID string `json:"id"`
+			ID         string `json:"id"`
+			WorkUnitID string `json:"work_unit_id"`
 		} `json:"run"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil || out.Run.ID == "" {
-		return "", fmt.Errorf("create run: no id in response")
+		return collectorRunIdentity{}, fmt.Errorf("create run: no id in response")
 	}
-	return out.Run.ID, nil
+	return collectorRunIdentity{ID: out.Run.ID, WorkUnitID: out.Run.WorkUnitID}, nil
 }
 
 // syncCheckpoint lands the distilled checkpoint on the hosted run journal.
 // Every failure path returns an error the caller ignores (fail-open); the
 // server's in-tx subsumption makes repeated syncs safe.
 func (s *collectorSyncer) syncCheckpoint(ctx context.Context, harness string, cp collectorCheckpoint) error {
-	uuid, err := s.resolveTargetUUID(ctx, cp.CWD)
-	if err != nil {
-		return err
+	if s.runtime == nil {
+		return fmt.Errorf("collector sync target runtime is not configured")
 	}
-	s.workspaceID = uuid
-	runID, err := s.ensureRun(ctx, harness, cp.RunID, cp.CWD)
-	if err != nil {
-		return err
+	input := s.runtime.targetInput
+	if input.CWD != cp.CWD {
+		// A receipt-local association is only evidence for the cwd that loaded
+		// it. A direct test or legacy caller with another cwd must re-resolve
+		// from the checkpoint rather than inherit ambient process state.
+		input.CWD = cp.CWD
+		input.LocalAssociation = nil
+		input.PersistedAssociation = false
 	}
-	payload := map[string]any{
-		"summary":     cp.Summary,
-		"cwd":         cp.CWD,
-		"event_count": cp.EventCount,
-		"updated_at":  cp.UpdatedAt,
-	}
-	if len(cp.RecentPrompts) > 0 {
-		payload["recent_prompts"] = cp.RecentPrompts
-	}
-	if len(cp.FilesTouched) > 0 {
-		payload["files_touched"] = cp.FilesTouched
-	}
-	status, _, err := s.post(ctx, "/runs/"+runID+"/events", map[string]any{
-		"kind":    "checkpoint",
-		"payload": payload,
+	_, err := withResolvedTarget(ctx, s.runtime.targets, input, func(ctx context.Context, receipt targetContext) (struct{}, error) {
+		run, err := s.ensureRunInWorkspace(ctx, receipt.ProjectWorkspaceID, harness, cp.RunID, cp.CWD)
+		if err != nil {
+			return struct{}{}, err
+		}
+		payload := map[string]any{
+			"summary":     cp.Summary,
+			"cwd":         cp.CWD,
+			"event_count": cp.EventCount,
+			"updated_at":  cp.UpdatedAt,
+		}
+		if len(cp.RecentPrompts) > 0 {
+			payload["recent_prompts"] = cp.RecentPrompts
+		}
+		if len(cp.FilesTouched) > 0 {
+			payload["files_touched"] = cp.FilesTouched
+		}
+		status, _, err := s.postToWorkspace(ctx, receipt.ProjectWorkspaceID, "/runs/"+run.ID+"/events", map[string]any{
+			"kind":    "checkpoint",
+			"payload": payload,
+		})
+		if err != nil {
+			return struct{}{}, err
+		}
+		if status != http.StatusCreated {
+			return struct{}{}, fmt.Errorf("append checkpoint: HTTP %d", status)
+		}
+		return struct{}{}, nil
 	})
-	if err != nil {
-		return err
-	}
-	if status != http.StatusCreated {
-		return fmt.Errorf("append checkpoint: HTTP %d", status)
-	}
-	return nil
+	return err
 }
 
 // syncOnBoundary is runCollect's hook into the hosted half: after a boundary
@@ -295,14 +305,14 @@ func syncOnBoundary(dir, harness string, ev collectorEnvelope) {
 	if cwd == "" {
 		return
 	}
-	s := newCollectorSyncer()
-	if s == nil {
-		return
-	}
 	cp, ok := readCollectorCheckpoint(dir, cwd, time.Now())
 	if !ok || cp.RunID != ev.RunID {
 		// Sync only the checkpoint THIS run just produced — never re-send
 		// another run's state under this run's identity.
+		return
+	}
+	s := newCollectorSyncerForCWD(cp.CWD)
+	if s == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), collectorSyncTimeout)

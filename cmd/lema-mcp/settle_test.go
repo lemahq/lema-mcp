@@ -9,6 +9,7 @@ package main
 // these fail.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -52,6 +53,11 @@ func newSettleTestServer(t *testing.T) (*httptest.Server, *[]map[string]any) {
 	t.Helper()
 	var appended []map[string]any
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /workspaces", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"workspaces": []map[string]any{{
+			"id": "ws-test", "slug": "test-repo", "org_id": "org-test", "repo_url": "https://example.test/acme/repo.git", "is_repo": true,
+		}}})
+	})
 	mux.HandleFunc("GET /decisions/", func(w http.ResponseWriter, r *http.Request) {
 		id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/decisions/"), "/")
 		switch id {
@@ -105,6 +111,14 @@ func settleEnv(t *testing.T, apiURL string) {
 	t.Setenv("LEMA_API_TOKEN", "test-token")
 	t.Setenv(workspaceIDEnv, "ws-test")
 	t.Setenv("HOME", t.TempDir()) // never read the operator's real credentials file
+}
+
+func runSettle(args []string) error {
+	runtime, _, err := loadHostedWriteRuntime(settleTimeout)
+	if err != nil {
+		return err
+	}
+	return settleWithTarget(context.Background(), runtime, args)
 }
 
 func TestSettleAcceptDraftsAndPrintsBindLink(t *testing.T) {
@@ -218,6 +232,11 @@ func newSettlePrefixTestServer(t *testing.T) (*httptest.Server, *[]map[string]an
 	var appended []map[string]any
 	compact := func(id string) string { return strings.ReplaceAll(id, "-", "") }
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /workspaces", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"workspaces": []map[string]any{{
+			"id": "ws-test", "slug": "test-repo", "org_id": "org-test", "repo_url": "https://example.test/acme/repo.git", "is_repo": true,
+		}}})
+	})
 	mux.HandleFunc("GET /workspaces/", func(w http.ResponseWriter, r *http.Request) {
 		var out []map[string]any
 		if p := r.URL.Query().Get("id_prefix"); p != "" {

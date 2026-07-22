@@ -247,7 +247,7 @@ func TestRecorder_RequiresTitleAndChosen(t *testing.T) {
 // The recorder routes to the hosted sink when one is set (hosted mode).
 func TestRecorder_RoutesToHostedSink(t *testing.T) {
 	called := false
-	r := recorder{pushHosted: func(_ context.Context, dr source.DecisionRecord) (recordOutput, error) {
+	r := recorder{targets: &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: validRoutingContext()}}, pushHosted: func(_ context.Context, _ targetContext, dr source.DecisionRecord) (recordOutput, error) {
 		called = true
 		return recordOutput{ID: "h1", Status: "proposed", Recorded: "drafted; accept in-app"}, nil
 	}}
@@ -325,7 +325,7 @@ func TestHttpRecord_RoutesThroughRecorder(t *testing.T) {
 
 	called := false
 	capture = nil // httpRecord must not touch the local store directly
-	decisionRecorder = recorder{pushHosted: func(_ context.Context, dr source.DecisionRecord) (recordOutput, error) {
+	decisionRecorder = recorder{targets: &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: validRoutingContext()}}, pushHosted: func(_ context.Context, _ targetContext, dr source.DecisionRecord) (recordOutput, error) {
 		called = true
 		return recordOutput{ID: "dec_1", Status: "proposed", Recorded: "drafted; accept in inbox"}, nil
 	}}

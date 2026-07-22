@@ -61,7 +61,7 @@ func TestProposeHostedRoutesThroughRecorderPush(t *testing.T) {
 	t.Cleanup(func() { decisionRecorder = prev })
 
 	var got source.DecisionRecord
-	decisionRecorder = recorder{pushHosted: func(_ context.Context, dr source.DecisionRecord) (recordOutput, error) {
+	decisionRecorder = recorder{targets: &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: validRoutingContext()}}, pushHosted: func(_ context.Context, _ targetContext, dr source.DecisionRecord) (recordOutput, error) {
 		got = dr
 		return recordOutput{ID: "dec_9", Status: "proposed", Recorded: "drafted"}, nil
 	}}
@@ -92,7 +92,8 @@ func TestProposeHostedFailureFallsBackToLocalDraft(t *testing.T) {
 	}
 	decisionRecorder = recorder{
 		capture: cs,
-		pushHosted: func(_ context.Context, _ source.DecisionRecord) (recordOutput, error) {
+		targets: &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: validRoutingContext()}},
+		pushHosted: func(_ context.Context, _ targetContext, _ source.DecisionRecord) (recordOutput, error) {
 			return recordOutput{}, errors.New("api unreachable")
 		},
 	}
