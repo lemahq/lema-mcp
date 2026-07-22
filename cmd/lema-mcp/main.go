@@ -659,7 +659,7 @@ func main() {
 	// already uses (try.go) — it shipped nil, priming agents with nothing (ADR-0124,
 	// the v1 read wedge). Steering rides instructions, never the tool descriptions.
 	server := mcp.NewServer(
-		&mcp.Implementation{Name: "lema-mcp", Version: "0.20.0"},
+		&mcp.Implementation{Name: "lema-mcp", Version: "0.21.0"},
 		&mcp.ServerOptions{Instructions: authedServerInstructions},
 	)
 	mcp.AddTool(server, searchDecisionsTool, searchDecisions)
