@@ -45,7 +45,7 @@ func runDoctorContext(ctx context.Context, options doctorContextOptions) error {
 		options.CWD, _ = os.Getwd()
 	}
 	if options.ReadGit == nil {
-		options.ReadGit = readDoctorGitEvidence
+		options.ReadGit = readContextGitEvidence
 	}
 
 	if strings.TrimSpace(options.APIURL) == "" || strings.TrimSpace(options.Token) == "" {
@@ -66,6 +66,21 @@ func runDoctorContext(ctx context.Context, options doctorContextOptions) error {
 			return fmt.Errorf("target context %s", targetResolutionStatusFromError(err))
 		}
 	}
+	var localAssociation *targetContext
+	if explicitWorkspaceID == "" {
+		association, found, err := loadContextAssociation(options.CWD, options.ReadGit)
+		if err != nil {
+			if found && isContextAssociationStale(err) {
+				writeDoctorFailure(out, resolutionStale, "local_association", "run lema-mcp context unlink to preserve a backup, then link this repository")
+				return fmt.Errorf("target context stale")
+			}
+			writeDoctorFailure(out, resolutionUnresolved, "local_association", doctorHostedLookupAction)
+			return fmt.Errorf("target context unresolved")
+		}
+		if found {
+			localAssociation = &association
+		}
+	}
 	resolver := newHostedTargetResolver(client, options.APIURL, options.Token)
 	resolver.readGit = options.ReadGit
 	result, err := resolver.Resolve(ctx, resolveTargetInput{
@@ -73,6 +88,8 @@ func runDoctorContext(ctx context.Context, options doctorContextOptions) error {
 		CredentialFingerprint: credentialFingerprint(options.Token),
 		ExplicitWorkspaceID:   explicitWorkspaceID,
 		CWD:                   options.CWD,
+		LocalAssociation:      localAssociation,
+		PersistedAssociation:  localAssociation != nil,
 	})
 	if err != nil {
 		status := targetResolutionStatusFromError(err)

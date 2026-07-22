@@ -63,10 +63,12 @@ type resolveTargetInput struct {
 	OrganizationID        string
 	ExplicitWorkspaceID   string
 	ExplicitProjectID     string
+	ExplicitRepositoryID  string
 	ExplicitRepository    repositoryIdentity
 	RunID                 string
 	CWD                   string
 	LocalAssociation      *targetContext
+	PersistedAssociation  bool
 }
 
 // targetWorkspace is the pure representation supplied by a future adapter for
@@ -132,6 +134,18 @@ func (r *targetResolver) Resolve(ctx context.Context, in resolveTargetInput) (re
 					}
 				}
 				res, err := r.resolveRepository(ctx, in, identity, "canonical_git")
+				if err == nil && in.PersistedAssociation && in.LocalAssociation != nil && (res.Status == resolutionResolved || res.Status == resolutionAmbiguous) {
+					validated, validateErr := r.validateContext(ctx, in, *in.LocalAssociation, "local_association")
+					if validateErr != nil || validated.Status != resolutionResolved {
+						return validated, validateErr
+					}
+					if res.Status == resolutionAmbiguous {
+						return validated, nil
+					}
+					if validated.Context.ProjectWorkspaceID != res.Context.ProjectWorkspaceID || validated.Context.RepositoryWorkspaceID != res.Context.RepositoryWorkspaceID {
+						return resolutionResult{Status: resolutionStale, Reason: "local association no longer matches the canonical repository target"}, nil
+					}
+				}
 				if err != nil || res.Status != resolutionUnresolved {
 					if err == nil && res.Status == resolutionResolved {
 						res.Context.Evidence = append(res.Context.Evidence, gitEvidence(in, git)...)
@@ -154,7 +168,7 @@ func (r *targetResolver) Resolve(ctx context.Context, in resolveTargetInput) (re
 }
 
 func hasExplicitTarget(in resolveTargetInput) bool {
-	return in.ExplicitWorkspaceID != "" || in.ExplicitProjectID != "" || in.ExplicitRepository.Canonical != ""
+	return in.ExplicitWorkspaceID != "" || in.ExplicitProjectID != "" || in.ExplicitRepositoryID != "" || in.ExplicitRepository.Canonical != ""
 }
 
 func (r *targetResolver) resolveExplicit(ctx context.Context, in resolveTargetInput) (resolutionResult, error) {
@@ -179,6 +193,18 @@ func (r *targetResolver) resolveExplicit(ctx context.Context, in resolveTargetIn
 			return r.resolveRepositoryWithWorkspaces(ctx, in, workspace, workspaces, in.ExplicitProjectID, "explicit")
 		}
 		return resolutionResult{Status: resolutionStale, Reason: "explicit workspace is no longer visible"}, nil
+	}
+	if in.ExplicitRepositoryID != "" {
+		for _, workspace := range workspaces {
+			if workspace.ID != in.ExplicitRepositoryID {
+				continue
+			}
+			if workspace.Archived || !workspace.IsRepository || !r.workspaceInOrganization(in, workspace) {
+				return resolutionResult{Status: resolutionStale, Reason: "explicit repository is not an active visible repository"}, nil
+			}
+			return r.resolveRepositoryWithWorkspaces(ctx, in, workspace, workspaces, in.ExplicitProjectID, "explicit")
+		}
+		return resolutionResult{Status: resolutionForbidden, Reason: "explicit repository is not visible to this credential"}, nil
 	}
 	if in.ExplicitRepository.Canonical == "" && in.ExplicitProjectID != "" {
 		return r.resolveExplicitProject(ctx, in, workspaces)
