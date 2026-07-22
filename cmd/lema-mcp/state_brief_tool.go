@@ -11,15 +11,17 @@
 // state it is resuming. No checkpoint and no explicit run = an honest
 // "no prior run known", never a fabricated scope.
 //
-// Workspace resolution matches the REST of the MCP server (env then the
-// per-user credentials file): this is an explicitly configured, per-project
-// server the operator launched — not the ambient hook, whose env-only rule
-// (collector_sync.go) exists because a hook fires everywhere unattended.
+// Target resolution uses the process-hosted runtime and the same immutable,
+// validated receipt as every other hosted operation. A legacy workspace value
+// remains an explicit override; without one, verified Git or a validated local
+// association can resolve the Project. Resolution failure never becomes an
+// unscoped brief request.
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -62,21 +64,7 @@ var getStateBriefTool = &mcp.Tool{
 	Annotations: readOnlyExternal("Get the State Brief (hosted)"),
 }
 
-const stateBriefTimeout = 10 * time.Second
-
-// briefClient reuses the collector syncer's HTTP shape with the MCP server's
-// own workspace resolution (see the file header for why they differ).
-func newBriefClient() *collectorSyncer {
-	apiURL, token, _ := resolveHostedConfig()
-	workspaceID := resolveWorkspaceID()
-	if apiURL == "" || token == "" || workspaceID == "" {
-		return nil
-	}
-	return &collectorSyncer{
-		apiURL: apiURL, token: token, workspaceID: workspaceID,
-		client: &http.Client{Timeout: stateBriefTimeout},
-	}
-}
+var errNoPriorStateBriefRun = errors.New("no prior run known for this project")
 
 func (s *collectorSyncer) get(ctx context.Context, path string) (int, []byte, error) {
 	url := strings.TrimRight(s.apiURL, "/") + "/workspaces/" + s.workspaceID + path
@@ -96,7 +84,7 @@ func (s *collectorSyncer) get(ctx context.Context, path string) (int, []byte, er
 
 // resolvePriorRun finds this project's prior run via the local F4 checkpoint
 // and returns its hosted run UUID (creating the identity idempotently).
-func resolvePriorRun(ctx context.Context, s *collectorSyncer) (runID, note string, err error) {
+func resolvePriorRun(ctx context.Context, s *collectorSyncer, receipt targetContext) (runID, note string, err error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", "", fmt.Errorf("cwd unresolvable: %w", err)
@@ -115,7 +103,7 @@ func resolvePriorRun(ctx context.Context, s *collectorSyncer) (runID, note strin
 		}
 	}
 	if !ok {
-		return "", "", fmt.Errorf("no prior run known for this project (no local checkpoint under %s)", cwd)
+		return "", "", errNoPriorStateBriefRun
 	}
 	harness := cp.Harness
 	if harness == "" {
@@ -123,11 +111,11 @@ func resolvePriorRun(ctx context.Context, s *collectorSyncer) (runID, note strin
 		// shipped with only this adapter, so the key is stable.
 		harness = "claude-code"
 	}
-	hosted, err := s.ensureRun(ctx, harness, cp.RunID, cp.CWD)
+	hosted, err := s.ensureRunInWorkspace(ctx, receipt.ProjectWorkspaceID, harness, cp.RunID, cp.CWD)
 	if err != nil {
 		return "", "", err
 	}
-	return hosted, fmt.Sprintf("resolved from this project's prior session %s (%s)", cp.RunID, harness), nil
+	return hosted.ID, fmt.Sprintf("resolved from this project's prior session %s (%s)", cp.RunID, harness), nil
 }
 
 // stateBrief is the ONE code path the State Brief serves from — workspace
@@ -138,29 +126,50 @@ func resolvePriorRun(ctx context.Context, s *collectorSyncer) (runID, note strin
 // surface served. Every can't-serve path is an honest note in the output,
 // never an error — a fresh session should read state, not a failure.
 func stateBrief(ctx context.Context, run, caller string) stateBriefOutput {
-	s := newBriefClient()
-	if s == nil {
+	runtime, err := currentHostedRuntime()
+	if err != nil {
 		return stateBriefOutput{
-			Note: "state brief unavailable: hosted mode is not configured (LEMA_API_URL / LEMA_API_TOKEN / LEMA_WORKSPACE_ID)",
+			Note: "state brief unavailable: hosted mode is not configured (LEMA_API_URL / LEMA_API_TOKEN)",
 		}
 	}
-	if wsUUID, err := s.resolveWorkspaceUUID(ctx); err != nil {
+	return stateBriefWithRuntime(ctx, runtime, run, caller)
+}
+
+// stateBriefWithRuntime is the operation seam: one process-owned provider
+// resolves one immutable receipt before prior-Run resolution or any operation
+// HTTP. Both Run identity and /brief use the receipt's Project workspace; the
+// primary repository remains in the receipt and in the redacted diagnostic.
+func stateBriefWithRuntime(ctx context.Context, runtime hostedWriteRuntime, run, caller string) stateBriefOutput {
+	out, err := withResolvedTarget(ctx, runtime.targets, runtime.targetInput, func(ctx context.Context, receipt targetContext) (stateBriefOutput, error) {
+		s := &collectorSyncer{
+			apiURL: runtime.apiURL, token: runtime.token,
+			workspaceID: receipt.ProjectWorkspaceID, client: runtime.client,
+		}
+		return stateBriefForReceipt(ctx, s, receipt, run, caller), nil
+	})
+	if err != nil {
 		return stateBriefOutput{Note: "state brief unavailable: " + err.Error()}
-	} else {
-		s.workspaceID = wsUUID
 	}
+	return out
+}
+
+func stateBriefForReceipt(ctx context.Context, s *collectorSyncer, receipt targetContext, run, caller string) stateBriefOutput {
 	runID := strings.TrimSpace(run)
 	note := "explicit run id"
 	if runID == "" {
 		var err error
-		runID, note, err = resolvePriorRun(ctx, s)
+		runID, note, err = resolvePriorRun(ctx, s, receipt)
 		if err != nil {
-			return stateBriefOutput{Note: "state brief unavailable: " + err.Error()}
+			failure := "prior run could not be resolved"
+			if errors.Is(err, errNoPriorStateBriefRun) {
+				failure = errNoPriorStateBriefRun.Error()
+			}
+			return stateBriefOutput{Note: stateBriefReceiptNote("state brief unavailable: "+failure, receipt)}
 		}
 	}
 	status, body, err := s.get(ctx, "/brief?run="+url.QueryEscape(runID))
 	if err != nil {
-		return stateBriefOutput{Note: "state brief unavailable: " + err.Error()}
+		return stateBriefOutput{Note: stateBriefReceiptNote("state brief unavailable: hosted request failed", receipt)}
 	}
 	switch status {
 	case http.StatusOK:
@@ -168,10 +177,10 @@ func stateBrief(ctx context.Context, run, caller string) stateBriefOutput {
 		// The dark flag and an unknown run are indistinguishable by design
 		// (the surface 404s while lema-state-brief is off) — say both.
 		return stateBriefOutput{
-			Note: "state brief unavailable: the server has no brief for this run (the surface may not be enabled yet, or the run is unknown)",
+			Note: stateBriefReceiptNote("state brief unavailable: the server has no brief for this run (the surface may not be enabled yet, or the run is unknown)", receipt),
 		}
 	default:
-		return stateBriefOutput{Note: fmt.Sprintf("state brief unavailable: HTTP %d", status)}
+		return stateBriefOutput{Note: stateBriefReceiptNote(fmt.Sprintf("state brief unavailable: HTTP %d", status), receipt)}
 	}
 	var wire struct {
 		Scope    string          `json:"scope"`
@@ -180,9 +189,9 @@ func stateBrief(ctx context.Context, run, caller string) stateBriefOutput {
 		AsOf     string          `json:"as_of"`
 	}
 	if err := json.Unmarshal(body, &wire); err != nil {
-		return stateBriefOutput{Note: "state brief unavailable: unreadable server response"}
+		return stateBriefOutput{Note: stateBriefReceiptNote("state brief unavailable: unreadable server response", receipt)}
 	}
-	out := stateBriefOutput{Scope: wire.Scope, AsOf: wire.AsOf, Note: note}
+	out := stateBriefOutput{Scope: wire.Scope, AsOf: wire.AsOf, Note: stateBriefReceiptNote(note, receipt)}
 	// The sub-messages are valid JSON (the outer unmarshal succeeded), so these
 	// decodes cannot fail; a nil/absent field stays nil and is omitted.
 	if len(wire.Sections) > 0 {
@@ -193,6 +202,16 @@ func stateBrief(ctx context.Context, run, caller string) stateBriefOutput {
 	}
 	logUsage(caller, note, 1, out)
 	return out
+}
+
+// stateBriefReceiptNote carries the receipt's primary repository provenance
+// without exposing full workspace ids, tokens, endpoints, or local paths.
+func stateBriefReceiptNote(note string, receipt targetContext) string {
+	return fmt.Sprintf(
+		"%s; target resolved by %s; project UUID ending %s; primary repository %s; repository UUID ending %s",
+		note, receipt.ResolvedBy, redactedUUIDSuffix(receipt.ProjectWorkspaceID),
+		receipt.Repository.Canonical, redactedUUIDSuffix(receipt.RepositoryWorkspaceID),
+	)
 }
 
 func getStateBrief(ctx context.Context, req *mcp.CallToolRequest, in stateBriefInput) (*mcp.CallToolResult, stateBriefOutput, error) {
