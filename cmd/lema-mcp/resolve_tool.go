@@ -35,7 +35,7 @@ type resolveInput struct {
 	Query        string   `json:"query,omitempty" jsonschema:"why-mode: the natural-language question; id-mode: the search query when no number is given"`
 	Approach     string   `json:"approach,omitempty" jsonschema:"approach-mode: the option, library, pattern, or design being weighed against the recorded rejections"`
 	Number       int      `json:"number,omitempty" jsonschema:"id-mode: an ADR number to fetch one record's detail; omit to search by query instead"`
-	WorkspaceIDs []string `json:"workspace_ids,omitempty" jsonschema:"optional workspace ids to scope the read to; omit to read every workspace you can see"`
+	WorkspaceIDs []string `json:"workspace_ids,omitempty" jsonschema:"workspace ids may only narrow within the resolved Project repository set; omit to use the complete resolved Project repository set"`
 }
 
 // resolveOutput is the unified envelope. Exactly one mode payload is populated
@@ -58,6 +58,7 @@ var resolveTool = &mcp.Tool{
 		"approach-mode returns a typed verdict on one option — ruled_out when a binding prior decision governs it, " +
 		"not_ruled_out otherwise — with the governing decision and its recorded why; " +
 		"id-mode returns one decision's full detail by ADR number, or the most relevant claims for a natural-language query. " +
+		"When workspace_ids is omitted, hosted reads use the resolved Project repository set; supplied workspace_ids only narrow within that set. " +
 		"The single read over the record; the mode-specific tools remain as aliases.",
 	// Open-world: why-mode reaches the hosted API. approach/id also serve over
 	// the local record, but the network reach makes external the honest hint.
@@ -105,7 +106,7 @@ func resolve(ctx context.Context, req *mcp.CallToolRequest, in resolveInput) (*m
 			}
 			return nil, resolveOutput{Intent: "id", Record: &g}, nil
 		}
-		_, s, err := searchDecisions(ctx, req, searchInput{Query: in.Query})
+		_, s, err := searchDecisions(ctx, req, searchInput{Query: in.Query, WorkspaceIDs: in.WorkspaceIDs})
 		if err != nil {
 			return nil, resolveOutput{Intent: "id"}, err
 		}

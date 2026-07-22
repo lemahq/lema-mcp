@@ -53,18 +53,19 @@ func isolateHostedEnv(t *testing.T) {
 	t.Setenv("LEMA_WORKSPACE_ID", "")
 }
 
-func TestGuardRefreshWritesCacheScopedToResolvedPin(t *testing.T) {
+func TestGuardRefreshWritesCacheScopedToResolvedReceipt(t *testing.T) {
 	isolateHostedEnv(t)
 	const uuid = "b691e8ae-1111-4222-8333-444455556666"
 	var gotScope []string
 	ts := closedAtomsServer(t, []map[string]string{{"id": uuid, "slug": "lemahq-lema"}}, &gotScope)
 	defer ts.Close()
-	t.Setenv("LEMA_API_URL", ts.URL)
-	t.Setenv("LEMA_API_TOKEN", "lema_live_tok")
-	t.Setenv("LEMA_WORKSPACE_ID", "lemahq-lema") // a SLUG — must resolve, not pass through
+	receipt := projectReadContext()
+	receipt.RepositoryWorkspaceID = uuid
+	receipt.VisibleRepositoryWorkspaceIDs = []string{uuid}
+	runtime := testHostedReadRuntime(&fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: receipt}}, ts)
 
 	capturePath := filepath.Join(t.TempDir(), ".lema", "decisions.jsonl")
-	runGuardRefresh(capturePath)
+	runGuardRefresh(capturePath, runtime)
 
 	if len(gotScope) != 1 || gotScope[0] != uuid {
 		t.Fatalf("fetch must be scoped to the slug's resolved UUID, got %v", gotScope)
@@ -85,25 +86,23 @@ func TestGuardRefreshWritesCacheScopedToResolvedPin(t *testing.T) {
 	}
 }
 
-// An unresolvable pin (workspace not visible to the credential) falls back to
-// the unscoped fetch — caching everything visible beats caching nothing.
-func TestGuardRefreshUnresolvablePinFallsBackUnscoped(t *testing.T) {
+// An unresolved target sends no hosted read and leaves the prior local cache
+// untouched. Resolution failure must never widen to the Organization.
+func TestGuardRefreshUnresolvedTargetDoesNotFetchOrWrite(t *testing.T) {
 	isolateHostedEnv(t)
 	var gotScope []string
 	ts := closedAtomsServer(t, []map[string]string{}, &gotScope)
 	defer ts.Close()
-	t.Setenv("LEMA_API_URL", ts.URL)
-	t.Setenv("LEMA_API_TOKEN", "lema_live_tok")
-	t.Setenv("LEMA_WORKSPACE_ID", "not-a-visible-workspace")
+	runtime := testHostedReadRuntime(&fakeTargetProvider{result: resolutionResult{Status: resolutionStale}}, ts)
 
 	capturePath := filepath.Join(t.TempDir(), ".lema", "decisions.jsonl")
-	runGuardRefresh(capturePath)
+	runGuardRefresh(capturePath, runtime)
 
 	if len(gotScope) != 0 {
-		t.Fatalf("unresolvable pin must fall back to an unscoped fetch, got scope %v", gotScope)
+		t.Fatalf("unresolved target sent a hosted fetch with scope %v", gotScope)
 	}
-	if _, err := os.Stat(guardCacheFile(capturePath)); err != nil {
-		t.Fatalf("cache should still be written from the unscoped fetch: %v", err)
+	if _, err := os.Stat(guardCacheFile(capturePath)); !os.IsNotExist(err) {
+		t.Fatalf("unresolved target wrote a cache, stat err=%v", err)
 	}
 }
 
@@ -112,7 +111,7 @@ func TestGuardRefreshUnresolvablePinFallsBackUnscoped(t *testing.T) {
 func TestGuardRefreshNoHostedConfigIsNoop(t *testing.T) {
 	isolateHostedEnv(t)
 	capturePath := filepath.Join(t.TempDir(), ".lema", "decisions.jsonl")
-	runGuardRefresh(capturePath)
+	runGuard([]string{"--refresh-cache", "--capture-file", capturePath}, nil)
 	if _, err := os.Stat(guardCacheFile(capturePath)); !os.IsNotExist(err) {
 		t.Fatalf("no hosted config must write no cache, stat err = %v", err)
 	}

@@ -27,6 +27,8 @@ func TestBriefResourceMatchesToolOutput(t *testing.T) {
 	srv, cap := newBriefTestServer(t, "claude-code", http.StatusOK)
 	defer srv.Close()
 	setSyncEnv(t, srv.URL)
+	provider := &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: stateBriefRoutingContext()}}
+	installStateBriefRuntime(t, provider, srv, resolveTargetInput{CWD: "/private/operator/payments-api"})
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -94,6 +96,8 @@ func TestBriefResourceHonestNoteAsContent(t *testing.T) {
 	srv, _ := newBriefTestServer(t, "claude-code", http.StatusOK)
 	defer srv.Close()
 	setSyncEnv(t, srv.URL)
+	provider := &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: stateBriefRoutingContext()}}
+	installStateBriefRuntime(t, provider, srv, resolveTargetInput{CWD: "/private/operator/payments-api"})
 	t.Setenv(collectorDirEnv, t.TempDir())
 	res, err := readBriefResource(ctx, req)
 	if err != nil {
@@ -107,6 +111,7 @@ func TestBriefResourceHonestNoteAsContent(t *testing.T) {
 	dark, _ := newBriefTestServer(t, "claude-code", http.StatusNotFound)
 	defer dark.Close()
 	setSyncEnv(t, dark.URL)
+	installStateBriefRuntime(t, provider, dark, resolveTargetInput{CWD: "/private/operator/payments-api"})
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -134,6 +139,8 @@ func TestBriefResourceHonestNoteAsContent(t *testing.T) {
 	t.Setenv("LEMA_API_TOKEN", "")
 	t.Setenv("LEMA_WORKSPACE_ID", "")
 	t.Setenv("HOME", t.TempDir())
+	processHostedRuntime = nil
+	processTargetProvider = nil
 	res, err = readBriefResource(ctx, req)
 	if err != nil {
 		t.Fatal(err)
@@ -204,6 +211,8 @@ func TestBriefResourceRegistration(t *testing.T) {
 	t.Setenv("LEMA_API_TOKEN", "")
 	t.Setenv("LEMA_WORKSPACE_ID", "")
 	t.Setenv("HOME", t.TempDir())
+	processHostedRuntime = nil
+	processTargetProvider = nil
 	read, err := cs.ReadResource(ctx, &mcp.ReadResourceParams{URI: briefResourceURI})
 	if err != nil {
 		t.Fatalf("ReadResource: %v", err)

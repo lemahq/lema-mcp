@@ -300,7 +300,22 @@ func queryInt(r *http.Request, key string, def int) int {
 // captures. Shared by the stdio search_decisions tool and the HTTP API so both
 // surfaces rank identically.
 func mergedSearch(ctx context.Context, query string, k int) ([]source.Atom, error) {
-	atoms, err := src.Search(ctx, query, k)
+	return mergedSearchScoped(ctx, query, k, nil)
+}
+
+func mergedSearchScoped(ctx context.Context, query string, k int, workspaceIDs []string) ([]source.Atom, error) {
+	var (
+		atoms []source.Atom
+		err   error
+	)
+	if scoped, ok := src.(source.ScopedSearcher); ok {
+		if len(workspaceIDs) == 0 {
+			return nil, errors.New("hosted search requires a resolved workspace scope")
+		}
+		atoms, err = scoped.SearchScoped(ctx, query, k, workspaceIDs)
+	} else {
+		atoms, err = src.Search(ctx, query, k)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -318,6 +333,25 @@ func mergedSearch(ctx context.Context, query string, k int) ([]source.Atom, erro
 	return atoms, nil
 }
 
+// mergedHTTPSearch preserves the local serve path while routing a hosted
+// source through the same process runtime and immutable receipt gate as the MCP
+// search_decisions tool. A hosted source never reaches /retrieve with an empty
+// scope: non-resolved receipts return before mergedSearchScoped is called.
+func mergedHTTPSearch(ctx context.Context, query string, k int) ([]source.Atom, bool, error) {
+	if _, hosted := src.(source.ScopedSearcher); !hosted {
+		atoms, err := mergedSearch(ctx, query, k)
+		return atoms, false, err
+	}
+	runtime, err := currentHostedRuntime()
+	if err != nil {
+		return nil, true, err
+	}
+	atoms, err := withHostedReadScope(ctx, runtime, nil, func(ctx context.Context, scope []string, _ targetContext) ([]source.Atom, error) {
+		return mergedSearchScoped(ctx, query, k, scope)
+	})
+	return atoms, true, err
+}
+
 // httpSearch serves decision claims and/or project-doc chunks per the scope
 // param (ADR-0055). The default is decisions ONLY — pinned by test — so the
 // enforcement surfaces (EnforcementRail, check_decided callers) are provably
@@ -329,9 +363,13 @@ func httpSearch(w http.ResponseWriter, r *http.Request) {
 	scope := r.URL.Query().Get("scope") // "" | decisions | docs | all
 	out := searchOutput{Repo: repoName, Claims: []source.Atom{}}
 	if scope != "docs" {
-		atoms, err := mergedSearch(r.Context(), q, k)
+		atoms, hosted, err := mergedHTTPSearch(r.Context(), q, k)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			if hosted {
+				http.Error(w, "hosted search unavailable", http.StatusInternalServerError)
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 			return
 		}
 		out.Claims, out.TokensUsed, out.Truncated = fitBudget(atoms, budget)

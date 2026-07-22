@@ -26,10 +26,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/lemahq/lema-mcp/internal/source"
@@ -39,6 +40,8 @@ import (
 // the per-edit path (which never touches the network): a cold Cloud Run start
 // can take seconds, and SessionStart tolerates that once per session.
 const guardCacheRefreshTimeout = 10 * time.Second
+
+var guardRefreshUnresolvedTotal atomic.Uint64
 
 // guardCache is the on-disk shape of the hosted closed-set cache.
 type guardCache struct {
@@ -115,37 +118,34 @@ func loadGuardCacheAtoms(capturePath string) []source.Atom {
 // cache would be worse than serving yesterday's closures. Solo repos (no
 // hosted config) exit clean — the guard's capture-store + ADR set already IS
 // their whole record.
-func runGuardRefresh(capturePath string) {
-	apiURL, token, _ := resolveHostedConfig()
-	if apiURL == "" || token == "" {
-		return
-	}
+func runGuardRefresh(capturePath string, runtime hostedWriteRuntime) {
 	ctx, cancel := context.WithTimeout(context.Background(), guardCacheRefreshTimeout)
 	defer cancel()
 
-	client := &http.Client{Timeout: guardCacheRefreshTimeout}
-	// Scope to the pinned workspace when one is configured, resolving a slug
-	// pin to its UUID exactly like the push and collector-sync paths (#27) —
-	// an unresolvable pin falls back to the unscoped fetch (everything this
-	// credential can see) rather than caching nothing.
-	var wsIDs []string
-	if ws := resolveWorkspaceID(); ws != "" {
-		if uuid, err := resolveWorkspaceValueUUID(ctx, client, apiURL, token, ws); err == nil {
-			wsIDs = []string{uuid}
-		}
+	type refreshResult struct {
+		atoms []source.Atom
+		scope []string
 	}
-
-	atoms, err := source.NewHosted(apiURL, token, client).FetchClosedAtoms(ctx, wsIDs)
+	result, err := withHostedReadScope(ctx, runtime, nil, func(ctx context.Context, scope []string, _ targetContext) (refreshResult, error) {
+		atoms, err := runtime.hosted.FetchClosedAtoms(ctx, scope)
+		return refreshResult{atoms: atoms, scope: scope}, err
+	})
 	if err != nil {
+		var targetErr *targetResolutionError
+		if errors.As(err, &targetErr) {
+			count := guardRefreshUnresolvedTotal.Add(1)
+			fmt.Fprintf(os.Stderr, "lema-mcp diagnostic {\"counter\":\"guard_refresh_target_unresolved_total\",\"value\":%d}\n", count)
+		}
 		return
 	}
+	atoms, wsIDs := result.atoms, result.scope
 	cached := make([]guardCacheAtom, len(atoms))
 	for i, a := range atoms {
 		cached[i] = toCacheAtom(a)
 	}
 	c := guardCache{
 		FetchedAt:    time.Now().UTC().Format(time.RFC3339),
-		APIURL:       apiURL,
+		APIURL:       runtime.apiURL,
 		WorkspaceIDs: wsIDs,
 		Atoms:        cached,
 	}

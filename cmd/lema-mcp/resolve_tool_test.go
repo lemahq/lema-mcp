@@ -141,8 +141,18 @@ func TestResolveWhyRoutesToAskWhenHosted(t *testing.T) {
 	}))
 	defer ts.Close()
 	old := hostedSrc
-	t.Cleanup(func() { hostedSrc = old })
+	oldRuntime, oldProvider := processHostedRuntime, processTargetProvider
+	t.Cleanup(func() {
+		hostedSrc = old
+		processHostedRuntime, processTargetProvider = oldRuntime, oldProvider
+	})
 	hostedSrc = source.NewHosted(ts.URL, "tok", ts.Client())
+	runtime := hostedWriteRuntime{
+		hosted:  hostedSrc,
+		targets: &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: projectReadContext()}},
+	}
+	processHostedRuntime = &runtime
+	processTargetProvider = runtime.targets
 
 	_, out, err := resolve(context.Background(), nil, resolveInput{Intent: "why", Query: "why postgres"})
 	if err != nil {
