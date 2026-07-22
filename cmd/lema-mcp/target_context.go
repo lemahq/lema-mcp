@@ -122,7 +122,7 @@ func newHostedWriteRuntime(client *http.Client, apiURL, token, explicitWorkspace
 		},
 	}
 	if runtime.targetInput.ExplicitWorkspaceID != "" {
-		return runtime
+		return observeHostedRuntime(runtime)
 	}
 	association, found, err := loadContextAssociation(cwd, readContextGitEvidence)
 	if err != nil {
@@ -131,12 +131,17 @@ func newHostedWriteRuntime(client *http.Client, apiURL, token, explicitWorkspace
 			status = resolutionStale
 		}
 		runtime.targets = fixedTargetProvider{result: resolutionResult{Status: status}}
-		return runtime
+		return observeHostedRuntime(runtime)
 	}
 	if found {
 		runtime.targetInput.LocalAssociation = &association
 		runtime.targetInput.PersistedAssociation = true
 	}
+	return observeHostedRuntime(runtime)
+}
+
+func observeHostedRuntime(runtime hostedWriteRuntime) hostedWriteRuntime {
+	runtime.targets = newObservedTargetProvider(runtime.targets)
 	return runtime
 }
 
