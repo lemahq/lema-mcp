@@ -12,25 +12,34 @@ import (
 	"github.com/lemahq/lema-mcp/internal/verdict"
 )
 
-func newTestStore(t *testing.T) *source.CaptureStore {
+// kafkaQueueRecord is the shared message-queue fixture: both guard test files
+// record it, so the killed option and its recorded why stay single-sourced.
+var kafkaQueueRecord = source.DecisionRecord{
+	Title: "message queue", Chosen: "NATS",
+	Rejected: []source.RejectedAlt{{Option: "Kafka", Why: "operational burden for our scale"}},
+}
+
+// storeWith records the given decisions into a fresh capture store.
+func storeWith(t *testing.T, recs ...source.DecisionRecord) *source.CaptureStore {
 	t.Helper()
 	s, err := source.NewCaptureStore(filepath.Join(t.TempDir(), "decisions.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Record(source.DecisionRecord{
-		Title: "message queue", Chosen: "NATS",
-		Rejected: []source.RejectedAlt{{Option: "Kafka", Why: "operational burden for our scale"}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Record(source.DecisionRecord{
-		Title: "auth", Chosen: "sessions",
-		Rejected: []source.RejectedAlt{{Option: "JWT", Why: "hard to revoke"}},
-	}); err != nil {
-		t.Fatal(err)
+	for _, r := range recs {
+		if _, err := s.Record(r); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return s
+}
+
+func newTestStore(t *testing.T) *source.CaptureStore {
+	t.Helper()
+	return storeWith(t, kafkaQueueRecord, source.DecisionRecord{
+		Title: "auth", Chosen: "sessions",
+		Rejected: []source.RejectedAlt{{Option: "JWT", Why: "hard to revoke"}},
+	})
 }
 
 func ctxQuery(file, newStr string) string {

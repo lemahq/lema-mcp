@@ -70,11 +70,52 @@ func guardQuery(in map[string]any) string {
 			}
 		}
 	}
-	q := strings.Join(parts, " ")
+	// Newline-joined so each part starts its own line: a citation marker in one
+	// part cannot exempt another part's text, and the basename stays matchable
+	// even when the first text line is a citation line (stripCitationLines).
+	q := strings.Join(parts, "\n")
 	if len(q) > guardMaxQuery {
 		q = q[:guardMaxQuery]
 	}
 	return q
+}
+
+// guardCitationRE marks a line as CITING a prior ruling rather than proposing:
+// rejection vocabulary (reject/rejected/rejecting/rejects, "rejected_alternative",
+// "ruled out", "supersede…", the "killed:" list idiom — boundary-anchored so
+// "skilled:" is not a marker) or an explicit decision ref (ADR-N…, d_<hex>).
+// Bare hex ids are deliberately NOT markers — they collide with commit hashes,
+// which appear on nearly every HANDOFF line and would exempt that text wholesale.
+// The d_ ref is case-sensitive (ids are minted lowercase, d_%06x) and requires
+// ≥6 hex chars, so hex-spelling identifiers like d_added/d_beef don't qualify
+// (an all-letter 6-hex word like d_decade remains a rare accepted residual).
+// Bare "killed" is not a marker either (process-kill prose); only the colon
+// list form counts.
+var guardCitationRE = regexp.MustCompile(`(?i)\breject(?:ed|ing|s)?\b|rejected_alternatives?|\bruled[ -]?out\b|\bsupersed\w*\b|\bkilled:|\badr-?\d{1,5}\b|(?-i:\bd_[0-9a-f]{6,}\b)`)
+
+// stripCitationLines returns s minus the lines that cite a prior ruling, plus
+// whether anything was stripped. The guard exists to surface an UNKNOWN
+// rejection; a line that names the rejection or cites the ruling is already the
+// surfacing behavior lema wants, so its text does not count as proposal text.
+// Line-scoped on purpose: a genuine re-proposal elsewhere in the same edit still
+// fires (pain-point #4; ADR-0052). A citation is PROSE: a line with no interior
+// whitespace (a bare basename like adr-0140-notes.go, a lone identifier) cannot
+// be citing anything, so a marker inside it never strips it — the basename line
+// guardQuery emits stays matchable.
+func stripCitationLines(s string) (string, bool) {
+	if !guardCitationRE.MatchString(s) {
+		return s, false
+	}
+	var kept []string
+	stripped := false
+	for _, ln := range strings.Split(s, "\n") {
+		if strings.ContainsAny(strings.TrimSpace(ln), " \t") && guardCitationRE.MatchString(ln) {
+			stripped = true
+			continue
+		}
+		kept = append(kept, ln)
+	}
+	return strings.Join(kept, "\n"), stripped
 }
 
 func tokenSet(s string) map[string]bool {
@@ -126,27 +167,69 @@ func optionMatches(key string, edit map[string]bool) (bool, float64) {
 	return true, float64(len(joined))
 }
 
-// guardMatch returns the CLOSED atoms whose killed option appears in the edit
-// text, most-specific first, with Score set to the match specificity. It reads the
+// matchClosed returns the CLOSED atoms whose killed option appears in the edit,
+// most-specific first, with Score set to the match specificity. It reads the
 // option from atom.MatchKey (the option name / superseded choice), never the
-// rationale prose (ADR-0052).
-func guardMatch(closed []source.Atom, editText string) []source.Atom {
-	edit := tokenSet(editText)
-	if len(edit) == 0 {
-		return nil
-	}
+// rationale prose (ADR-0052). Per-atom token-set choice: an option whose NAME
+// itself carries a citation marker (e.g. "supersedes queue") can never sit on a
+// non-citation line, so the exemption structurally cannot apply to it — when
+// `full` is non-nil such atoms match against the full query instead of the
+// citation-stripped one (a false nudge beats a permanently silent guard).
+func matchClosed(closed []source.Atom, edit, full map[string]bool) []source.Atom {
 	var out []source.Atom
 	for _, a := range closed {
 		if a.MatchKey == "" {
 			continue
 		}
-		if ok, score := optionMatches(a.MatchKey, edit); ok {
+		set := edit
+		if full != nil && guardCitationRE.MatchString(a.MatchKey) {
+			set = full
+		}
+		if len(set) == 0 {
+			continue
+		}
+		if ok, score := optionMatches(a.MatchKey, set); ok {
 			a.Score = score
 			out = append(out, a)
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
 	return out
+}
+
+// guardMatch matches the killed options against one flat text (no citation
+// semantics) — the primitive matchClosed wraps.
+func guardMatch(closed []source.Atom, editText string) []source.Atom {
+	return matchClosed(closed, tokenSet(editText), nil)
+}
+
+// guardFires is THE fire floor, shared by the fire decision and the suppression
+// counterfactual so the two can never drift apart.
+func guardFires(hits []source.Atom) bool {
+	return len(hits) > 0 && hits[0].Score >= guardMinScore
+}
+
+// evaluateCitation is the single citation-aware evaluation of one edit query:
+// hits is what the guard fires on (killed options on non-citation lines, plus
+// marker-named options against the full query), and suppressed is the
+// calibration counterfactual — the top atom whose fire ONLY the citation
+// exemption prevented (nil when the guard fired or nothing was stripped). Both
+// callers (the PreToolUse hook and the terminal sidecar) consume this one
+// evaluation, so fire and suppression can never disagree.
+func evaluateCitation(closed []source.Atom, query string) (hits []source.Atom, suppressed *source.Atom) {
+	kept, stripped := stripCitationLines(query)
+	if !stripped {
+		return guardMatch(closed, kept), nil
+	}
+	fullSet := tokenSet(query)
+	hits = matchClosed(closed, tokenSet(kept), fullSet)
+	if guardFires(hits) {
+		return hits, nil
+	}
+	if full := matchClosed(closed, fullSet, fullSet); guardFires(full) {
+		suppressed = &full[0]
+	}
+	return hits, suppressed
 }
 
 const (
@@ -169,11 +252,19 @@ const (
 // atoms (with their stored note) are surfaced; the guard never invents a why-not
 // (ADR-0052).
 func evaluateGuard(closed []source.Atom, query, mode string) (*guardOutput, *source.Atom) {
+	// Citation exemption (pain-point #4): lines that cite a prior ruling do not
+	// count as proposal text — see evaluateCitation/stripCitationLines.
+	hits, _ := evaluateCitation(closed, query)
+	return guardDecision(hits, mode)
+}
+
+// guardDecision maps one evaluation's hits to the PreToolUse response for the
+// given mode — the shared tail of the hook and sidecar paths.
+func guardDecision(hits []source.Atom, mode string) (*guardOutput, *source.Atom) {
 	if mode == guardModeOff {
 		return nil, nil
 	}
-	hits := guardMatch(closed, query)
-	if len(hits) == 0 || hits[0].Score < guardMinScore {
+	if !guardFires(hits) {
 		return nil, nil
 	}
 	top := hits[0]
@@ -193,6 +284,17 @@ func evaluateGuard(closed []source.Atom, query, mode string) (*guardOutput, *sou
 		AdditionalContext: "lema never-reopen — this change reaches for a settled decision: " + reason +
 			" If you are intentionally superseding it, call record_decision with supersedes; otherwise surface the prior decision instead of re-proposing it.",
 	}}, &top
+}
+
+// citationExemptAtom returns the atom whose fire the citation exemption
+// suppressed for this query — evaluateCitation's counterfactual — or nil.
+// Calibration-only (guardLog): the exemption itself is measured, not guessed,
+// before it is trusted (ADR-0052). Only FULLY suppressed fires are reported: if
+// the kept lines still fire (even on a different atom, or downgraded
+// ask→context), nothing is logged.
+func citationExemptAtom(closed []source.Atom, query string) *source.Atom {
+	_, suppressed := evaluateCitation(closed, query)
+	return suppressed
 }
 
 // changeFromToolInput lifts a decisioncheck.Change from the PreToolUse payload:
@@ -362,9 +464,16 @@ func runGuard(args []string, refreshRuntime *hostedWriteRuntime) {
 	// even if this machine never saw it land.
 	closed := append(store.ClosedAtoms(), loadADRClosed(".")...)
 	closed = append(closed, loadGuardCacheAtoms(capturePath)...)
-	out, atom := evaluateGuard(closed, query, mode)
+	hits, suppressed := evaluateCitation(closed, query)
+	out, atom := guardDecision(hits, mode)
 	if out == nil {
-		return // allow silently
+		// Allow silently — but if the citation exemption is what suppressed a
+		// fire, log it so the exemption's precision is measurable (ADR-0052).
+		// guardLogWrite is a no-op when LEMA_GUARD_LOG is unset.
+		if suppressed != nil {
+			guardLogWrite(in, "citation-exempt", query, suppressed)
+		}
+		return
 	}
 	guardLog(in, out, query, atom)
 	if b, err := json.Marshal(out); err == nil {
@@ -379,6 +488,16 @@ func runGuard(args []string, refreshRuntime *hostedWriteRuntime) {
 // Silent when unset and never fatal: a logging failure must not change the
 // permission decision.
 func guardLog(in guardInput, out *guardOutput, query string, atom *source.Atom) {
+	decision := out.HookSpecificOutput.PermissionDecision
+	if decision == "" {
+		decision = "context"
+	}
+	guardLogWrite(in, decision, query, atom)
+}
+
+// guardLogWrite is guardLog's core, also used for "citation-exempt" records —
+// suppressed fires are logged with the atom they would have surfaced.
+func guardLogWrite(in guardInput, decision, query string, atom *source.Atom) {
 	path := os.Getenv("LEMA_GUARD_LOG")
 	if path == "" {
 		return
@@ -391,10 +510,6 @@ func guardLog(in guardInput, out *guardOutput, query string, atom *source.Atom) 
 		return
 	}
 	defer f.Close()
-	decision := out.HookSpecificOutput.PermissionDecision
-	if decision == "" {
-		decision = "context"
-	}
 	rec := map[string]any{
 		"ts":       time.Now().UTC().Format(time.RFC3339),
 		"tool":     in.ToolName,
