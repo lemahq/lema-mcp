@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/lemahq/lema-mcp/internal/source"
 )
@@ -65,6 +66,13 @@ func (f *fakeWorkspacesAPI) server() *httptest.Server {
 
 func autoResolvingRecorderFor(ts *httptest.Server) recorder {
 	return recorder{pushHosted: newWorkspaceAutoResolvingPush(ts.URL, "lema_live_x", ts.Client())}
+}
+
+func resetWorkspaceUUIDCache(t *testing.T) {
+	t.Helper()
+	oldCache := workspaceUUIDCache
+	workspaceUUIDCache = newWorkspaceUUIDCache(64, workspaceUUIDCacheTTL, time.Now)
+	t.Cleanup(func() { workspaceUUIDCache = oldCache })
 }
 
 func TestRecordAutoResolvesSingleWorkspace(t *testing.T) {
@@ -259,9 +267,7 @@ func TestWorkspaceTargetResolverAdapterUsesVisibleContainersAndLinks(t *testing.
 }
 
 func TestWorkspaceValueUUIDValidatesUUIDAndIsolatesCredentialCache(t *testing.T) {
-	workspaceUUIDMu.Lock()
-	workspaceUUIDCache = map[string]string{}
-	workspaceUUIDMu.Unlock()
+	resetWorkspaceUUIDCache(t)
 
 	const visibleUUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 	var requests int32
@@ -289,5 +295,83 @@ func TestWorkspaceValueUUIDValidatesUUIDAndIsolatesCredentialCache(t *testing.T)
 	}
 	if got := atomic.LoadInt32(&requests); got != 3 {
 		t.Fatalf("GET /workspaces calls = %d, want 3 (token isolation plus UUID rejection)", got)
+	}
+}
+
+func TestWorkspaceTargetResolverRejectsInvalidRepositoryRows(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer lema_live_x" {
+			t.Fatalf("authorization = %q, want bearer credential", got)
+		}
+		switch r.URL.Path {
+		case "/workspaces":
+			_, _ = w.Write([]byte(`{"workspaces":[{"id":"repo-invalid","org_id":"org-1","is_repo":true},{"id":"project-payments","org_id":"org-1","is_repo":false}]}`))
+		case "/workspaces/project-payments/links":
+			_, _ = w.Write([]byte(`{"links":[{"workspace_id":"repo-invalid"}]}`))
+		default:
+			t.Fatalf("unexpected request path %q", r.URL.Path)
+		}
+	}))
+	defer ts.Close()
+
+	resolver := newHostedTargetResolver(ts.Client(), ts.URL, "lema_live_x")
+	input := resolveTargetInput{APIURL: ts.URL, CredentialFingerprint: credentialFingerprint("lema_live_x"), OrganizationID: "org-1"}
+	for _, tc := range []struct {
+		name string
+		in   resolveTargetInput
+	}{
+		{"explicit workspace", resolveTargetInput{ExplicitWorkspaceID: "repo-invalid"}},
+		{"explicit project", resolveTargetInput{ExplicitProjectID: "project-payments"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.in.APIURL = input.APIURL
+			tc.in.CredentialFingerprint = input.CredentialFingerprint
+			tc.in.OrganizationID = input.OrganizationID
+			result, err := resolver.Resolve(context.Background(), tc.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Status == resolutionResolved || result.Context.Repository.Canonical != "" {
+				t.Fatalf("invalid repository row resolved a context: %#v", result)
+			}
+		})
+	}
+}
+
+func TestWorkspaceValueUUIDCacheExpiresMutableSlugAndStaysBounded(t *testing.T) {
+	now := time.Unix(1, 0).UTC()
+	oldCache := workspaceUUIDCache
+	workspaceUUIDCache = newWorkspaceUUIDCache(2, time.Minute, func() time.Time { return now })
+	t.Cleanup(func() { workspaceUUIDCache = oldCache })
+
+	listings := map[string]string{
+		"repo":  "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+		"repo2": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+		"repo3": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		entries := make([]map[string]string, 0, len(listings))
+		for slug, id := range listings {
+			entries = append(entries, map[string]string{"id": id, "slug": slug})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"workspaces": entries})
+	}))
+	defer ts.Close()
+
+	if got, err := resolveWorkspaceValueUUID(context.Background(), ts.Client(), ts.URL, "token", "repo"); err != nil || got != listings["repo"] {
+		t.Fatalf("initial slug resolution = (%q, %v), want %q", got, err, listings["repo"])
+	}
+	listings["repo"] = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+	now = now.Add(time.Minute + time.Nanosecond)
+	if got, err := resolveWorkspaceValueUUID(context.Background(), ts.Client(), ts.URL, "token", "repo"); err != nil || got != listings["repo"] {
+		t.Fatalf("expired slug resolution = (%q, %v), want current target %q", got, err, listings["repo"])
+	}
+	for _, slug := range []string{"repo2", "repo3"} {
+		if _, err := resolveWorkspaceValueUUID(context.Background(), ts.Client(), ts.URL, "token", slug); err != nil {
+			t.Fatalf("resolve %q: %v", slug, err)
+		}
+	}
+	if got := workspaceUUIDCache.len(); got > 2 {
+		t.Fatalf("cache size = %d, want capacity 2", got)
 	}
 }

@@ -136,7 +136,11 @@ func targetWorkspacesFromEntries(entries []workspaceEntry) []targetWorkspace {
 			Archived:       entry.ArchivedAt != nil,
 		}
 		if entry.IsRepo {
-			workspace.Repository, _ = repositoryIdentityFromRemote(entry.RepoURL)
+			identity, ok := repositoryIdentityFromRemote(entry.RepoURL)
+			if !ok {
+				continue
+			}
+			workspace.Repository = identity
 		}
 		workspaces = append(workspaces, workspace)
 	}
@@ -176,9 +180,7 @@ func newHostedTargetResolver(client *http.Client, apiURL, token string) *targetR
 // on the collector path (fixed in a9ca2c5); the push path had the same gap.
 func resolveWorkspaceValueUUID(ctx context.Context, client *http.Client, apiURL, token, v string) (string, error) {
 	key := strings.Join([]string{strings.TrimRight(apiURL, "/"), credentialFingerprint(token), v}, "\x00")
-	workspaceUUIDMu.Lock()
-	cached, ok := workspaceUUIDCache[key]
-	workspaceUUIDMu.Unlock()
+	cached, ok := workspaceUUIDCache.get(key)
 	if ok {
 		return cached, nil
 	}
@@ -188,9 +190,7 @@ func resolveWorkspaceValueUUID(ctx context.Context, client *http.Client, apiURL,
 	}
 	for _, w := range all {
 		if strings.EqualFold(w.Slug, v) || w.ID == v {
-			workspaceUUIDMu.Lock()
-			workspaceUUIDCache[key] = w.ID
-			workspaceUUIDMu.Unlock()
+			workspaceUUIDCache.put(key, w.ID)
 			return w.ID, nil
 		}
 	}

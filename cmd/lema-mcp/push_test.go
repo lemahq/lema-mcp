@@ -424,9 +424,7 @@ func TestPushDecisions_RequestShapeAndAuth(t *testing.T) {
 // GET /workspaces listing before building the URL — the same fix the collector sync
 // got in a9ca2c5.
 func TestPushDecisions_ResolvesSlugWorkspace(t *testing.T) {
-	workspaceUUIDMu.Lock()
-	workspaceUUIDCache = map[string]string{}
-	workspaceUUIDMu.Unlock()
+	resetWorkspaceUUIDCache(t)
 
 	const wsUUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 	var gotImportPath string
@@ -463,14 +461,25 @@ func TestPushDecisions_ResolvesSlugWorkspace(t *testing.T) {
 // A non-2xx from the server is an error, never a silent success — the hook decides
 // to swallow it (fail-open), but the client must surface it.
 func TestPushDecisions_Non2xxIsError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	const workspaceID = "22222222-2222-2222-2222-222222222222"
+	postReached := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /workspaces", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"workspaces": []map[string]string{{"id": workspaceID}}})
+	})
+	mux.HandleFunc("POST /workspaces/"+workspaceID+"/import-decisions", func(w http.ResponseWriter, r *http.Request) {
+		postReached = true
 		http.Error(w, "unsupported schema_version (want 1)", http.StatusBadRequest)
-	}))
+	})
+	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	_, err := pushDecisions(context.Background(), srv.Client(), srv.URL, "t", "22222222-2222-2222-2222-222222222222", []pushRecord{{ID: "d", Status: "proposed"}})
+	_, err := pushDecisions(context.Background(), srv.Client(), srv.URL, "t", workspaceID, []pushRecord{{ID: "d", Status: "proposed"}})
 	if err == nil {
 		t.Fatal("want an error on HTTP 400, got nil")
+	}
+	if !postReached {
+		t.Fatal("import POST was not reached after UUID validation")
 	}
 }
 

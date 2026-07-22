@@ -180,9 +180,7 @@ func TestSyncRefusesFileSourcedWorkspace(t *testing.T) {
 // the sync derives the workspace from the run's git remote — owner/repo →
 // slug (owner-repo) → the credential's own listing → the id — and syncs there.
 func TestSyncDerivesWorkspaceFromGitRemote(t *testing.T) {
-	workspaceUUIDMu.Lock()
-	workspaceUUIDCache = map[string]string{}
-	workspaceUUIDMu.Unlock()
+	resetWorkspaceUUIDCache(t)
 
 	cap := &syncCapture{}
 	mux := http.NewServeMux()
@@ -323,9 +321,7 @@ func TestSyncCheckpointEventRejectedIsAnError(t *testing.T) {
 // resolves to nothing and NOTHING syncs (this is also what stops a
 // wrong-org token from writing anywhere).
 func TestSyncResolvesSlugWorkspace(t *testing.T) {
-	workspaceUUIDMu.Lock()
-	workspaceUUIDCache = map[string]string{}
-	workspaceUUIDMu.Unlock()
+	resetWorkspaceUUIDCache(t)
 
 	cap := &syncCapture{}
 	mux := http.NewServeMux()
@@ -362,9 +358,7 @@ func TestSyncResolvesSlugWorkspace(t *testing.T) {
 }
 
 func TestSyncSkipsInvisibleWorkspace(t *testing.T) {
-	workspaceUUIDMu.Lock()
-	workspaceUUIDCache = map[string]string{}
-	workspaceUUIDMu.Unlock()
+	resetWorkspaceUUIDCache(t)
 
 	hits := 0
 	mux := http.NewServeMux()
