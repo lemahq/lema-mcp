@@ -45,6 +45,33 @@ func TestTargetContextAcceptanceRunnerListsEveryLocalCase(t *testing.T) {
 	}
 }
 
+func TestTargetContextAcceptanceRunnerIsPortableAcrossCheckouts(t *testing.T) {
+	scriptPath := filepath.Join("..", "..", "scripts", "target-context-acceptance.sh")
+	docsPath := filepath.Join("..", "..", "docs", "target-context-smoke-results.md")
+	for _, path := range []string{scriptPath, docsPath} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, machineSpecific := range []string{"/Users/andrew", "worktrees/project-brief"} {
+			if strings.Contains(string(data), machineSpecific) {
+				t.Fatalf("%s embeds machine-specific path %q", path, machineSpecific)
+			}
+		}
+	}
+
+	script, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(script), "rev-parse --path-format=absolute --git-common-dir") {
+		t.Fatal("acceptance runner does not auto-discover the sibling platform checkout from Git's common directory")
+	}
+	if !strings.Contains(string(script), "LEMA_PLATFORM_WORKTREE") {
+		t.Fatal("acceptance runner lost its explicit platform checkout override")
+	}
+}
+
 func TestTargetContextAcceptanceRunnerSmokeRestartsCandidateAndCallsStateBrief(t *testing.T) {
 	dir := t.TempDir()
 	adr := filepath.Join(dir, "0001-smoke.md")

@@ -25,7 +25,9 @@ if [[ ${1:-} == "--list" ]]; then
 fi
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
-platform_root=${LEMA_PLATFORM_WORKTREE:-/Users/andrew/Projects/lema/worktrees/project-brief}
+git_common_dir=$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir)
+public_checkout_root=$(dirname "$git_common_dir")
+platform_root=${LEMA_PLATFORM_WORKTREE:-$(dirname "$public_checkout_root")/lema}
 acceptance_adr_dir=${LEMA_ACCEPTANCE_ADR_DIR:-$platform_root/docs/adr}
 candidate_dir=$(mktemp -d /tmp/lema-mcp-target-context.XXXXXX)
 trap 'rm -rf -- "$candidate_dir"' EXIT

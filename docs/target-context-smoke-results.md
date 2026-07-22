@@ -42,9 +42,13 @@ Running `cursor agent --help` caused Cursor's launcher to install the previously
 Run the complete named corpus from the public repository:
 
 ```sh
-LEMA_PLATFORM_WORKTREE=/Users/andrew/Projects/lema/worktrees/project-brief \
-  ./scripts/target-context-acceptance.sh
+./scripts/target-context-acceptance.sh
 ```
+
+The runner auto-discovers a sibling `lema` platform checkout from Git's common
+directory, including when the public repository is itself a worktree. If the
+platform checkout lives elsewhere, set
+`LEMA_PLATFORM_WORKTREE=/path/to/lema ./scripts/target-context-acceptance.sh`.
 
 The runner builds a candidate in a private `mktemp` directory, performs two fresh stdio initialize/tools-list/State-Brief-call cycles, verifies the current schema and safe unavailable response, and removes the candidate on exit. It fails if any named local case does not execute its expected test. The `two-users` case additionally requires the platform test `TestProjectWorkUnitRetainsTwoUserRunAttribution`; absence of that test is a failure, not a skip. Database-backed cases use `LEMA_TEST_DATABASE_URL` and fail if the platform checkout or Postgres prerequisite is unavailable.
 
