@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -115,5 +116,15 @@ func TestReadCredentialsFileParsing(t *testing.T) {
 	}
 	if _, ok := creds["malformed line"]; ok {
 		t.Error("malformed line should be skipped")
+	}
+}
+
+func TestCredentialFingerprintIsStableAndNonSecret(t *testing.T) {
+	first := credentialFingerprint("lema_live_secret-a")
+	if first != credentialFingerprint("lema_live_secret-a") || first == credentialFingerprint("lema_live_secret-b") {
+		t.Fatalf("credential fingerprints must be stable and token-specific")
+	}
+	if len(first) != 64 || strings.Contains(first, "secret") {
+		t.Fatalf("fingerprint = %q, want a SHA-256 digest that does not expose the token", first)
 	}
 }

@@ -24,6 +24,12 @@ type syncCapture struct {
 func newSyncTestServer(t *testing.T, cap *syncCapture, eventStatus int) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /workspaces", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer tok" {
+			t.Errorf("missing bearer token on workspace validation")
+		}
+		_, _ = w.Write([]byte(`{"workspaces":[{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}]}`))
+	})
 	mux.HandleFunc("POST /workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/runs", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer tok" {
 			t.Errorf("missing bearer token")

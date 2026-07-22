@@ -55,11 +55,11 @@ func deriveWorkspaceSlug(cwd string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	owner, repo, ok := parseOwnerRepo(url)
+	identity, ok := repositoryIdentityFromRemote(url)
 	if !ok {
 		return "", false
 	}
-	return strings.ToLower(owner + "-" + repo), true
+	return identity.Owner + "-" + identity.Name, true
 }
 
 // parseOwnerRepo extracts the trailing owner/repo pair from a git remote URL.
@@ -69,38 +69,11 @@ func deriveWorkspaceSlug(cwd string) (string, bool) {
 // ok=false for anything without at least an owner and a repo. Pure so the
 // parsing edge cases are unit-tested directly.
 func parseOwnerRepo(remote string) (owner, repo string, ok bool) {
-	s := strings.TrimSpace(remote)
-	s = strings.TrimSuffix(s, ".git")
-	if s == "" {
+	identity, ok := repositoryIdentityFromRemote(remote)
+	if !ok {
 		return "", "", false
 	}
-
-	// Reduce to the path portion (owner/repo[/...]).
-	var path string
-	switch {
-	case strings.Contains(s, "://"):
-		// scheme://[user@]host[:port]/owner/repo
-		rest := s[strings.Index(s, "://")+3:]
-		if slash := strings.Index(rest, "/"); slash >= 0 {
-			path = rest[slash+1:]
-		}
-	case strings.Contains(s, ":"):
-		// scp-like: [user@]host:owner/repo
-		path = s[strings.LastIndex(s, ":")+1:]
-	default:
-		path = s
-	}
-
-	segs := make([]string, 0, 4)
-	for _, seg := range strings.Split(strings.Trim(path, "/"), "/") {
-		if seg != "" {
-			segs = append(segs, seg)
-		}
-	}
-	if len(segs) < 2 {
-		return "", "", false
-	}
-	return segs[len(segs)-2], segs[len(segs)-1], true
+	return identity.Owner, identity.Name, true
 }
 
 // gitCurrentBranch reads the checked-out branch for cwd. A package var so tests

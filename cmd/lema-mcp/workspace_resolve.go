@@ -40,8 +40,11 @@ import (
 // workspaceEntry is the slice of the /workspaces listing the resolver needs.
 type workspaceEntry struct {
 	ID         string  `json:"id"`
+	OrgID      string  `json:"org_id"`
 	Name       string  `json:"name"`
 	Slug       string  `json:"slug"`
+	RepoURL    string  `json:"repo_url"`
+	IsRepo     bool    `json:"is_repo"`
 	ArchivedAt *string `json:"archived_at"`
 }
 
@@ -84,10 +87,85 @@ func fetchWorkspaces(ctx context.Context, client *http.Client, apiURL, token str
 	return out.Workspaces, nil
 }
 
+// fetchWorkspaceLinks loads the repository leaves linked to one visible
+// non-repository container. The server omits leaves the credential cannot see;
+// callers still intersect the returned ids with their own visible listing.
+func fetchWorkspaceLinks(ctx context.Context, client *http.Client, apiURL, token, workspaceID string) ([]string, error) {
+	url := strings.TrimRight(apiURL, "/") + "/workspaces/" + workspaceID + "/links"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("GET /workspaces/%s/links: HTTP %d: %s", workspaceID, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out struct {
+		Links []struct {
+			WorkspaceID string `json:"workspace_id"`
+		} `json:"links"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("GET /workspaces/%s/links: decode response: %w", workspaceID, err)
+	}
+	ids := make([]string, 0, len(out.Links))
+	for _, link := range out.Links {
+		if link.WorkspaceID != "" {
+			ids = append(ids, link.WorkspaceID)
+		}
+	}
+	return ids, nil
+}
+
+// targetWorkspacesFromEntries adapts the authoritative visible listing to the
+// resolver's transport-free seam. A malformed repository URL remains an
+// unmatchable repository rather than becoming a guessed identity.
+func targetWorkspacesFromEntries(entries []workspaceEntry) []targetWorkspace {
+	workspaces := make([]targetWorkspace, 0, len(entries))
+	for _, entry := range entries {
+		workspace := targetWorkspace{
+			ID:             entry.ID,
+			OrganizationID: entry.OrgID,
+			IsRepository:   entry.IsRepo,
+			Archived:       entry.ArchivedAt != nil,
+		}
+		if entry.IsRepo {
+			workspace.Repository, _ = repositoryIdentityFromRemote(entry.RepoURL)
+		}
+		workspaces = append(workspaces, workspace)
+	}
+	return workspaces
+}
+
+// newHostedTargetResolver supplies the HTTP adapters for the otherwise pure
+// resolver. It intentionally does not route any production operation through
+// the resolver yet; later callers can opt in by constructing this adapter.
+func newHostedTargetResolver(client *http.Client, apiURL, token string) *targetResolver {
+	return &targetResolver{
+		fetchWorkspaces: func(ctx context.Context, _ resolveTargetInput) ([]targetWorkspace, error) {
+			entries, err := fetchWorkspaces(ctx, client, apiURL, token)
+			if err != nil {
+				return nil, err
+			}
+			return targetWorkspacesFromEntries(entries), nil
+		},
+		fetchLinks: func(ctx context.Context, _ resolveTargetInput, projectID string) ([]string, error) {
+			return fetchWorkspaceLinks(ctx, client, apiURL, token, projectID)
+		},
+		cache: newTargetResolutionCache(64),
+	}
+}
+
 // resolveWorkspaceValueUUID turns a configured workspace value (a UUID, or a
 // slug/id to look up) into the UUID the authed /workspaces/{id}/... path parser
-// requires. A UUID passes through untouched; anything else is matched against
-// GET /workspaces by slug or id, memoized per (apiURL, value). A value this
+// requires. Every value, including a UUID, is matched against GET /workspaces
+// by slug or id, memoized per (API URL, credential fingerprint, value). A value this
 // credential cannot see resolves to an error — which is also the guard that
 // stops a wrong-org token from writing anywhere (the workspace simply isn't in
 // its listing). This is the single implementation shared by the collector sync,
@@ -97,10 +175,7 @@ func fetchWorkspaces(ctx context.Context, client *http.Client, apiURL, token str
 // (2026-07-21): a slug-configured LEMA_WORKSPACE_ID 400'd "invalid workspaceID"
 // on the collector path (fixed in a9ca2c5); the push path had the same gap.
 func resolveWorkspaceValueUUID(ctx context.Context, client *http.Client, apiURL, token, v string) (string, error) {
-	if looksLikeUUID(v) {
-		return v, nil
-	}
-	key := apiURL + "|" + v
+	key := strings.Join([]string{strings.TrimRight(apiURL, "/"), credentialFingerprint(token), v}, "\x00")
 	workspaceUUIDMu.Lock()
 	cached, ok := workspaceUUIDCache[key]
 	workspaceUUIDMu.Unlock()

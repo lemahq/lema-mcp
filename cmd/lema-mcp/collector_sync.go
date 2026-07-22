@@ -82,9 +82,10 @@ func looksLikeUUID(s string) bool {
 	return true
 }
 
-// workspaceUUIDCache memoizes slug→id resolutions per (apiURL, value) so the
-// long-lived MCP server pays one listing per target; hook processes are
-// one-shot and pay one listing per boundary event, bounded by the 5s budget.
+// workspaceUUIDCache memoizes validated values per API URL, SHA-256 credential
+// fingerprint, and configured override so one credential cannot reuse another
+// credential's authority result. Hook processes are one-shot and pay one
+// listing per boundary event, bounded by the 5s budget.
 var (
 	workspaceUUIDMu    sync.Mutex
 	workspaceUUIDCache = map[string]string{}

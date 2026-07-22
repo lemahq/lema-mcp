@@ -367,19 +367,27 @@ func TestPushRunner(t *testing.T) {
 func TestPushDecisions_RequestShapeAndAuth(t *testing.T) {
 	var gotMethod, gotPath, gotAuth, gotCT string
 	var gotReq pushRequest
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /workspaces", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer lema_live_abc" {
+			t.Errorf("workspace validation auth = %q", got)
+		}
+		_, _ = w.Write([]byte(`{"workspaces":[{"id":"11111111-1111-1111-1111-111111111111"}]}`))
+	})
+	mux.HandleFunc("POST /workspaces/11111111-1111-1111-1111-111111111111/import-decisions", func(w http.ResponseWriter, r *http.Request) {
 		gotMethod, gotPath = r.Method, r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
 		gotCT = r.Header.Get("Content-Type")
 		_ = json.NewDecoder(r.Body).Decode(&gotReq)
 		_ = json.NewEncoder(w).Encode(pushResponse{Created: 1, RecordedBy: "agent",
 			Results: []pushResult{{LocalID: "d_x", Status: "created"}}})
-	}))
+	})
+	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
 	recs := []pushRecord{{ID: "d_x", Title: "Redis", Chosen: "Redis", Status: "proposed", Refs: []string{"cache.go"}}}
-	// A UUID workspace short-circuits resolution (no GET /workspaces round-trip),
-	// so this single-handler server exercises the import POST directly.
+	// UUIDs are explicit identifiers, not authority: the visible listing must
+	// validate one before the import POST is built.
 	resp, err := pushDecisions(context.Background(), srv.Client(), srv.URL, "lema_live_abc", "11111111-1111-1111-1111-111111111111", recs)
 	if err != nil {
 		t.Fatalf("err: %v", err)

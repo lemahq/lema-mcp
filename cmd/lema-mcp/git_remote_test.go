@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseOwnerRepo(t *testing.T) {
 	cases := []struct {
@@ -51,6 +54,30 @@ func TestDeriveWorkspaceSlug(t *testing.T) {
 	gitRemoteURL = func(string) (string, bool) { return "", false }
 	if slug, ok := deriveWorkspaceSlug("/anywhere"); ok || slug != "" {
 		t.Fatalf("no remote must not derive, got (%q,%v)", slug, ok)
+	}
+}
+
+func TestGitRemoteNormalizationKeepsHostsDistinctAndRedactsSecrets(t *testing.T) {
+	for _, tc := range []struct {
+		remote    string
+		canonical string
+		slug      string
+	}{
+		{"https://token:secret@github.com:443/acme/api.git?token=leak#fragment", "git:github.com/acme/api", "acme-api"},
+		{"ssh://git@github.acme.internal:2222/acme/api.git?token=leak#fragment", "git:github.acme.internal:2222/acme/api", "acme-api"},
+		{"git@github.acme.internal:acme/api.git?token=leak#fragment", "git:github.acme.internal/acme/api", "acme-api"},
+	} {
+		identity, ok := repositoryIdentityFromRemote(tc.remote)
+		if !ok || identity.Canonical != tc.canonical {
+			t.Fatalf("repositoryIdentityFromRemote(%q) = (%#v, %v), want %q", tc.remote, identity, ok, tc.canonical)
+		}
+		if strings.Contains(identity.Canonical, "secret") || strings.Contains(identity.Canonical, "leak") {
+			t.Fatalf("canonical identity leaked remote secret: %q", identity.Canonical)
+		}
+		owner, repo, ok := parseOwnerRepo(tc.remote)
+		if !ok || owner+"-"+repo != tc.slug {
+			t.Fatalf("parseOwnerRepo(%q) = (%q, %q, %v), want compatibility slug %q", tc.remote, owner, repo, ok, tc.slug)
+		}
 	}
 }
 
