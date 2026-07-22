@@ -123,41 +123,48 @@ func resolvePriorRun(ctx context.Context, s *collectorSyncer) (runID, note strin
 	return hosted, fmt.Sprintf("resolved from this project's prior session %s (%s)", cp.RunID, harness), nil
 }
 
-func getStateBrief(ctx context.Context, req *mcp.CallToolRequest, in stateBriefInput) (*mcp.CallToolResult, stateBriefOutput, error) {
+// stateBrief is the ONE code path the State Brief serves from — workspace
+// resolution, the F4 prior-run relay read when run is empty, the GET /brief
+// fetch, and the verbatim pass-through. Extracted from the tool handler so
+// the lema://brief resource (brief_resource.go, decision fa8a63f4) can wrap
+// it thinly with zero drift. caller labels the usage metric with which
+// surface served. Every can't-serve path is an honest note in the output,
+// never an error — a fresh session should read state, not a failure.
+func stateBrief(ctx context.Context, run, caller string) stateBriefOutput {
 	s := newBriefClient()
 	if s == nil {
-		return nil, stateBriefOutput{
+		return stateBriefOutput{
 			Note: "state brief unavailable: hosted mode is not configured (LEMA_API_URL / LEMA_API_TOKEN / LEMA_WORKSPACE_ID)",
-		}, nil
+		}
 	}
 	if wsUUID, err := s.resolveWorkspaceUUID(ctx); err != nil {
-		return nil, stateBriefOutput{Note: "state brief unavailable: " + err.Error()}, nil
+		return stateBriefOutput{Note: "state brief unavailable: " + err.Error()}
 	} else {
 		s.workspaceID = wsUUID
 	}
-	runID := strings.TrimSpace(in.Run)
+	runID := strings.TrimSpace(run)
 	note := "explicit run id"
 	if runID == "" {
 		var err error
 		runID, note, err = resolvePriorRun(ctx, s)
 		if err != nil {
-			return nil, stateBriefOutput{Note: "state brief unavailable: " + err.Error()}, nil
+			return stateBriefOutput{Note: "state brief unavailable: " + err.Error()}
 		}
 	}
 	status, body, err := s.get(ctx, "/brief?run="+url.QueryEscape(runID))
 	if err != nil {
-		return nil, stateBriefOutput{Note: "state brief unavailable: " + err.Error()}, nil
+		return stateBriefOutput{Note: "state brief unavailable: " + err.Error()}
 	}
 	switch status {
 	case http.StatusOK:
 	case http.StatusNotFound:
 		// The dark flag and an unknown run are indistinguishable by design
 		// (the surface 404s while lema-state-brief is off) — say both.
-		return nil, stateBriefOutput{
+		return stateBriefOutput{
 			Note: "state brief unavailable: the server has no brief for this run (the surface may not be enabled yet, or the run is unknown)",
-		}, nil
+		}
 	default:
-		return nil, stateBriefOutput{Note: fmt.Sprintf("state brief unavailable: HTTP %d", status)}, nil
+		return stateBriefOutput{Note: fmt.Sprintf("state brief unavailable: HTTP %d", status)}
 	}
 	var wire struct {
 		Scope    string          `json:"scope"`
@@ -166,12 +173,16 @@ func getStateBrief(ctx context.Context, req *mcp.CallToolRequest, in stateBriefI
 		AsOf     string          `json:"as_of"`
 	}
 	if err := json.Unmarshal(body, &wire); err != nil {
-		return nil, stateBriefOutput{Note: "state brief unavailable: unreadable server response"}, nil
+		return stateBriefOutput{Note: "state brief unavailable: unreadable server response"}
 	}
 	out := stateBriefOutput{
 		Scope: wire.Scope, Sections: wire.Sections, Silences: wire.Silences,
 		AsOf: wire.AsOf, Note: note,
 	}
-	logUsage("get_state_brief", note, 1, out)
-	return nil, out, nil
+	logUsage(caller, note, 1, out)
+	return out
+}
+
+func getStateBrief(ctx context.Context, req *mcp.CallToolRequest, in stateBriefInput) (*mcp.CallToolResult, stateBriefOutput, error) {
+	return nil, stateBrief(ctx, in.Run, "get_state_brief"), nil
 }
