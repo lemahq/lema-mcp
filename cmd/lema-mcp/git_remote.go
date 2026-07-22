@@ -102,3 +102,46 @@ func parseOwnerRepo(remote string) (owner, repo string, ok bool) {
 	}
 	return segs[len(segs)-2], segs[len(segs)-1], true
 }
+
+// gitCurrentBranch reads the checked-out branch for cwd. A package var so tests
+// can stub the exec without a real repo. Returns ok=false for a non-repo, a
+// detached HEAD (`git branch --show-current` prints nothing), or any git
+// failure — the caller then sends an empty branch (never a guess), and rung 3
+// (repo+branch) simply does not match while rung 4 / rung 7 still can.
+var gitCurrentBranch = func(cwd string) (string, bool) {
+	if strings.TrimSpace(cwd) == "" {
+		return "", false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), gitRemoteTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "branch", "--show-current")
+	cmd.Dir = cwd
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "" {
+		return "", false // detached HEAD
+	}
+	return branch, true
+}
+
+// deriveRunGitContext derives the run's repo ("owner/name", lowercased to match
+// the server's work_units.repo lowercase-at-write) and branch from cwd's git
+// context — the association-ladder inputs for rung 3 (repo+branch) and rung 4
+// (repo+worktree). Both are best-effort: any git failure yields an empty value
+// and the run lands rung-7 exactly as before (fail-open). Reuses the same
+// gitRemoteURL/parseOwnerRepo the workspace derivation uses (decision 5025ffb7,
+// implementing d_d9caf0).
+func deriveRunGitContext(cwd string) (repo, branch string) {
+	if url, ok := gitRemoteURL(cwd); ok {
+		if owner, name, ok := parseOwnerRepo(url); ok {
+			repo = strings.ToLower(owner + "/" + name)
+		}
+	}
+	if b, ok := gitCurrentBranch(cwd); ok {
+		branch = b
+	}
+	return repo, branch
+}

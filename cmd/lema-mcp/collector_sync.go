@@ -141,18 +141,21 @@ func (s *collectorSyncer) post(ctx context.Context, path string, body any) (int,
 }
 
 // ensureRun creates (or re-finds — CreateRun is idempotent on
-// harness+external_run_id) the hosted run identity and returns its id.
-// This still sends no repo, so the server-side association ladder honestly
-// lands these runs at rung 7. The owner/name source now EXISTS (the same
-// deriveWorkspaceSlug/parseOwnerRepo read this file uses for workspace
-// derivation), so rungs 3/4 are one step away — feeding owner/repo to
-// run-create is the composing repo-on-run-create item (d_d9caf0), kept
-// separate because it changes association behavior on its own.
-func (s *collectorSyncer) ensureRun(ctx context.Context, harness, externalRunID, worktree string) (string, error) {
+// harness+external_run_id) the hosted run identity and returns its id. It feeds
+// the server-side association ladder its rung-3/4 inputs: repo ("owner/name")
+// and branch derived from cwd's git context (the same context the workspace
+// derivation uses), plus the worktree (= cwd — apt here, where each agent runs
+// in its own git worktree). All best-effort: a cwd with no git remote sends
+// empty repo/branch and the run lands rung-7 exactly as before (decision
+// 5025ffb7, implementing d_d9caf0 — repo-on-run-create).
+func (s *collectorSyncer) ensureRun(ctx context.Context, harness, externalRunID, cwd string) (string, error) {
+	repo, branch := deriveRunGitContext(cwd)
 	status, body, err := s.post(ctx, "/runs", map[string]string{
 		"harness":         harness,
 		"external_run_id": externalRunID,
-		"worktree":        worktree,
+		"repo":            repo,
+		"branch":          branch,
+		"worktree":        cwd,
 	})
 	if err != nil {
 		return "", err
