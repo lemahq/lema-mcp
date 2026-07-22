@@ -158,9 +158,12 @@ func TestSyncSendsRepoAndBranchOnRunCreate(t *testing.T) {
 // while the Run body preserves which repository each harness actually touched.
 func TestCollectorSyncHomesCrossRepositoryRunsOnOneProject(t *testing.T) {
 	const (
-		projectID  = "11111111-1111-1111-1111-111111111111"
-		frontendID = "22222222-2222-2222-2222-222222222222"
-		apiID      = "33333333-3333-3333-3333-333333333333"
+		projectID    = "11111111-1111-1111-1111-111111111111"
+		frontendID   = "22222222-2222-2222-2222-222222222222"
+		apiID        = "33333333-3333-3333-3333-333333333333"
+		frontendRun  = "44444444-4444-4444-4444-444444444444"
+		apiRun       = "55555555-5555-5555-5555-555555555555"
+		sharedWorkID = "77777777-7777-7777-7777-777777777777"
 	)
 	type create struct {
 		path string
@@ -174,7 +177,11 @@ func TestCollectorSyncHomesCrossRepositoryRunsOnOneProject(t *testing.T) {
 			var body map[string]string
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			creates = append(creates, create{path: r.URL.Path, body: body})
-			_, _ = w.Write([]byte(`{"run":{"id":"44444444-4444-4444-4444-444444444444"}}`))
+			runID := frontendRun
+			if body["external_run_id"] == "api-run" {
+				runID = apiRun
+			}
+			_, _ = w.Write([]byte(`{"run":{"id":"` + runID + `","work_unit_id":"` + sharedWorkID + `"}}`))
 			return
 		}
 		eventPaths = append(eventPaths, r.URL.Path)
@@ -214,17 +221,45 @@ func TestCollectorSyncHomesCrossRepositoryRunsOnOneProject(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	var decoded [2][2]string
+	for i, in := range []struct {
+		externalRunID string
+		cwd           string
+	}{{"frontend-run", "/repo/frontend"}, {"api-run", "/repo/api"}} {
+		identity, err := s.ensureRunInWorkspace(ctx, projectID, "claude-code", in.externalRunID, in.cwd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded[i][0], decoded[i][1] = identity.ID, identity.WorkUnitID
+	}
 
 	wantRunPath := "/workspaces/" + projectID + "/runs"
-	wantEventPath := wantRunPath + "/44444444-4444-4444-4444-444444444444/events"
-	if len(creates) != 2 || creates[0].path != wantRunPath || creates[1].path != wantRunPath {
-		t.Fatalf("Run create paths = %#v, want both %q", creates, wantRunPath)
+	if len(creates) != 4 {
+		t.Fatalf("Run creates = %d, want two sync creates plus two decoder probes", len(creates))
 	}
-	if len(eventPaths) != 2 || eventPaths[0] != wantEventPath || eventPaths[1] != wantEventPath {
-		t.Fatalf("Run event paths = %v, want both %q", eventPaths, wantEventPath)
+	for _, create := range creates {
+		if create.path != wantRunPath {
+			t.Fatalf("Run create path = %q, want %q", create.path, wantRunPath)
+		}
+		if _, supplied := create.body["work_unit_id"]; supplied {
+			t.Fatalf("collector supplied client-generated work_unit_id: %#v", create.body)
+		}
+	}
+	wantEventPaths := []string{wantRunPath + "/" + frontendRun + "/events", wantRunPath + "/" + apiRun + "/events"}
+	if len(eventPaths) != 2 || eventPaths[0] != wantEventPaths[0] || eventPaths[1] != wantEventPaths[1] {
+		t.Fatalf("Run event paths = %v, want %v", eventPaths, wantEventPaths)
 	}
 	if creates[0].body["repo"] != "acme/frontend" || creates[1].body["repo"] != "acme/api" {
 		t.Fatalf("Run create repository provenance = %#v, want frontend then api", creates)
+	}
+	if creates[0].body["external_run_id"] != "frontend-run" || creates[1].body["external_run_id"] != "api-run" {
+		t.Fatalf("external Run IDs = %#v, want distinct frontend-run then api-run", creates)
+	}
+	if decoded[0][0] != frontendRun || decoded[1][0] != apiRun || decoded[0][0] == decoded[1][0] {
+		t.Fatalf("decoded Run IDs = %v, want distinct frontend=%s api=%s", decoded, frontendRun, apiRun)
+	}
+	if decoded[0][1] != sharedWorkID || decoded[1][1] != sharedWorkID {
+		t.Fatalf("decoded Work Unit IDs = %v, want shared %s", decoded, sharedWorkID)
 	}
 	if provider.calls != 2 {
 		t.Fatalf("target resolutions = %d, want one immutable receipt per sync", provider.calls)

@@ -198,6 +198,11 @@ func (s *collectorSyncer) postToWorkspace(ctx context.Context, workspaceID, path
 	return resp.StatusCode, respBody, nil
 }
 
+type collectorRunIdentity struct {
+	ID         string
+	WorkUnitID string
+}
+
 // ensureRun creates (or re-finds — CreateRun is idempotent on
 // harness+external_run_id) the hosted run identity and returns its id. It feeds
 // the server-side association ladder its rung-3/4 inputs: repo ("owner/name")
@@ -207,10 +212,11 @@ func (s *collectorSyncer) postToWorkspace(ctx context.Context, workspaceID, path
 // empty repo/branch and the run lands rung-7 exactly as before (decision
 // 5025ffb7, implementing d_d9caf0 — repo-on-run-create).
 func (s *collectorSyncer) ensureRun(ctx context.Context, harness, externalRunID, cwd string) (string, error) {
-	return s.ensureRunInWorkspace(ctx, s.workspaceID, harness, externalRunID, cwd)
+	identity, err := s.ensureRunInWorkspace(ctx, s.workspaceID, harness, externalRunID, cwd)
+	return identity.ID, err
 }
 
-func (s *collectorSyncer) ensureRunInWorkspace(ctx context.Context, workspaceID, harness, externalRunID, cwd string) (string, error) {
+func (s *collectorSyncer) ensureRunInWorkspace(ctx context.Context, workspaceID, harness, externalRunID, cwd string) (collectorRunIdentity, error) {
 	repo, branch := deriveRunGitContext(cwd)
 	status, body, err := s.postToWorkspace(ctx, workspaceID, "/runs", map[string]string{
 		"harness":         harness,
@@ -220,20 +226,21 @@ func (s *collectorSyncer) ensureRunInWorkspace(ctx context.Context, workspaceID,
 		"worktree":        cwd,
 	})
 	if err != nil {
-		return "", err
+		return collectorRunIdentity{}, err
 	}
 	if status != http.StatusOK && status != http.StatusCreated {
-		return "", fmt.Errorf("create run: HTTP %d", status)
+		return collectorRunIdentity{}, fmt.Errorf("create run: HTTP %d", status)
 	}
 	var out struct {
 		Run struct {
-			ID string `json:"id"`
+			ID         string `json:"id"`
+			WorkUnitID string `json:"work_unit_id"`
 		} `json:"run"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil || out.Run.ID == "" {
-		return "", fmt.Errorf("create run: no id in response")
+		return collectorRunIdentity{}, fmt.Errorf("create run: no id in response")
 	}
-	return out.Run.ID, nil
+	return collectorRunIdentity{ID: out.Run.ID, WorkUnitID: out.Run.WorkUnitID}, nil
 }
 
 // syncCheckpoint lands the distilled checkpoint on the hosted run journal.
@@ -253,7 +260,7 @@ func (s *collectorSyncer) syncCheckpoint(ctx context.Context, harness string, cp
 		input.PersistedAssociation = false
 	}
 	_, err := withResolvedTarget(ctx, s.runtime.targets, input, func(ctx context.Context, receipt targetContext) (struct{}, error) {
-		runID, err := s.ensureRunInWorkspace(ctx, receipt.ProjectWorkspaceID, harness, cp.RunID, cp.CWD)
+		run, err := s.ensureRunInWorkspace(ctx, receipt.ProjectWorkspaceID, harness, cp.RunID, cp.CWD)
 		if err != nil {
 			return struct{}{}, err
 		}
@@ -269,7 +276,7 @@ func (s *collectorSyncer) syncCheckpoint(ctx context.Context, harness string, cp
 		if len(cp.FilesTouched) > 0 {
 			payload["files_touched"] = cp.FilesTouched
 		}
-		status, _, err := s.postToWorkspace(ctx, receipt.ProjectWorkspaceID, "/runs/"+runID+"/events", map[string]any{
+		status, _, err := s.postToWorkspace(ctx, receipt.ProjectWorkspaceID, "/runs/"+run.ID+"/events", map[string]any{
 			"kind":    "checkpoint",
 			"payload": payload,
 		})
