@@ -13,16 +13,16 @@ candidate_dir=$(mktemp -d /tmp/lema-mcp-rc.XXXXXX)
 go build -trimpath -o "$candidate_dir/lema-mcp" ./cmd/lema-mcp
 ```
 
-The candidate was launched as a fresh stdio MCP process twice. Each process completed `initialize`, `tools/list`, and `tools/call` for `get_state_brief`.
+The acceptance runner launches the candidate as a fresh stdio MCP process twice. Each process completes `initialize`, `tools/list`, and `tools/call` for `get_state_brief`. Reproduce only this retained black-box smoke with `./scripts/target-context-acceptance.sh --smoke-only`.
 
 | Check | Result | Evidence |
 |---|---|---|
-| Fresh-process MCP handshake | Pass | Three JSON-RPC responses per process: initialize, tools list, and tool call. |
-| State Brief tool after restart | Pass | `get_state_brief` was present. `sections` and `silences` advertised the intentionally permissive schema from the current SDK contract rather than the stale integer shape. |
-| Target resolution without a workspace pin | Pass | `lema-mcp doctor context` resolved by `canonical_git` from this checkout. The receipt identified `git:github.com/lemahq/lema-mcp`. |
-| Cwd evidence privacy | Pass | Only `sha256:0eba6216afb5fa36` appeared for both cwd and Git root; no raw path appeared. |
-| Receipt privacy | Pass | Diagnostics exposed only Project suffix `…db2d3af5` and Repository suffix `…db2d3af5`; no full workspace ID, credential, API URL, or cwd appeared. |
-| Live non-empty State Brief | **Blocked** | The restarted candidate returned a structured, redacted receipt note but reported `no prior run known`; it therefore had no `sections`/`silences` response to retain. A known hosted Run or a local checkpoint for the selected checkout is the missing prerequisite. This gate remains failed; the output was not fabricated. |
+| Fresh-process MCP handshake | Pass | The runner asserts three JSON-RPC responses in each of two independent candidate processes: initialize, tools list, and tool call. |
+| State Brief tool after restart | Pass | In both processes, `get_state_brief` is present; `sections` and `silences` advertise the intentionally permissive current SDK contract; the call validates and returns only the expected safe `target lookup unresolved` note. Placeholder API URL, token, and UUID are asserted absent from output. |
+| Target resolution without a workspace pin | Pass (manual) | A credentialed `lema-mcp doctor context` run resolved by `canonical_git` from this checkout. The receipt identified `git:github.com/lemahq/lema-mcp`. |
+| Cwd evidence privacy | Pass (manual) | Only `sha256:0eba6216afb5fa36` appeared for both cwd and Git root; no raw path appeared. |
+| Receipt privacy | Pass (manual) | Diagnostics exposed only Project suffix `…db2d3af5` and Repository suffix `…db2d3af5`; no full workspace ID, credential, API URL, or cwd appeared. |
+| Live non-empty State Brief | **Blocked** | Separate credentialed candidate calls from both the public and platform checkout returned a structured, redacted receipt note but reported `no prior run known`; they therefore had no `sections`/`silences` response to retain. A known hosted Run or a local checkpoint for the selected checkout is the missing prerequisite. This gate remains failed; the output was not fabricated. |
 
 The already-running Codex Desktop MCP call failed before restart at SDK output validation: that process advertised integer `silences/items` while the server returned strings. This is the stale pre-update process signature. The fresh candidate no longer advertised that schema, but the live non-empty-brief gate still requires a known Run.
 
@@ -46,8 +46,10 @@ LEMA_PLATFORM_WORKTREE=/Users/andrew/Projects/lema/worktrees/project-brief \
   ./scripts/target-context-acceptance.sh
 ```
 
-The runner builds a candidate in a private `mktemp` directory, performs a fresh stdio initialize/tools-list handshake, verifies the current State Brief schema, and removes the candidate on exit. It fails if any named local case does not execute its expected test. The `two-users` case additionally requires the platform test `TestProjectWorkUnitRetainsTwoUserRunAttribution`; absence of that test is a failure, not a skip. Database-backed cases use `LEMA_TEST_DATABASE_URL` and fail if the platform checkout or Postgres prerequisite is unavailable.
+The runner builds a candidate in a private `mktemp` directory, performs two fresh stdio initialize/tools-list/State-Brief-call cycles, verifies the current schema and safe unavailable response, and removes the candidate on exit. It fails if any named local case does not execute its expected test. The `two-users` case additionally requires the platform test `TestProjectWorkUnitRetainsTwoUserRunAttribution`; absence of that test is a failure, not a skip. Database-backed cases use `LEMA_TEST_DATABASE_URL` and fail if the platform checkout or Postgres prerequisite is unavailable.
 
 The local cases are: one repository; parallel repositories; two users/credential partitions; cross-repository Project/Work Unit; ambiguous Project; stale override; worktree/nested cwd; fork versus upstream; authoritative repository rename; Organization transfer; monorepo; no remote/non-Git; enterprise host; hidden leaf; and legacy UUID pin.
+
+On 2026-07-22 the complete runner passed all 15 named cases, including the DB-backed platform contracts. The separately listed live non-empty State Brief and Codex Desktop restart gates remain blocked.
 
 Remote HTTP and Devin are deliberately absent from `--list`. They are not silently skipped local cases; they belong to the separately approved Phase 8 acceptance boundary.

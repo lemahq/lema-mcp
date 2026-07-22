@@ -26,6 +26,7 @@ fi
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 platform_root=${LEMA_PLATFORM_WORKTREE:-/Users/andrew/Projects/lema/worktrees/project-brief}
+acceptance_adr_dir=${LEMA_ACCEPTANCE_ADR_DIR:-$platform_root/docs/adr}
 candidate_dir=$(mktemp -d /tmp/lema-mcp-target-context.XXXXXX)
 trap 'rm -rf -- "$candidate_dir"' EXIT
 
@@ -71,38 +72,47 @@ run_platform() {
 }
 
 smoke_candidate() {
-  local adr_dir="$platform_root/docs/adr"
-  local output="$candidate_dir/mcp.jsonl"
-  local log="$candidate_dir/mcp.log"
-  local smoke_home="$candidate_dir/home"
-  if [[ ! -d "$adr_dir" ]]; then
-    echo "candidate stdio smoke requires platform ADR fixtures at $adr_dir" >&2
+  if [[ ! -d "$acceptance_adr_dir" ]]; then
+    echo "candidate stdio smoke requires ADR fixtures at $acceptance_adr_dir" >&2
     return 1
   fi
-  mkdir -p "$smoke_home"
-  if ! (
-    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"target-context-acceptance","version":"1"}}}'
-    sleep 1
-    printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
-    printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
-    sleep 1
-  ) | env \
-    HOME="$smoke_home" \
-    LEMA_API_URL="http://127.0.0.1:1" \
-    LEMA_API_TOKEN="acceptance-placeholder" \
-    LEMA_WORKSPACE_ID= \
-    "$candidate_dir/lema-mcp" --adr-dir "$adr_dir" >"$output" 2>"$log"; then
-    echo "candidate stdio process failed; inspect redacted temporary log before exit" >&2
-    return 1
-  fi
-  if ! grep -Fq '"id":2' "$output" ||
-    ! grep -Fq '"name":"get_state_brief"' "$output" ||
-    ! grep -Fq '"sections":true' "$output" ||
-    ! grep -Fq '"silences":true' "$output"; then
-    echo "candidate stdio handshake or State Brief schema check failed" >&2
-    return 1
-  fi
-  echo "candidate: fresh stdio handshake and State Brief schema passed"
+  local process output log
+  for process in 1 2; do
+    output="$candidate_dir/mcp-$process.jsonl"
+    log="$candidate_dir/mcp-$process.log"
+    if ! (
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"target-context-acceptance","version":"1"}}}'
+      sleep 1
+      printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+      sleep 1
+      printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_state_brief","arguments":{}}}'
+      sleep 1
+    ) | env \
+      LEMA_API_URL="http://127.0.0.1:1" \
+      LEMA_API_TOKEN="acceptance-placeholder" \
+      LEMA_WORKSPACE_ID="11111111-2222-3333-4444-555555555555" \
+      "$candidate_dir/lema-mcp" --adr-dir "$acceptance_adr_dir" >"$output" 2>"$log"; then
+      echo "candidate stdio process $process failed; inspect redacted temporary log before exit" >&2
+      return 1
+    fi
+    if ! grep -Fq '"id":2' "$output" ||
+      ! grep -Fq '"name":"get_state_brief"' "$output" ||
+      ! grep -Fq '"sections":true' "$output" ||
+      ! grep -Fq '"silences":true' "$output" ||
+      ! grep -Fq '"id":3' "$output" ||
+      ! grep -Fq '"structuredContent":{"note":"state brief unavailable: target lookup unresolved' "$output"; then
+      echo "candidate stdio process $process handshake, schema, or State Brief call check failed" >&2
+      return 1
+    fi
+    if grep -Fq 'acceptance-placeholder' "$output" ||
+      grep -Fq '127.0.0.1' "$output" ||
+      grep -Fq '11111111-2222-3333-4444-555555555555' "$output"; then
+      echo "candidate stdio process $process leaked placeholder target inputs" >&2
+      return 1
+    fi
+    echo "candidate: fresh stdio process $process safe State Brief unavailable call passed"
+  done
 }
 
 run_case() {
@@ -166,6 +176,10 @@ cd "$repo_root"
 go build -trimpath -o "$candidate_dir/lema-mcp" ./cmd/lema-mcp
 echo "candidate: built in redacted temporary directory"
 smoke_candidate
+
+if [[ ${1:-} == "--smoke-only" ]]; then
+  exit 0
+fi
 
 if [[ $# -gt 0 ]]; then
   run_case "$1"
