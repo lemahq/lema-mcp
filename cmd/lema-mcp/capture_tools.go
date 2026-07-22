@@ -123,15 +123,30 @@ func checkDecidedFor(ctx context.Context, topic string, workspaceIDs []string) (
 	return buildCheckOutput(topic, merged), nil
 }
 
+// checkClosedCap bounds the atoms surfaced in `closed`. check_decided ADJUDICATES,
+// it does not enumerate the corpus; the structural set is already small, but a cap
+// makes it impossible for the output to balloon the way the raw lexical Match once
+// did (a 53-atom, 63KB dump on a vocabulary coincidence).
+const checkClosedCap = 8
+
 // buildCheckOutput is the pure happy-path builder: the legacy fields plus the
 // verdict envelope (ADR-0094), judged over an acquired CLOSED set by the shared
 // verdict.Build so the MCP and proposemode surfaces render the SAME judgment.
 func buildCheckOutput(topic string, merged []source.Atom) checkOutput {
 	v := verdict.Build(merged, topic)
-	closed := verdict.Match(merged, topic, verdict.MatchThreshold)
+	// `closed` mirrors the verdict: the STRUCTURALLY governing atoms (verdict.Governing),
+	// not every lexical Match hit — so the legacy decided/closed/note fields can never
+	// contradict the verdict (a not_ruled_out that still says "decided:true, do not
+	// re-propose" over dozens of vocabulary-collision atoms was the reported bug).
+	governing := verdict.Governing(merged, topic)
+	total := len(governing)
+	closed := governing
+	if len(closed) > checkClosedCap {
+		closed = closed[:checkClosedCap]
+	}
 	out := checkOutput{
 		Topic:              topic,
-		Decided:            len(closed) > 0,
+		Decided:            total > 0,
 		Closed:             closed,
 		Verdict:            string(v.Verdict),
 		GoverningDecisions: v.GoverningDecisions,
@@ -139,6 +154,9 @@ func buildCheckOutput(topic string, merged []source.Atom) checkOutput {
 	}
 	if out.Decided {
 		out.Note = "this topic touches decisions already CLOSED — do not re-propose the closed options; surface the prior decision instead"
+		if total > checkClosedCap {
+			out.Note += fmt.Sprintf(" (showing the %d most relevant of %d)", checkClosedCap, total)
+		}
 	}
 	return out
 }
