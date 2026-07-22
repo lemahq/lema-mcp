@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -108,6 +109,26 @@ func TestContextLinkRejectsCurrentGitMismatchWithoutWriting(t *testing.T) {
 	}
 }
 
+func TestContextLinkDefaultGitReaderRejectsUpstreamOnlyMismatch(t *testing.T) {
+	root := t.TempDir()
+	if output, err := exec.Command("git", "init", root).CombinedOutput(); err != nil {
+		t.Skipf("git init unavailable: %v (%s)", err, output)
+	}
+	if output, err := exec.Command("git", "-C", root, "remote", "add", "upstream", "https://github.com/acme/other.git").CombinedOutput(); err != nil {
+		t.Fatal(string(output))
+	}
+	ts := contextLinkServer(t, []string{contextLinkRepoID}, "https://github.com/acme/payments-api.git")
+	defer ts.Close()
+	options := contextLinkCommandOptions(ts, root)
+	options.ReadGit = nil // Exercise the command's real Git adapter, not a fixture.
+	if err := runContextLink(context.Background(), options, contextLinkProjectID, contextLinkRepoID); !isContextAssociationStale(err) {
+		t.Fatalf("upstream-only mismatch = %v, want typed stale", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".lema", "context.json")); !os.IsNotExist(err) {
+		t.Fatalf("upstream mismatch wrote association: %v", err)
+	}
+}
+
 func TestContextLinkRejectsForeignOrHiddenRepositoryWithoutWriting(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -126,6 +147,14 @@ func TestContextLinkRejectsForeignOrHiddenRepositoryWithoutWriting(t *testing.T)
 			name: "hidden repository",
 			workspaces: []map[string]any{
 				{"id": contextLinkProjectID, "org_id": "org-1", "is_repo": false},
+			},
+			links: []string{contextLinkRepoID},
+		},
+		{
+			name: "missing organization identity",
+			workspaces: []map[string]any{
+				{"id": contextLinkRepoID, "is_repo": true, "repo_url": "https://github.com/acme/payments-api.git"},
+				{"id": contextLinkProjectID, "is_repo": false},
 			},
 			links: []string{contextLinkRepoID},
 		},
@@ -151,6 +180,41 @@ func TestContextLinkRejectsForeignOrHiddenRepositoryWithoutWriting(t *testing.T)
 				t.Fatalf("rejected link persisted a file: %v", statErr)
 			}
 		})
+	}
+}
+
+func TestContextAssociationRejectsSymlinkedDirectoryForEveryOperation(t *testing.T) {
+	root := t.TempDir()
+	external := t.TempDir()
+	if err := os.Symlink(external, filepath.Join(root, ".lema")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	ts := contextLinkServer(t, []string{contextLinkRepoID}, "https://github.com/acme/payments-api.git")
+	defer ts.Close()
+	options := contextLinkCommandOptions(ts, root)
+
+	if err := runContextLink(context.Background(), options, contextLinkProjectID, contextLinkRepoID); err == nil {
+		t.Fatal("link accepted a symlinked .lema directory")
+	}
+	if _, err := os.Stat(filepath.Join(external, "context.json")); !os.IsNotExist(err) {
+		t.Fatalf("link changed external target: %v", err)
+	}
+	if _, found, err := loadContextAssociation(root, options.ReadGit); err == nil || !found {
+		t.Fatalf("load through symlink = found:%t err:%v, want refusal", found, err)
+	}
+	outside := filepath.Join(external, "context.json")
+	if err := os.WriteFile(outside, []byte("outside association"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runContextUnlink(contextLinkOptions{CWD: root, ReadGit: options.ReadGit}); err == nil {
+		t.Fatal("unlink accepted a symlinked .lema directory")
+	}
+	data, err := os.ReadFile(outside)
+	if err != nil || string(data) != "outside association" {
+		t.Fatalf("unlink changed external association: data=%q err=%v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(external, "context.json.bak")); !os.IsNotExist(err) {
+		t.Fatalf("unlink created external backup: %v", err)
 	}
 }
 
@@ -326,5 +390,8 @@ func TestDoctorContextUsesLinkedAssociationToResolveAmbiguity(t *testing.T) {
 	err = runDoctorContext(context.Background(), doctorContextOptions{APIURL: server.URL, Token: "lema_live_context_link_test", CWD: root, ReadGit: readGit, Output: &after})
 	if err != nil || !strings.Contains(after.String(), "result         resolved by local_association") {
 		t.Fatalf("doctor after link = %v:\n%s", err, after.String())
+	}
+	if !strings.Contains(after.String(), "local root hash  sha256:") {
+		t.Fatalf("doctor dropped stored local-root evidence:\n%s", after.String())
 	}
 }

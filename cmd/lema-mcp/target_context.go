@@ -85,6 +85,7 @@ type gitTargetEvidence struct {
 	RemoteURL  string
 	Repository repositoryIdentity
 	Root       string
+	Ambiguous  bool
 }
 
 // targetResolver has only injected seams. It is pure relative to its inputs:
@@ -119,6 +120,9 @@ func (r *targetResolver) Resolve(ctx context.Context, in resolveTargetInput) (re
 	if in.CWD != "" && r.readGit != nil {
 		if read, err := r.readGit(ctx, in.CWD); err == nil {
 			git = read
+			if git.Ambiguous {
+				return resolutionResult{Status: resolutionStale, Reason: "current Git remotes do not identify one canonical repository"}, nil
+			}
 			if git.Repository.Canonical == "" {
 				git.Repository, _ = repositoryIdentityFromRemote(git.RemoteURL)
 			}
@@ -361,6 +365,11 @@ func (r *targetResolver) validateContext(ctx context.Context, in resolveTargetIn
 		return resolutionResult{}, err
 	}
 	context := r.contextFor(in, *project, *repository, visible, resolvedBy)
+	for _, evidence := range receipt.Evidence {
+		if evidence.Kind == "local_root_hash" {
+			context.Evidence = append(context.Evidence, evidence)
+		}
+	}
 	context.Evidence = append(context.Evidence, resolutionEvidence{Kind: "validated_receipt", Value: repository.Repository.Canonical})
 	return resolutionResult{Status: resolutionResolved, Context: context}, nil
 }
@@ -424,7 +433,7 @@ func (r *targetResolver) contextFor(in resolveTargetInput, project, repository t
 }
 
 func (r *targetResolver) workspaceInOrganization(in resolveTargetInput, workspace targetWorkspace) bool {
-	return in.OrganizationID == "" || workspace.OrganizationID == in.OrganizationID
+	return workspace.OrganizationID != "" && (in.OrganizationID == "" || workspace.OrganizationID == in.OrganizationID)
 }
 
 func (r *targetResolver) workspaces(ctx context.Context, in resolveTargetInput) ([]targetWorkspace, error) {

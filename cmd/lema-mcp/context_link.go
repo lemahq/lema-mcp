@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -78,6 +79,9 @@ func runContextLink(ctx context.Context, options contextLinkOptions, projectID, 
 		return fmt.Errorf("context link requires configured hosted credentials")
 	}
 	root, git := contextAssociationRoot(ctx, options.CWD, options.ReadGit)
+	if git.Ambiguous {
+		return &contextAssociationError{status: resolutionStale}
+	}
 	resolver := newHostedTargetResolver(contextHTTPClient(), options.APIURL, options.Token)
 	result, err := resolver.Resolve(ctx, resolveTargetInput{
 		APIURL:                options.APIURL,
@@ -112,21 +116,28 @@ func contextHTTPClient() *http.Client { return &http.Client{Timeout: 10 * time.S
 
 func runContextUnlink(options contextLinkOptions) error {
 	root, _ := contextAssociationRoot(context.Background(), options.CWD, options.ReadGit)
-	path := contextAssociationPath(root)
-	if _, err := os.Lstat(path); err != nil {
+	rootFS, err := openContextAssociationRoot(root, false)
+	if err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("no context association exists")
 		}
 		return err
 	}
+	defer rootFS.Close()
+	if _, err := rootFS.Lstat(contextAssociationFile); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no context association exists")
+		}
+		return contextAssociationUnavailable()
+	}
 	for n := 0; ; n++ {
-		backup := path + ".bak"
+		backup := contextAssociationFile + ".bak"
 		if n > 0 {
 			backup = fmt.Sprintf("%s.%d", backup, n)
 		}
 		// Claim the backup name before renaming. O_EXCL avoids the usual
 		// Lstat→Rename race that could otherwise replace a user's recovery file.
-		claim, err := os.OpenFile(backup, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		claim, err := rootFS.OpenFile(backup, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if os.IsExist(err) {
 			continue
 		}
@@ -134,12 +145,12 @@ func runContextUnlink(options contextLinkOptions) error {
 			return err
 		}
 		if err := claim.Close(); err != nil {
-			_ = os.Remove(backup)
-			return err
+			_ = rootFS.Remove(backup)
+			return contextAssociationUnavailable()
 		}
-		if err := os.Rename(path, backup); err != nil {
-			_ = os.Remove(backup)
-			return err
+		if err := rootFS.Rename(contextAssociationFile, backup); err != nil {
+			_ = rootFS.Remove(backup)
+			return contextAssociationUnavailable()
 		}
 		return nil
 	}
@@ -147,7 +158,17 @@ func runContextUnlink(options contextLinkOptions) error {
 
 func loadContextAssociation(cwd string, readGit func(context.Context, string) (gitTargetEvidence, error)) (targetContext, bool, error) {
 	root, git := contextAssociationRoot(context.Background(), cwd, readGit)
-	data, err := os.ReadFile(contextAssociationPath(root))
+	rootFS, err := openContextAssociationRoot(root, false)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return targetContext{}, false, nil
+		}
+		// A malformed association directory is a saved local-context failure, not
+		// an invitation to continue with another resolution rung.
+		return targetContext{}, true, err
+	}
+	defer rootFS.Close()
+	data, err := rootFS.ReadFile(contextAssociationFile)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return targetContext{}, false, nil
@@ -164,7 +185,7 @@ func loadContextAssociation(cwd string, readGit func(context.Context, string) (g
 	if git.Repository.Canonical == "" {
 		git.Repository, _ = repositoryIdentityFromRemote(git.RemoteURL)
 	}
-	if stored.RepositoryCanonical != "" && git.Repository.Canonical != "" && stored.RepositoryCanonical != git.Repository.Canonical {
+	if git.Ambiguous || (stored.RepositoryCanonical != "" && git.Repository.Canonical != "" && stored.RepositoryCanonical != git.Repository.Canonical) {
 		return targetContext{}, true, &contextAssociationError{status: resolutionStale}
 	}
 	return targetContext{
@@ -176,10 +197,11 @@ func loadContextAssociation(cwd string, readGit func(context.Context, string) (g
 }
 
 func writeContextAssociation(root string, receipt targetContext) error {
-	dir := filepath.Dir(contextAssociationPath(root))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+	rootFS, err := openContextAssociationRoot(root, true)
+	if err != nil {
+		return contextAssociationUnavailable()
 	}
+	defer rootFS.Close()
 	stored := persistedContextAssociation{
 		SchemaVersion:         contextAssociationSchemaVersion,
 		ProjectWorkspaceID:    receipt.ProjectWorkspaceID,
@@ -189,37 +211,89 @@ func writeContextAssociation(root string, receipt targetContext) error {
 	}
 	data, err := json.Marshal(stored)
 	if err != nil {
-		return err
+		return contextAssociationUnavailable()
 	}
-	path := contextAssociationPath(root)
-	temporary, err := os.CreateTemp(dir, ".context-*.tmp")
+	temporaryName, err := contextAssociationTemporaryName()
 	if err != nil {
-		return err
+		return contextAssociationUnavailable()
 	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
+	defer rootFS.Remove(temporaryName)
+	temporary, err := rootFS.OpenFile(temporaryName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return contextAssociationUnavailable()
+	}
 	if err := temporary.Chmod(0o600); err != nil {
 		temporary.Close()
-		return err
+		return contextAssociationUnavailable()
 	}
 	if _, err := temporary.Write(append(data, '\n')); err != nil {
 		temporary.Close()
-		return err
+		return contextAssociationUnavailable()
 	}
 	if err := temporary.Sync(); err != nil {
 		temporary.Close()
-		return err
+		return contextAssociationUnavailable()
 	}
 	if err := temporary.Close(); err != nil {
-		return err
+		return contextAssociationUnavailable()
 	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return err
+	if err := rootFS.Rename(temporaryName, contextAssociationFile); err != nil {
+		return contextAssociationUnavailable()
 	}
-	return os.Chmod(path, 0o600)
+	return nil
 }
 
-func contextAssociationPath(root string) string { return filepath.Join(root, ".lema", "context.json") }
+const (
+	contextAssociationDirectory = ".lema"
+	contextAssociationFile      = ".lema/context.json"
+)
+
+func contextAssociationPath(root string) string { return filepath.Join(root, contextAssociationFile) }
+
+func contextAssociationUnavailable() error {
+	return &contextAssociationError{status: resolutionStale}
+}
+
+// openContextAssociationRoot retains a descriptor for the selected repository
+// root. Every subsequent operation is root-relative, so replacing .lema after
+// validation cannot redirect a write, rename, or remove outside that root.
+func openContextAssociationRoot(root string, create bool) (*os.Root, error) {
+	rootFS, err := os.OpenRoot(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, err
+		}
+		return nil, contextAssociationUnavailable()
+	}
+	info, err := rootFS.Lstat(contextAssociationDirectory)
+	if os.IsNotExist(err) && create {
+		if err := rootFS.Mkdir(contextAssociationDirectory, 0o700); err != nil && !os.IsExist(err) {
+			rootFS.Close()
+			return nil, contextAssociationUnavailable()
+		}
+		info, err = rootFS.Lstat(contextAssociationDirectory)
+	}
+	if err != nil {
+		rootFS.Close()
+		if os.IsNotExist(err) {
+			return nil, err
+		}
+		return nil, contextAssociationUnavailable()
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		rootFS.Close()
+		return nil, contextAssociationUnavailable()
+	}
+	return rootFS, nil
+}
+
+func contextAssociationTemporaryName() (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s/.context-%x.tmp", contextAssociationDirectory, random), nil
+}
 
 func contextAssociationRoot(ctx context.Context, cwd string, readGit func(context.Context, string) (gitTargetEvidence, error)) (string, gitTargetEvidence) {
 	if cwd == "" {
@@ -242,9 +316,56 @@ func readContextGitEvidence(ctx context.Context, cwd string) (gitTargetEvidence,
 		return gitTargetEvidence{}, err
 	}
 	evidence := gitTargetEvidence{Root: strings.TrimSpace(string(root))}
-	remote, err := exec.CommandContext(ctx, "git", "-C", cwd, "config", "--get", "remote.origin.url").Output()
-	if err == nil {
-		evidence.RemoteURL = strings.TrimSpace(string(remote))
-	}
+	remote, ambiguous := selectContextGitRemote(ctx, cwd)
+	evidence.RemoteURL, evidence.Ambiguous = remote, ambiguous
 	return evidence, nil
+}
+
+// selectContextGitRemote follows the stable local ordering from the Target
+// Context contract. A checkout with more than one unranked usable remote is
+// not treated as a no-remote checkout: ambiguity is explicit and fails closed.
+func selectContextGitRemote(ctx context.Context, cwd string) (string, bool) {
+	for _, key := range []string{"lema.canonicalRemote", "remote.pushDefault"} {
+		if name := gitConfigValue(ctx, cwd, key); name != "" {
+			if remote := gitRemoteURLForName(ctx, cwd, name); remote != "" {
+				return remote, false
+			}
+		}
+	}
+	for _, name := range []string{"origin", "upstream"} {
+		if remote := gitRemoteURLForName(ctx, cwd, name); remote != "" {
+			return remote, false
+		}
+	}
+	remotesOut, err := exec.CommandContext(ctx, "git", "-C", cwd, "remote").Output()
+	if err != nil {
+		return "", false
+	}
+	var candidates []string
+	for _, name := range strings.Fields(string(remotesOut)) {
+		if remote := gitRemoteURLForName(ctx, cwd, name); remote != "" {
+			if _, ok := repositoryIdentityFromRemote(remote); ok {
+				candidates = append(candidates, remote)
+			}
+		}
+	}
+	if len(candidates) == 1 {
+		return candidates[0], false
+	}
+	return "", len(candidates) > 1
+}
+
+func gitConfigValue(ctx context.Context, cwd, key string) string {
+	out, err := exec.CommandContext(ctx, "git", "-C", cwd, "config", "--get", key).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func gitRemoteURLForName(ctx context.Context, cwd, name string) string {
+	if strings.TrimSpace(name) == "" {
+		return ""
+	}
+	return gitConfigValue(ctx, cwd, "remote."+name+".url")
 }

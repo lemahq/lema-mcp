@@ -164,6 +164,11 @@ func fetchWorkspaceLinks(ctx context.Context, client *http.Client, apiURL, token
 func targetWorkspacesFromEntries(entries []workspaceEntry) []targetWorkspace {
 	workspaces := make([]targetWorkspace, 0, len(entries))
 	for _, entry := range entries {
+		// org_id is authority evidence, not optional display metadata. A missing
+		// value must never make two resources look same-Organization by accident.
+		if strings.TrimSpace(entry.OrgID) == "" {
+			continue
+		}
 		workspace := targetWorkspace{
 			ID:             entry.ID,
 			OrganizationID: entry.OrgID,

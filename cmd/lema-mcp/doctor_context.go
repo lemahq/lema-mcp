@@ -176,6 +176,8 @@ func writeDoctorContext(out io.Writer, result resolutionResult) {
 			fmt.Fprintln(out, "cwd hash       "+evidence.Value)
 		case "git_root_path_hash":
 			fmt.Fprintln(out, "git root hash  "+evidence.Value)
+		case "local_root_hash":
+			fmt.Fprintln(out, "local root hash  "+evidence.Value)
 		}
 	}
 	fmt.Fprintln(out, "result         resolved by "+context.ResolvedBy)
