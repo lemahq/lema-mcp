@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -175,6 +176,106 @@ func TestTargetRoutingEveryHostedReadDefaultsToReceiptVisibleRepositories(t *tes
 	}
 	if len(wire.knowledgePaths) != 1 {
 		t.Fatalf("frontload knowledge requests = %v, want the primary leaf once", wire.knowledgePaths)
+	}
+}
+
+func TestServeHostedSearchResolvesReceiptBeforeRetrieve(t *testing.T) {
+	var wire readWireCapture
+	server := readRoutingServer(t, &wire)
+	defer server.Close()
+	provider := &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: projectReadContext()}}
+	runtime := testHostedReadRuntime(provider, server)
+	installHostedReadRuntime(t, runtime)
+
+	recorder := httptest.NewRecorder()
+	httpSearch(recorder, httptest.NewRequest(http.MethodGet, "/api/search?q=queues", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("hosted search status = %d, body=%q", recorder.Code, recorder.Body.String())
+	}
+	if provider.calls != 1 {
+		t.Fatalf("target provider calls = %d, want one immutable receipt", provider.calls)
+	}
+	if len(wire.retrieveScopes) != 1 {
+		t.Fatalf("retrieve requests = %d, want 1", len(wire.retrieveScopes))
+	}
+	if got, want := strings.Join(wire.retrieveScopes[0], ","), "repo-primary,repo-z,repo-a"; got != want {
+		t.Fatalf("retrieve workspace_ids = %q, want canonical primary-first scope %q", got, want)
+	}
+}
+
+func TestServeHostedSearchNonResolvedReceiptSendsNoRetrieveAndReturnsGenericError(t *testing.T) {
+	cases := []struct {
+		name   string
+		result resolutionResult
+	}{
+		{"unresolved", resolutionResult{Status: resolutionUnresolved, Reason: hiddenReadWorkspaceID}},
+		{"ambiguous", resolutionResult{Status: resolutionAmbiguous, Reason: hiddenReadWorkspaceID}},
+		{"forbidden", resolutionResult{Status: resolutionForbidden, Reason: hiddenReadWorkspaceID}},
+		{"stale", resolutionResult{Status: resolutionStale, Reason: hiddenReadWorkspaceID}},
+		{"malformed", resolutionResult{Status: resolutionResolved, Context: targetContext{}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var wire readWireCapture
+			server := readRoutingServer(t, &wire)
+			defer server.Close()
+			provider := &fakeTargetProvider{result: tc.result}
+			runtime := testHostedReadRuntime(provider, server)
+			installHostedReadRuntime(t, runtime)
+
+			recorder := httptest.NewRecorder()
+			httpSearch(recorder, httptest.NewRequest(http.MethodGet, "/api/search?q=queues", nil))
+
+			if wire.requests != 0 {
+				t.Fatalf("hosted operation requests = %d, want zero", wire.requests)
+			}
+			if recorder.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusInternalServerError)
+			}
+			if got, want := recorder.Body.String(), "hosted search unavailable\n"; got != want {
+				t.Fatalf("error body = %q, want generic %q", got, want)
+			}
+			for _, hidden := range []string{hiddenReadWorkspaceID, string(tc.result.Status), tc.result.Reason, runtime.apiURL, runtime.token} {
+				if hidden != "" && strings.Contains(recorder.Body.String(), hidden) {
+					t.Fatalf("error body leaked %q: %q", hidden, recorder.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestHostedReadWorkspaceSchemasDescribeReceiptDefaultAndNarrowing(t *testing.T) {
+	cases := []struct {
+		name        string
+		input       any
+		description string
+	}{
+		{"ask", askInput{}, askTool.Description},
+		{"check", checkInput{}, checkDecidedTool.Description},
+		{"resolve", resolveInput{}, resolveTool.Description},
+		{"search", searchInput{}, searchDecisionsTool.Description},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			field, ok := reflect.TypeOf(tc.input).FieldByName("WorkspaceIDs")
+			if !ok {
+				t.Fatal("WorkspaceIDs field missing")
+			}
+			for surface, text := range map[string]string{
+				"workspace_ids schema": field.Tag.Get("jsonschema"),
+				"tool description":     tc.description,
+			} {
+				for _, phrase := range []string{"omit", "resolved Project repository set", "only narrow"} {
+					if !strings.Contains(text, phrase) {
+						t.Errorf("%s %s = %q, want phrase %q", tc.name, surface, text, phrase)
+					}
+				}
+				if strings.Contains(text, "every workspace you can see") || strings.Contains(text, "Organization-wide") {
+					t.Errorf("%s %s preserves superseded broad-read promise: %q", tc.name, surface, text)
+				}
+			}
+		})
 	}
 }
 

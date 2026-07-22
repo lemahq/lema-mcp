@@ -42,10 +42,9 @@ func recordDecision(ctx context.Context, _ *mcp.CallToolRequest, in recordInput)
 
 type checkInput struct {
 	Topic string `json:"topic" jsonschema:"the direction or option you are about to propose — checked against decisions already settled and closed"`
-	// WorkspaceIDs optionally scopes the check to specific workspaces. Omit to
-	// check every workspace you can see; pass the repo's own workspace so a check
-	// never trips on an unrelated repo's rejected option (cross-repo false ruled_out).
-	WorkspaceIDs []string `json:"workspace_ids,omitempty" jsonschema:"optional workspace ids to scope the check to; omit to check every workspace you can see"`
+	// WorkspaceIDs can only narrow a hosted check within the repository leaves
+	// named by the resolved Project receipt. Omission uses that complete set.
+	WorkspaceIDs []string `json:"workspace_ids,omitempty" jsonschema:"workspace ids may only narrow within the resolved Project repository set; omit to use the complete resolved Project repository set"`
 }
 
 type checkOutput struct {
