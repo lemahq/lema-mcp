@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,26 +14,17 @@ import (
 
 // citationTestStore records atoms shaped like the pain-point #4 specimens: options
 // whose names are made of ordinary doc vocabulary, so citing their rejection in
-// prose used to fire the guard.
+// prose used to fire the guard. The Kafka record is the shared kafkaQueueRecord
+// fixture (guard_test.go) so its option/why stay single-sourced.
 func citationTestStore(t *testing.T) *source.CaptureStore {
 	t.Helper()
-	s, err := source.NewCaptureStore(filepath.Join(t.TempDir(), "decisions.jsonl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, r := range []source.DecisionRecord{
-		{Title: "binding sweep UX", Chosen: "reviewed-list bulk confirm",
+	return storeWith(t,
+		source.DecisionRecord{Title: "binding sweep UX", Chosen: "reviewed-list bulk confirm",
 			Rejected: []source.RejectedAlt{{Option: "per-row-only confirms", Why: "ceremony not judgment"}}},
-		{Title: "cross-repo transport", Chosen: "state brief",
+		source.DecisionRecord{Title: "cross-repo transport", Chosen: "state brief",
 			Rejected: []source.RejectedAlt{{Option: "relay", Why: "naming collision with the arc term"}}},
-		{Title: "message queue", Chosen: "NATS",
-			Rejected: []source.RejectedAlt{{Option: "Kafka", Why: "operational burden"}}},
-	} {
-		if _, err := s.Record(r); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return s
+		kafkaQueueRecord,
+	)
 }
 
 func TestStripCitationLines(t *testing.T) {
@@ -54,6 +47,15 @@ func TestStripCitationLines(t *testing.T) {
 		{"unrelated 'rejection' word forms do not over-match", "the rejection handler retries", "the rejection handler retries", false},
 		{"killed: list idiom", "Killed: dedicated image/pipeline, Pub/Sub, relay", "", true},
 		{"bare killed is NOT a marker", "the startup probe killed it", "the startup probe killed it", false},
+		{"skilled: is NOT killed:", "Highly skilled: use relay for now", "Highly skilled: use relay for now", false},
+		{"hex-word identifier is NOT a decision ref", "let d_added = useKafka()", "let d_added = useKafka()", false},
+		{"short hex word is NOT a decision ref", "total := d_beef + reconnect(relay)", "total := d_beef + reconnect(relay)", false},
+		{"uppercase d_ ref is NOT a marker (ids are lowercase)", "see D_045D82 for relay", "see D_045D82 for relay", false},
+		{"rejecting progressive form", "we are rejecting Kafka here", "", true},
+		{"reject present tense", "we reject Kafka for this", "", true},
+		{"short unpadded ADR ref", "we moved off relay per ADR-52", "", true},
+		{"single-word line is never a citation (bare basename)", "kafka-adr-0140.go", "kafka-adr-0140.go", false},
+		{"single-word marker identifier line kept", "rejected_handler.go", "rejected_handler.go", false},
 	}
 	for _, c := range cases {
 		kept, stripped := stripCitationLines(c.in)
@@ -121,6 +123,99 @@ func TestGuardCitationExemption(t *testing.T) {
 	if out, _ := evaluateGuard(closed, ctxQuery("q.go",
 		"use Kafka per ADR-0007 for retries"), guardModeContext); out != nil {
 		t.Fatalf("marker-sharing line is exempt by design, got %+v", out)
+	}
+	// A marker in the FILENAME itself must not cost basename matching: a bare
+	// basename is a single word, and a single-word line is never a citation.
+	out, _ = evaluateGuard(closed, ctxQuery("kafka-adr-0140.go",
+		"package worker"), guardModeContext)
+	if out == nil {
+		t.Fatal("marker-bearing basename must stay matchable and fire")
+	}
+}
+
+// An option whose NAME itself carries a citation marker can never sit on a
+// non-citation line, so the exemption structurally cannot apply to it: such
+// atoms match against the FULL query. The trade (citing such an option also
+// fires) is deliberate — for marker-named options a false nudge beats a
+// permanently silent guard.
+func TestMarkerKeyedOptionStillFires(t *testing.T) {
+	closed := storeWith(t,
+		source.DecisionRecord{Title: "carry-over", Chosen: "content-hash rule",
+			Rejected: []source.RejectedAlt{{Option: "supersedes queue", Why: "no successor by construction"}}},
+		source.DecisionRecord{Title: "pipeline naming", Chosen: "flow",
+			Rejected: []source.RejectedAlt{{Option: "adr-0999 pipeline", Why: "collides with the ADR namespace"}}},
+	).ClosedAtoms()
+
+	// Plain re-proposal of a marker-named option fires despite the marker word.
+	if out, _ := evaluateGuard(closed, ctxQuery("plan.md",
+		"enable the supersedes queue here"), guardModeContext); out == nil {
+		t.Fatal("marker-named option must still fire on a plain proposal")
+	}
+	if out, _ := evaluateGuard(closed, ctxQuery("plan.md",
+		"wire the adr-0999 pipeline here"), guardModeContext); out == nil {
+		t.Fatal("ADR-named option must still fire on a plain proposal")
+	}
+	// The accepted trade: even a citing line fires for a marker-named option.
+	if out, _ := evaluateGuard(closed, ctxQuery("HANDOFF.md",
+		"rejected: supersedes queue (no successor)"), guardModeContext); out == nil {
+		t.Fatal("marker-named option fires even when cited — the deliberate trade")
+	}
+}
+
+// The fire decision and the suppression counterfactual come from ONE evaluation
+// (evaluateCitation): they can never both be non-nil for the same query.
+func TestSuppressionConsistency(t *testing.T) {
+	closed := citationTestStore(t).ClosedAtoms()
+	for _, q := range []string{
+		ctxQuery("HANDOFF.md", "sweep landed — rejected: per-row-only confirms (ceremony)"),
+		ctxQuery("plan.md", "let's implement per-row-only confirms for binding"),
+		ctxQuery("plan.md", "ADR-0141 landed\nwire up Kafka consumer"),
+		ctxQuery("notes.md", "rejected: an option nobody recorded"),
+		ctxQuery("x.md", "nothing to see"),
+	} {
+		out, _ := evaluateGuard(closed, q, guardModeContext)
+		a := citationExemptAtom(closed, q)
+		if out != nil && a != nil {
+			t.Fatalf("query %q: fired AND reported suppressed — the two must be exclusive", q)
+		}
+	}
+}
+
+// The terminal sidecar path (serve --http → httpGuard) applies the exemption via
+// the same evaluation, so it must ALSO write the citation-exempt calibration
+// record — otherwise the attended cohort's suppressed fires are invisible to the
+// ADR-0052 calibration the exemption's trust depends on.
+func TestHTTPGuardLogsCitationExempt(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "guard.log")
+	t.Setenv("LEMA_GUARD_LOG", logPath)
+	oldCapture := capture
+	capture = citationTestStore(t)
+	t.Cleanup(func() { capture = oldCapture })
+
+	body := `{"tool_name":"Edit","tool_input":{"file_path":"HANDOFF.md","new_string":"sweep landed — rejected: per-row-only confirms (ceremony)"}}`
+	req := httptest.NewRequest(http.MethodPost, "http://x/api/guard", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	httpGuard(w, req)
+
+	var out struct {
+		Decided bool `json:"decided"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Decided {
+		t.Fatal("citation line must not intercept on the terminal path")
+	}
+	b, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected a citation-exempt record from the sidecar path: %v", err)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal(b, &rec); err != nil {
+		t.Fatalf("log line not JSON: %v: %s", err, b)
+	}
+	if rec["decision"] != "citation-exempt" {
+		t.Errorf("decision = %v, want citation-exempt", rec["decision"])
 	}
 }
 

@@ -45,13 +45,21 @@ func httpGuard(w http.ResponseWriter, r *http.Request) {
 	}
 	// The same evaluation the PreToolUse hook runs — the matched CLOSED atom above
 	// the context floor. The terminal renders that atom; a human resolves it.
-	_, atom := evaluateGuard(closed, guardQuery(in.ToolInput), mode)
+	query := guardQuery(in.ToolInput)
+	hits, suppressed := evaluateCitation(closed, query)
+	_, atom := guardDecision(hits, mode)
 	out := guardCheckOutput{Decided: atom != nil}
 	if atom != nil {
 		out.Closed = []source.Atom{*atom}
 		// Open a pending interception for the terminal to render and a human to
 		// resolve; the hook polls /api/guard/result?id= for that resolution.
 		out.ID = guardPendings.add(in.ToolName, out.Closed)
+	} else if suppressed != nil && mode != guardModeOff {
+		// The citation exemption suppressed a fire on the attended path too —
+		// write the same calibration record the unattended hook writes, so the
+		// terminal cohort's suppressions reach the ADR-0052 precision log.
+		// guardLogWrite is a no-op when LEMA_GUARD_LOG is unset.
+		guardLogWrite(in, "citation-exempt", query, suppressed)
 	}
 	writeJSONResp(w, out)
 }
