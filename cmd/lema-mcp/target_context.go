@@ -76,7 +76,30 @@ var processTargetProvider targetProvider
 func newHostedTargetProvider(client *http.Client, apiURL, token string) targetProvider {
 	resolver := newHostedTargetResolver(client, apiURL, token)
 	resolver.readGit = readContextGitEvidence
-	return resolver
+	return newBoundHostedTargetProvider(resolver, apiURL, token)
+}
+
+// boundHostedTargetProvider owns the credential-derived cache identity. An
+// operation supplies target evidence and explicit overrides, but cannot spoof
+// the API or credential partition used by the shared resolver cache.
+type boundHostedTargetProvider struct {
+	resolver              targetProvider
+	apiURL                string
+	credentialFingerprint string
+}
+
+func newBoundHostedTargetProvider(resolver targetProvider, apiURL, token string) targetProvider {
+	return &boundHostedTargetProvider{
+		resolver:              resolver,
+		apiURL:                apiURL,
+		credentialFingerprint: credentialFingerprint(token),
+	}
+}
+
+func (p *boundHostedTargetProvider) Resolve(ctx context.Context, input resolveTargetInput) (resolutionResult, error) {
+	input.APIURL = p.apiURL
+	input.CredentialFingerprint = p.credentialFingerprint
+	return p.resolver.Resolve(ctx, input)
 }
 
 // withResolvedTarget is the single generic operation gate. An operation only

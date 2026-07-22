@@ -13,11 +13,38 @@ type fakeTargetProvider struct {
 	result resolutionResult
 	err    error
 	calls  int
+	input  resolveTargetInput
 }
 
-func (p *fakeTargetProvider) Resolve(context.Context, resolveTargetInput) (resolutionResult, error) {
+func (p *fakeTargetProvider) Resolve(_ context.Context, input resolveTargetInput) (resolutionResult, error) {
 	p.calls++
+	p.input = input
 	return p.result, p.err
+}
+
+func TestHostedTargetProviderBindsCredentialDerivedCacheIdentity(t *testing.T) {
+	resolver := &fakeTargetProvider{result: resolutionResult{Status: resolutionUnresolved}}
+	provider := newBoundHostedTargetProvider(resolver, "https://api.bound.test", "lema_live_bound_token")
+
+	_, err := provider.Resolve(context.Background(), resolveTargetInput{
+		APIURL:                "https://api.spoofed.test",
+		CredentialFingerprint: "spoofed-fingerprint",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolver.calls != 1 {
+		t.Fatalf("resolver calls = %d, want 1", resolver.calls)
+	}
+	if got := resolver.input.APIURL; got != "https://api.bound.test" {
+		t.Fatalf("provider accepted caller API URL %q", got)
+	}
+	if got, want := resolver.input.CredentialFingerprint, credentialFingerprint("lema_live_bound_token"); got != want {
+		t.Fatalf("provider accepted caller credential fingerprint %q", got)
+	}
+	if resolver.input.CredentialFingerprint == "lema_live_bound_token" {
+		t.Fatal("provider forwarded the raw token as a cache key")
+	}
 }
 
 func TestWithResolvedTargetCallsOperationWithAnIsolatedReceipt(t *testing.T) {
