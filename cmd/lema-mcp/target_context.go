@@ -113,6 +113,7 @@ func (r *targetResolver) Resolve(ctx context.Context, in resolveTargetInput) (re
 	}
 
 	var git gitTargetEvidence
+	var observedGit repositoryIdentity
 	if in.CWD != "" && r.readGit != nil {
 		if read, err := r.readGit(ctx, in.CWD); err == nil {
 			git = read
@@ -120,20 +121,22 @@ func (r *targetResolver) Resolve(ctx context.Context, in resolveTargetInput) (re
 				git.Repository, _ = repositoryIdentityFromRemote(git.RemoteURL)
 			}
 			if git.Repository.Canonical != "" {
+				observedGit = git.Repository
 				key := r.cacheKey(in, git.Repository)
+				identity := git.Repository
 				if key != "" {
 					if cached, ok := r.cache.get(key, r.timeNow()); ok {
-						// A cache entry only saves discovery work. Current workspace,
-						// membership, and link authority must still validate this receipt.
-						return r.validateContext(ctx, in, cached, "canonical_git")
+						// Cache only canonical repository discovery. Project selection
+						// always comes from current workspace/link authority below.
+						identity = cached
 					}
 				}
-				res, err := r.resolveRepository(ctx, in, git.Repository, "canonical_git")
+				res, err := r.resolveRepository(ctx, in, identity, "canonical_git")
 				if err != nil || res.Status != resolutionUnresolved {
 					if err == nil && res.Status == resolutionResolved {
 						res.Context.Evidence = append(res.Context.Evidence, gitEvidence(in, git)...)
 						if key != "" {
-							r.cache.put(key, res.Context, r.timeNow())
+							r.cache.put(key, identity, r.timeNow())
 						}
 					}
 					return res, err
@@ -142,6 +145,9 @@ func (r *targetResolver) Resolve(ctx context.Context, in resolveTargetInput) (re
 		}
 	}
 	if in.LocalAssociation != nil {
+		if observedGit.Canonical != "" && in.LocalAssociation.Repository.Canonical != observedGit.Canonical {
+			return resolutionResult{Status: resolutionStale, Reason: "local association belongs to a different repository than current Git evidence"}, nil
+		}
 		return r.validateContext(ctx, in, *in.LocalAssociation, "local_association")
 	}
 	return resolutionResult{Status: resolutionUnresolved, Reason: "no validated explicit target, run, Git repository, or local association"}, nil
@@ -501,19 +507,19 @@ func newTargetResolutionCache(capacity int) *targetResolutionCache {
 }
 
 type targetCacheEntry struct {
-	context targetContext
-	expires time.Time
+	repository repositoryIdentity
+	expires    time.Time
 }
 
-func (c *targetResolutionCache) get(key string, now time.Time) (targetContext, bool) {
+func (c *targetResolutionCache) get(key string, now time.Time) (repositoryIdentity, bool) {
 	if c == nil {
-		return targetContext{}, false
+		return repositoryIdentity{}, false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	value, ok := c.values[key]
 	if !ok {
-		return targetContext{}, false
+		return repositoryIdentity{}, false
 	}
 	if !now.Before(value.expires) {
 		delete(c.values, key)
@@ -523,12 +529,12 @@ func (c *targetResolutionCache) get(key string, now time.Time) (targetContext, b
 				break
 			}
 		}
-		return targetContext{}, false
+		return repositoryIdentity{}, false
 	}
-	return cloneContext(value.context), true
+	return value.repository, true
 }
 
-func (c *targetResolutionCache) put(key string, value targetContext, now time.Time) {
+func (c *targetResolutionCache) put(key string, value repositoryIdentity, now time.Time) {
 	if c == nil {
 		return
 	}
@@ -537,7 +543,7 @@ func (c *targetResolutionCache) put(key string, value targetContext, now time.Ti
 	if _, exists := c.values[key]; !exists {
 		c.order = append(c.order, key)
 	}
-	c.values[key] = targetCacheEntry{context: cloneContext(value), expires: now.Add(targetCacheTTL)}
+	c.values[key] = targetCacheEntry{repository: value, expires: now.Add(targetCacheTTL)}
 	for len(c.order) > c.capacity {
 		oldest := c.order[0]
 		c.order = c.order[1:]

@@ -180,15 +180,16 @@ func TestTargetResolverCacheIsBoundedAndCredentialScoped(t *testing.T) {
 
 func TestTargetResolverCacheRevalidatesWarmReceipt(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		mutate func(*targetResolverFixture)
+		name            string
+		mutate          func(*targetResolverFixture)
+		wantNonResolved bool
 	}{
 		{"repository visibility revoked", func(base *targetResolverFixture) {
 			base.workspaces = removeWorkspace(base.workspaces, "repo-api")
-		}},
+		}, true},
 		{"project link revoked", func(base *targetResolverFixture) {
 			base.parents = nil
-		}},
+		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base := resolverFixture(t)
@@ -204,8 +205,11 @@ func TestTargetResolverCacheRevalidatesWarmReceipt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if second.Status == resolutionResolved {
+			if tc.wantNonResolved && second.Status == resolutionResolved {
 				t.Fatalf("warm cache returned a resolved context after authoritative %s: %#v", tc.name, second)
+			}
+			if !tc.wantNonResolved && (second.Status != resolutionResolved || second.Context.ProjectWorkspaceID != "repo-api") {
+				t.Fatalf("warm cache did not refresh project-link revocation to singleton compatibility: %#v", second)
 			}
 			if base.workspaceCalls <= before {
 				t.Fatalf("cache hit did not re-fetch authoritative visibility: before=%d after=%d", before, base.workspaceCalls)
@@ -398,6 +402,102 @@ func TestTargetResolverExplicitProjectUsesVisibleLeafIntersection(t *testing.T) 
 	}
 }
 
+func TestTargetResolverWarmCacheRerunsCurrentProjectCardinality(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		initial []string
+		current []string
+	}{
+		{"second parent makes one-parent repository ambiguous", []string{"project-payments"}, []string{"project-payments", "project-platform"}},
+		{"removed parent becomes singleton compatibility", []string{"project-payments"}, nil},
+		{"singleton gains one parent", nil, []string{"project-payments"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := resolverFixture(t)
+			base.parents = tc.initial
+			in := resolveTargetInput{APIURL: "https://api.example", CredentialFingerprint: "cred-a", OrganizationID: "org-1", CWD: "/repo"}
+			warmResolver := base.resolver()
+			if warm, err := warmResolver.Resolve(context.Background(), in); err != nil || warm.Status != resolutionResolved {
+				t.Fatalf("initial warmup = %#v, %v", warm, err)
+			}
+			base.parents = tc.current
+			warm, err := warmResolver.Resolve(context.Background(), in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			coldResolver := base.resolver()
+			coldResolver.cache = newTargetResolutionCache(64)
+			cold, err := coldResolver.Resolve(context.Background(), in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := resolutionSummary(warm), resolutionSummary(cold); got != want {
+				t.Fatalf("warm outcome %s differs from cold outcome %s after %s", got, want, tc.name)
+			}
+		})
+	}
+}
+
+func TestTargetResolverGitRejectsAssociationForDifferentRepository(t *testing.T) {
+	base := resolverFixture(t)
+	base.workspaces = append(base.workspaces,
+		targetWorkspace{ID: "project-local", OrganizationID: "org-1"},
+		targetWorkspace{ID: "repo-local", OrganizationID: "org-1", IsRepository: true, Repository: mustRepository(t, "https://github.com/acme/local.git")},
+	)
+	base.links = map[string][]string{"project-local": {"repo-local"}}
+	association := resolvedTarget("project-local", "repo-local", "https://github.com/acme/local.git", "prior")
+
+	base.git = gitTargetEvidence{RemoteURL: "https://github.com/acme/unregistered.git", Root: "/repo"}
+	result, err := base.resolver().Resolve(context.Background(), resolveTargetInput{OrganizationID: "org-1", CWD: "/repo", LocalAssociation: &association})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != resolutionStale {
+		t.Fatalf("different observed Git repository accepted local association: %#v", result)
+	}
+
+	base.git = gitTargetEvidence{RemoteURL: "https://github.com/acme/local.git", Root: "/repo"}
+	result, err = base.resolver().Resolve(context.Background(), resolveTargetInput{OrganizationID: "org-1", CWD: "/repo", LocalAssociation: &association})
+	if err != nil || result.Status != resolutionResolved {
+		t.Fatalf("matching Git association = %#v, %v", result, err)
+	}
+	result, err = base.resolver().Resolve(context.Background(), resolveTargetInput{OrganizationID: "org-1", CWD: "/no-git", LocalAssociation: &association})
+	if err != nil || result.Status != resolutionResolved {
+		t.Fatalf("non-Git association escape hatch = %#v, %v", result, err)
+	}
+}
+
+func TestTargetResolverWarmCacheRetainsCurrentGitEvidence(t *testing.T) {
+	base := resolverFixture(t)
+	base.readGit = func(_ context.Context, cwd string) (gitTargetEvidence, error) {
+		return gitTargetEvidence{RemoteURL: "https://github.com/acme/api.git", Root: strings.TrimSuffix(cwd, "/nested")}, nil
+	}
+	for _, cwd := range []string{"/worktrees/api-one", "/worktrees/api-two/nested"} {
+		in := resolveTargetInput{APIURL: "https://api.example", CredentialFingerprint: "cred-a", OrganizationID: "org-1", CWD: cwd}
+		resolver := base.resolver()
+		cold, err := resolver.Resolve(context.Background(), in)
+		if err != nil || cold.Status != resolutionResolved {
+			t.Fatalf("cold %q = %#v, %v", cwd, cold, err)
+		}
+		key := resolver.cacheKey(in, cold.Context.Repository)
+		cachedBefore, ok := base.cache.get(key, base.now)
+		if !ok {
+			t.Fatalf("cold %q did not warm cache", cwd)
+		}
+		warm, err := resolver.Resolve(context.Background(), in)
+		if err != nil || warm.Status != resolutionResolved {
+			t.Fatalf("warm %q = %#v, %v", cwd, warm, err)
+		}
+		if evidenceValue(warm.Context.Evidence, "cwd_path_hash") != pathHash(cwd) || evidenceValue(warm.Context.Evidence, "git_root_path_hash") != pathHash(strings.TrimSuffix(cwd, "/nested")) {
+			t.Fatalf("warm %q dropped current Git path evidence: %#v", cwd, warm.Context.Evidence)
+		}
+		cachedAfter, ok := base.cache.get(key, base.now)
+		if !ok || cachedBefore != cachedAfter {
+			t.Fatalf("warm %q mutated cached repository discovery: before=%#v after=%#v", cwd, cachedBefore, cachedAfter)
+		}
+	}
+}
+
 type targetResolverFixture struct {
 	workspaces     []targetWorkspace
 	parents        []string
@@ -509,6 +609,14 @@ func removeWorkspace(workspaces []targetWorkspace, id string) []targetWorkspace 
 		}
 	}
 	return out
+}
+
+func resolutionSummary(result resolutionResult) string {
+	parts := []string{string(result.Status), result.Context.ProjectWorkspaceID, result.Context.RepositoryWorkspaceID}
+	for _, candidate := range result.Candidates {
+		parts = append(parts, candidate.ProjectWorkspaceID, candidate.RepositoryWorkspaceID)
+	}
+	return strings.Join(parts, "|")
 }
 
 var errNoGitEvidence = fmt.Errorf("no git evidence")
