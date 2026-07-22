@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -41,5 +42,30 @@ func TestTargetContextAcceptanceRunnerListsEveryLocalCase(t *testing.T) {
 		if strings.Contains(strings.ToLower(string(out)), forbidden) {
 			t.Fatalf("Phase 8 case %q entered the local acceptance boundary: %s", forbidden, out)
 		}
+	}
+}
+
+func TestTargetContextAcceptanceRunnerSmokeRestartsCandidateAndCallsStateBrief(t *testing.T) {
+	dir := t.TempDir()
+	adr := filepath.Join(dir, "0001-smoke.md")
+	if err := os.WriteFile(adr, []byte("---\nstatus: accepted\n---\n# Smoke\n\n## Decision\nUse the acceptance smoke.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script, err := filepath.Abs(filepath.Join("..", "..", "scripts", "target-context-acceptance.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(script, "--smoke-only")
+	cmd.Env = append(os.Environ(), "LEMA_ACCEPTANCE_ADR_DIR="+dir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("acceptance runner --smoke-only: %v\n%s", err, out)
+	}
+	got := string(out)
+	if strings.Count(got, "candidate: fresh stdio process") != 2 {
+		t.Fatalf("candidate was not restarted exactly once:\n%s", got)
+	}
+	if strings.Count(got, "safe State Brief unavailable call passed") != 2 {
+		t.Fatalf("both candidate processes did not validate a safe State Brief call:\n%s", got)
 	}
 }

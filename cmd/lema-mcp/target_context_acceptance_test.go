@@ -45,6 +45,9 @@ func TestTargetResolverParallelRepositoryReceiptsRemainIsolated(t *testing.T) {
 		now:   func() time.Time { return time.Unix(1, 0).UTC() },
 		cache: newTargetResolutionCache(64),
 	}
+	provider := newObservedTargetProvider(newBoundHostedTargetProvider(
+		resolver, "https://api.example", "parallel-process-token",
+	))
 	results := make(chan outcome, len(inputs))
 	var wg sync.WaitGroup
 	for _, input := range inputs {
@@ -52,8 +55,8 @@ func TestTargetResolverParallelRepositoryReceiptsRemainIsolated(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			result, err := resolver.Resolve(context.Background(), resolveTargetInput{
-				APIURL: "https://api.example", CredentialFingerprint: "cred-a", OrganizationID: "org-1", CWD: input.cwd,
+			result, err := provider.Resolve(context.Background(), resolveTargetInput{
+				APIURL: "https://spoofed.example", CredentialFingerprint: "spoofed", OrganizationID: "org-1", CWD: input.cwd,
 			})
 			results <- outcome{name: input.name, result: result, err: err}
 		}()
@@ -79,22 +82,78 @@ func TestTargetResolverParallelRepositoryReceiptsRemainIsolated(t *testing.T) {
 // Credential fingerprints partition discovery/cache state even when two users
 // are authorized for the same Repository and Project.
 func TestTargetResolverCredentialPartitionsRemainIsolated(t *testing.T) {
-	base := resolverFixture(t)
-	base.parents = []string{"project-payments"}
-	resolver := base.resolver()
-	for _, fingerprint := range []string{"user-a-fingerprint", "user-b-fingerprint"} {
-		result, err := resolver.Resolve(context.Background(), resolveTargetInput{
-			APIURL: "https://api.example", CredentialFingerprint: fingerprint, OrganizationID: "org-1", CWD: "/repo",
-		})
-		if err != nil || result.Status != resolutionResolved {
-			t.Fatalf("credential %s resolution = %#v, %v", fingerprint, result, err)
+	const (
+		userAToken   = "user-a-token"
+		userBToken   = "user-b-token"
+		userAProject = "project-payments"
+		userBProject = "project-platform"
+	)
+	repository := targetWorkspace{
+		ID: "repo-api", OrganizationID: "org-1", IsRepository: true,
+		Repository: mustRepository(t, "https://github.com/acme/api.git"),
+	}
+	projectsByFingerprint := map[string]string{
+		credentialFingerprint(userAToken): userAProject,
+		credentialFingerprint(userBToken): userBProject,
+	}
+	resolver := &targetResolver{
+		fetchWorkspaces: func(_ context.Context, input resolveTargetInput) ([]targetWorkspace, error) {
+			project, ok := projectsByFingerprint[input.CredentialFingerprint]
+			if !ok {
+				return nil, nil
+			}
+			return []targetWorkspace{repository, {ID: project, OrganizationID: "org-1"}}, nil
+		},
+		fetchLinks: func(_ context.Context, input resolveTargetInput, project string) ([]string, error) {
+			if projectsByFingerprint[input.CredentialFingerprint] == project {
+				return []string{"repo-api"}, nil
+			}
+			return nil, nil
+		},
+		readGit: func(context.Context, string) (gitTargetEvidence, error) {
+			return gitTargetEvidence{RemoteURL: "https://github.com/acme/api.git", Root: "/repo"}, nil
+		},
+		now:   func() time.Time { return time.Unix(1, 0).UTC() },
+		cache: newTargetResolutionCache(64),
+	}
+	providers := map[string]targetProvider{
+		"user-a": newObservedTargetProvider(newBoundHostedTargetProvider(resolver, "https://api.example", userAToken)),
+		"user-b": newObservedTargetProvider(newBoundHostedTargetProvider(resolver, "https://api.example", userBToken)),
+	}
+	wantProjects := map[string]string{"user-a": userAProject, "user-b": userBProject}
+	type outcome struct {
+		user   string
+		result resolutionResult
+		err    error
+	}
+	results := make(chan outcome, len(providers))
+	var wg sync.WaitGroup
+	for user, provider := range providers {
+		user, provider := user, provider
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result, err := provider.Resolve(context.Background(), resolveTargetInput{
+				APIURL: "https://spoofed.example", CredentialFingerprint: "spoofed", OrganizationID: "org-1", CWD: "/repo",
+			})
+			results <- outcome{user: user, result: result, err: err}
+		}()
+	}
+	wg.Wait()
+	close(results)
+	for outcome := range results {
+		if outcome.err != nil || outcome.result.Status != resolutionResolved {
+			t.Fatalf("%s resolution = %#v, %v", outcome.user, outcome.result, outcome.err)
 		}
-		if result.Context.ProjectWorkspaceID != "project-payments" || result.Context.RepositoryWorkspaceID != "repo-api" {
-			t.Fatalf("credential %s received wrong receipt: %#v", fingerprint, result.Context)
+		if got := outcome.result.Context.ProjectWorkspaceID; got != wantProjects[outcome.user] {
+			t.Fatalf("%s crossed credential partitions: project=%q want=%q", outcome.user, got, wantProjects[outcome.user])
+		}
+		if outcome.result.Context.RepositoryWorkspaceID != "repo-api" {
+			t.Fatalf("%s received wrong Repository receipt: %#v", outcome.user, outcome.result.Context)
 		}
 	}
-	if got := base.cache.len(); got != 2 {
-		t.Fatalf("two credential partitions produced %d cache entries, want 2", got)
+	if got := resolver.cache.len(); got != 2 {
+		t.Fatalf("two bound credential providers produced %d shared-cache entries, want 2", got)
 	}
 }
 
