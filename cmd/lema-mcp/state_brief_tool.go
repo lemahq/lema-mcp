@@ -38,12 +38,19 @@ type stateBriefInput struct {
 
 // stateBriefOutput passes the server's brief through verbatim (scope,
 // sections, silences, as_of) plus a note on how the run was resolved.
+//
+// Sections and Silences are `any`, NOT json.RawMessage: the go-sdk infers the
+// tool's output schema from this struct, and json.RawMessage ([]byte) infers
+// as {type: array, items: {type: integer}} — the SDK's own output validation
+// then rejected every non-empty brief (0.21.0 regression, caught live). `any`
+// infers a permissive schema; the values are the wire JSON decoded 1:1, so
+// consumers see the same content.
 type stateBriefOutput struct {
-	Scope    string          `json:"scope,omitempty"`
-	Sections json.RawMessage `json:"sections,omitempty"`
-	Silences json.RawMessage `json:"silences,omitempty"`
-	AsOf     string          `json:"as_of,omitempty"`
-	Note     string          `json:"note,omitempty"`
+	Scope    string `json:"scope,omitempty"`
+	Sections any    `json:"sections,omitempty"`
+	Silences any    `json:"silences,omitempty"`
+	AsOf     string `json:"as_of,omitempty"`
+	Note     string `json:"note,omitempty"`
 }
 
 var getStateBriefTool = &mcp.Tool{
@@ -175,9 +182,14 @@ func stateBrief(ctx context.Context, run, caller string) stateBriefOutput {
 	if err := json.Unmarshal(body, &wire); err != nil {
 		return stateBriefOutput{Note: "state brief unavailable: unreadable server response"}
 	}
-	out := stateBriefOutput{
-		Scope: wire.Scope, Sections: wire.Sections, Silences: wire.Silences,
-		AsOf: wire.AsOf, Note: note,
+	out := stateBriefOutput{Scope: wire.Scope, AsOf: wire.AsOf, Note: note}
+	// The sub-messages are valid JSON (the outer unmarshal succeeded), so these
+	// decodes cannot fail; a nil/absent field stays nil and is omitted.
+	if len(wire.Sections) > 0 {
+		_ = json.Unmarshal(wire.Sections, &out.Sections)
+	}
+	if len(wire.Silences) > 0 {
+		_ = json.Unmarshal(wire.Silences, &out.Silences)
 	}
 	logUsage(caller, note, 1, out)
 	return out
