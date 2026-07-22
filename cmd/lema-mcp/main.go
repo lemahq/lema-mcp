@@ -319,6 +319,23 @@ func main() {
 	serveMode := false
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "doctor":
+			// Diagnostics must run before the MCP server flags are parsed: their
+			// only job is to expose the shared resolver's typed result, never to
+			// start a server or broaden an unresolved target.
+			if err := runDoctorContextCommand(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "lema-mcp doctor context:", err)
+				os.Exit(1)
+			}
+			return
+		case "context":
+			// Repository-local associations are an explicit human action. Dispatch
+			// before server flags so a corrective action can never start MCP mode.
+			if err := runContextCommand(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "lema-mcp context:", err)
+				os.Exit(1)
+			}
+			return
 		case "init":
 			if err := runInit(os.Args[2:]); err != nil {
 				log.Fatalf("lema-mcp init: %v", err)
