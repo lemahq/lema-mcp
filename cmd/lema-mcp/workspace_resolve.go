@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,34 @@ import (
 
 	"github.com/lemahq/lema-mcp/internal/source"
 )
+
+// targetResolutionError retains the only diagnostic distinction callers may
+// safely expose: authorization failure versus an unresolved lookup. It never
+// carries a response body, endpoint, credential, or local path.
+type targetResolutionError struct {
+	status resolutionStatus
+	rung   string
+}
+
+func (e *targetResolutionError) Error() string {
+	return "target lookup " + string(e.status)
+}
+
+func targetResolutionStatusFromError(err error) resolutionStatus {
+	var typed *targetResolutionError
+	if errors.As(err, &typed) {
+		return typed.status
+	}
+	return resolutionUnresolved
+}
+
+func targetResolutionRungFromError(err error) string {
+	var typed *targetResolutionError
+	if errors.As(err, &typed) && typed.rung != "" {
+		return typed.rung
+	}
+	return "workspace_lookup"
+}
 
 // workspace_resolve.go — graceful recovery for a hosted capture with no
 // configured target workspace (#348). record_decision used to hard-fail the
@@ -66,23 +95,26 @@ func fetchWorkspaces(ctx context.Context, client *http.Client, apiURL, token str
 	url := strings.TrimRight(apiURL, "/") + "/workspaces"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, &targetResolutionError{status: resolutionUnresolved, rung: "workspace_lookup"}
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, &targetResolutionError{status: resolutionUnresolved, rung: "workspace_lookup"}
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("GET /workspaces: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, &targetResolutionError{status: resolutionForbidden, rung: "workspace_lookup"}
+		}
+		return nil, &targetResolutionError{status: resolutionUnresolved, rung: "workspace_lookup"}
 	}
 	var out struct {
 		Workspaces []workspaceEntry `json:"workspaces"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("GET /workspaces: decode response: %w", err)
+		return nil, &targetResolutionError{status: resolutionUnresolved, rung: "workspace_lookup"}
 	}
 	return out.Workspaces, nil
 }
@@ -94,17 +126,20 @@ func fetchWorkspaceLinks(ctx context.Context, client *http.Client, apiURL, token
 	url := strings.TrimRight(apiURL, "/") + "/workspaces/" + workspaceID + "/links"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, &targetResolutionError{status: resolutionUnresolved, rung: "project_link_lookup"}
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, &targetResolutionError{status: resolutionUnresolved, rung: "project_link_lookup"}
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("GET /workspaces/%s/links: HTTP %d: %s", workspaceID, resp.StatusCode, strings.TrimSpace(string(body)))
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, &targetResolutionError{status: resolutionForbidden, rung: "project_link_lookup"}
+		}
+		return nil, &targetResolutionError{status: resolutionUnresolved, rung: "project_link_lookup"}
 	}
 	var out struct {
 		Links []struct {
@@ -112,7 +147,7 @@ func fetchWorkspaceLinks(ctx context.Context, client *http.Client, apiURL, token
 		} `json:"links"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("GET /workspaces/%s/links: decode response: %w", workspaceID, err)
+		return nil, &targetResolutionError{status: resolutionUnresolved, rung: "project_link_lookup"}
 	}
 	ids := make([]string, 0, len(out.Links))
 	for _, link := range out.Links {
@@ -194,7 +229,7 @@ func resolveWorkspaceValueUUID(ctx context.Context, client *http.Client, apiURL,
 			return w.ID, nil
 		}
 	}
-	return "", fmt.Errorf("workspace %q is not visible to this credential", v)
+	return "", &targetResolutionError{status: resolutionStale, rung: "explicit_workspace"}
 }
 
 // workspaceIDHint is the one sentence every resolution error carries: where a

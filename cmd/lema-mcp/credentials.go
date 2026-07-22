@@ -66,7 +66,10 @@ func readCredentialsFile(path string) (map[string]string, error) {
 		return nil, err
 	}
 	if info.Mode().Perm()&0o077 != 0 {
-		fmt.Fprintf(os.Stderr, "lema-mcp: WARNING: %s is readable by other users — run: chmod 600 %s\n", path, path)
+		// The credentials file is intentionally outside the repository, but its
+		// absolute location is still private local evidence. Keep the remediation
+		// useful without printing a home directory in diagnostics or normal logs.
+		fmt.Fprintln(os.Stderr, "lema-mcp: WARNING: ~/.config/lema/credentials is readable by other users — run: chmod 600 ~/.config/lema/credentials")
 	}
 
 	f, err := os.Open(path)

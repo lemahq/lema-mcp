@@ -15,12 +15,19 @@ import (
 // Resolution itself remains wholly in targetResolver, so diagnostics and future
 // scoped operations cannot drift into separate target-selection algorithms.
 type doctorContextOptions struct {
-	APIURL  string
-	Token   string
-	CWD     string
-	ReadGit func(context.Context, string) (gitTargetEvidence, error)
-	Output  io.Writer
-	Client  *http.Client
+	APIURL              string
+	Token               string
+	ExplicitWorkspaceID string
+	CWD                 string
+	ReadGit             func(context.Context, string) (gitTargetEvidence, error)
+	Output              io.Writer
+	Client              *http.Client
+}
+
+type doctorConfig struct {
+	APIURL              string
+	Token               string
+	ExplicitWorkspaceID string
 }
 
 // runDoctorContext resolves the current checkout through the shared typed
@@ -40,9 +47,7 @@ func runDoctorContext(ctx context.Context, options doctorContextOptions) error {
 	}
 
 	if strings.TrimSpace(options.APIURL) == "" || strings.TrimSpace(options.Token) == "" {
-		fmt.Fprintln(out, "credential     unavailable")
-		fmt.Fprintln(out, "result         unresolved")
-		fmt.Fprintln(out, "action         configure LEMA_API_URL and LEMA_API_TOKEN")
+		writeDoctorFailure(out, resolutionUnresolved, "credentials", "configure LEMA_API_URL and LEMA_API_TOKEN")
 		return fmt.Errorf("target context unresolved")
 	}
 
@@ -50,21 +55,29 @@ func runDoctorContext(ctx context.Context, options doctorContextOptions) error {
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
+	explicitWorkspaceID := strings.TrimSpace(options.ExplicitWorkspaceID)
+	if explicitWorkspaceID != "" {
+		var err error
+		explicitWorkspaceID, err = resolveWorkspaceValueUUID(ctx, client, options.APIURL, options.Token, explicitWorkspaceID)
+		if err != nil {
+			writeDoctorFailure(out, targetResolutionStatusFromError(err), targetResolutionRungFromError(err), "")
+			return fmt.Errorf("target context %s", targetResolutionStatusFromError(err))
+		}
+	}
 	resolver := newHostedTargetResolver(client, options.APIURL, options.Token)
 	resolver.readGit = options.ReadGit
 	result, err := resolver.Resolve(ctx, resolveTargetInput{
 		APIURL:                options.APIURL,
 		CredentialFingerprint: credentialFingerprint(options.Token),
-		ExplicitWorkspaceID:   resolveWorkspaceID(),
+		ExplicitWorkspaceID:   explicitWorkspaceID,
 		CWD:                   options.CWD,
 	})
 	if err != nil {
-		fmt.Fprintln(out, "credential     "+redactedCredentialIdentity(options.Token))
-		fmt.Fprintln(out, "result         unresolved")
-		fmt.Fprintln(out, "action         verify the hosted API is reachable with this credential")
-		return fmt.Errorf("target context unresolved")
+		status := targetResolutionStatusFromError(err)
+		writeDoctorFailure(out, status, targetResolutionRungFromError(err), "")
+		return fmt.Errorf("target context %s", status)
 	}
-	writeDoctorContext(out, options.Token, result)
+	writeDoctorContext(out, result)
 	if result.Status != resolutionResolved {
 		return fmt.Errorf("target context %s", result.Status)
 	}
@@ -75,12 +88,44 @@ func runDoctorContextCommand(args []string) error {
 	if len(args) != 1 || args[0] != "context" {
 		return fmt.Errorf("usage: lema-mcp doctor context")
 	}
-	apiURL, token, _ := resolveHostedConfig()
-	return runDoctorContext(context.Background(), doctorContextOptions{APIURL: apiURL, Token: token})
+	config, err := resolveDoctorConfig()
+	if err != nil {
+		// Do not propagate a filesystem error into main's stderr: it can include
+		// a private home directory. The command's own trace gives one safe action.
+		return runDoctorContext(context.Background(), doctorContextOptions{})
+	}
+	return runDoctorContext(context.Background(), doctorContextOptions{APIURL: config.APIURL, Token: config.Token, ExplicitWorkspaceID: config.ExplicitWorkspaceID})
 }
 
-func writeDoctorContext(out io.Writer, token string, result resolutionResult) {
-	fmt.Fprintln(out, "credential     "+redactedCredentialIdentity(token))
+func resolveDoctorConfig() (doctorConfig, error) {
+	config := doctorConfig{
+		APIURL:              strings.TrimSpace(os.Getenv("LEMA_API_URL")),
+		Token:               strings.TrimSpace(os.Getenv("LEMA_API_TOKEN")),
+		ExplicitWorkspaceID: strings.TrimSpace(os.Getenv(workspaceIDEnv)),
+	}
+	creds, err := readCredentialsFile(credentialsPath())
+	if err != nil || creds == nil {
+		return config, err
+	}
+	if config.APIURL == "" {
+		config.APIURL = strings.TrimSpace(creds["LEMA_API_URL"])
+	}
+	if config.Token == "" {
+		config.Token = strings.TrimSpace(creds["LEMA_API_TOKEN"])
+	}
+	if config.ExplicitWorkspaceID == "" {
+		config.ExplicitWorkspaceID = strings.TrimSpace(creds[workspaceIDEnv])
+	}
+	return config, nil
+}
+
+func writeDoctorContext(out io.Writer, result resolutionResult) {
+	fmt.Fprintln(out, "identity       unavailable")
+	if result.Status == resolutionResolved {
+		fmt.Fprintln(out, "rung           "+result.Context.ResolvedBy)
+	} else {
+		fmt.Fprintln(out, "rung           target_resolver")
+	}
 	if result.Status != resolutionResolved {
 		fmt.Fprintln(out, "result         "+string(result.Status))
 		fmt.Fprintln(out, "action         "+doctorCorrectiveAction(result.Status))
@@ -103,9 +148,14 @@ func writeDoctorContext(out io.Writer, token string, result resolutionResult) {
 	fmt.Fprintln(out, "result         resolved by "+context.ResolvedBy)
 }
 
-func redactedCredentialIdentity(token string) string {
-	fingerprint := credentialFingerprint(token)
-	return "sha256:…" + fingerprint[len(fingerprint)-12:]
+func writeDoctorFailure(out io.Writer, status resolutionStatus, rung, action string) {
+	fmt.Fprintln(out, "identity       unavailable")
+	fmt.Fprintln(out, "rung           "+rung)
+	fmt.Fprintln(out, "result         "+string(status))
+	if action == "" {
+		action = doctorCorrectiveAction(status)
+	}
+	fmt.Fprintln(out, "action         "+action)
 }
 
 func redactedIDSuffix(id string) string {
@@ -122,7 +172,7 @@ func redactedUUIDSuffix(id string) string {
 func doctorCorrectiveAction(status resolutionStatus) string {
 	switch status {
 	case resolutionAmbiguous:
-		return "set LEMA_WORKSPACE_ID to the intended visible repository workspace"
+		return "run lema-mcp context link --project <project-id> --repository <repository-id>"
 	case resolutionForbidden:
 		return "switch to a credential authorized for this repository"
 	case resolutionStale:
