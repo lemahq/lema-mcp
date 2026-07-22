@@ -490,6 +490,10 @@ func main() {
 		if hostedToken == "" {
 			log.Fatal("lema-mcp: LEMA_API_TOKEN is required when LEMA_API_URL is set (env, or ~/.config/lema/credentials)")
 		}
+		// The hosted operation provider owns only credential-derived resolver
+		// adapters and bounded mappings, never an active target. Concrete
+		// operations enter through withResolvedTarget in later routing tasks.
+		processTargetProvider = newHostedTargetProvider(&http.Client{Timeout: 10 * time.Second}, hostedAPIURL, hostedToken)
 		hostedSrc = source.NewHosted(hostedAPIURL, hostedToken, nil)
 		src = hostedSrc
 		corpusSize = -1 // hosted: remote corpus size is unknown

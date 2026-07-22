@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -55,6 +56,65 @@ type resolutionResult struct {
 	Context    targetContext
 	Candidates []targetContext
 	Reason     string
+}
+
+// targetProvider is the process-scoped resolution seam for hosted operations.
+// It deliberately returns a receipt for each call rather than retaining a
+// mutable active target, because one MCP process can serve multiple checkout
+// contexts concurrently.
+type targetProvider interface {
+	Resolve(context.Context, resolveTargetInput) (resolutionResult, error)
+}
+
+// processTargetProvider is constructed once after hosted credentials load.
+// Future operation adapters receive it as a dependency; it never contains an
+// operation-specific target.
+var processTargetProvider targetProvider
+
+// newHostedTargetProvider builds the real process provider from credentials
+// already loaded by main. The operation gate never rereads credentials.
+func newHostedTargetProvider(client *http.Client, apiURL, token string) targetProvider {
+	resolver := newHostedTargetResolver(client, apiURL, token)
+	resolver.readGit = readContextGitEvidence
+	return resolver
+}
+
+// withResolvedTarget is the single generic operation gate. An operation only
+// receives a targetContext by value after the provider has returned a resolved
+// result. cloneContext also copies every slice-backed receipt field so an
+// operation cannot mutate provider-owned or cached state.
+func withResolvedTarget[T any](ctx context.Context, provider targetProvider, input resolveTargetInput, operation func(context.Context, targetContext) (T, error)) (T, error) {
+	var zero T
+	if provider == nil {
+		return zero, &targetResolutionError{status: resolutionUnresolved, rung: "target_provider"}
+	}
+	result, err := provider.Resolve(ctx, input)
+	if err != nil {
+		return zero, redactedTargetResolutionError(err)
+	}
+	if result.Status != resolutionResolved {
+		return zero, &targetResolutionError{status: targetGateStatus(result.Status), rung: "target_provider"}
+	}
+	return operation(ctx, cloneContext(result.Context))
+}
+
+func targetGateStatus(status resolutionStatus) resolutionStatus {
+	switch status {
+	case resolutionUnresolved, resolutionAmbiguous, resolutionForbidden, resolutionStale:
+		return status
+	default:
+		return resolutionUnresolved
+	}
+}
+
+// redactedTargetResolutionError preserves only the typed status and routing
+// rung. Resolver transport errors can contain endpoints, credentials, or local
+// paths, so they must not cross the operation boundary.
+func redactedTargetResolutionError(err error) *targetResolutionError {
+	return &targetResolutionError{
+		status: targetGateStatus(targetResolutionStatusFromError(err)),
+		rung:   targetResolutionRungFromError(err),
+	}
 }
 
 type resolveTargetInput struct {
