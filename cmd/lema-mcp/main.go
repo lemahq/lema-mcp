@@ -714,6 +714,7 @@ func main() {
 		&mcp.Implementation{Name: "lema-mcp", Version: "0.21.1"},
 		&mcp.ServerOptions{Instructions: authedServerInstructions},
 	)
+	server.AddReceivingMiddleware(stateBriefSchemaMetricMiddleware)
 	mcp.AddTool(server, searchDecisionsTool, searchDecisions)
 	mcp.AddTool(server, getDecisionTool, getDecision)
 	mcp.AddTool(server, listDecisionsTool, listDecisions)
