@@ -300,7 +300,19 @@ func queryInt(r *http.Request, key string, def int) int {
 // captures. Shared by the stdio search_decisions tool and the HTTP API so both
 // surfaces rank identically.
 func mergedSearch(ctx context.Context, query string, k int) ([]source.Atom, error) {
-	atoms, err := src.Search(ctx, query, k)
+	return mergedSearchScoped(ctx, query, k, nil)
+}
+
+func mergedSearchScoped(ctx context.Context, query string, k int, workspaceIDs []string) ([]source.Atom, error) {
+	var (
+		atoms []source.Atom
+		err   error
+	)
+	if scoped, ok := src.(source.ScopedSearcher); ok && len(workspaceIDs) > 0 {
+		atoms, err = scoped.SearchScoped(ctx, query, k, workspaceIDs)
+	} else {
+		atoms, err = src.Search(ctx, query, k)
+	}
 	if err != nil {
 		return nil, err
 	}

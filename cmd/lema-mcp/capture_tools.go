@@ -104,15 +104,23 @@ func checkDecided(ctx context.Context, _ *mcp.CallToolRequest, in checkInput) (*
 // hosted check_decided silently checked local capture only, and a silent
 // degrade back to that is worse than a visible, retryable error (ADR-0094).
 func checkDecidedFor(ctx context.Context, topic string, workspaceIDs []string) (checkOutput, error) {
-	if capture == nil {
-		return checkOutput{Topic: topic}, nil
+	merged := []source.Atom{}
+	if capture != nil {
+		merged = append(merged, capture.ClosedAtoms()...)
 	}
-	merged := append([]source.Atom{}, capture.ClosedAtoms()...)
 	if cs, ok := src.(source.ClosedSource); ok {
 		merged = append(merged, cs.ClosedAtoms()...)
 	}
 	if cf, ok := src.(source.ClosedFetcher); ok {
-		hostedClosed, err := cf.FetchClosedAtoms(ctx, workspaceIDs)
+		runtime, err := currentHostedRuntime()
+		if err != nil {
+			ev := verdict.NewErrored("hosted closed-decision fetch failed; not answering from local capture alone")
+			out := checkOutput{Topic: topic, Verdict: string(ev.Verdict), GoverningDecisions: ev.GoverningDecisions, Reason: ev.Reason}
+			return out, err
+		}
+		hostedClosed, err := withHostedReadScope(ctx, runtime, workspaceIDs, func(ctx context.Context, scope []string, _ targetContext) ([]source.Atom, error) {
+			return cf.FetchClosedAtoms(ctx, scope)
+		})
 		if err != nil {
 			ev := verdict.NewErrored("hosted closed-decision fetch failed; not answering from local capture alone")
 			out := checkOutput{Topic: topic, Verdict: string(ev.Verdict), GoverningDecisions: ev.GoverningDecisions, Reason: ev.Reason}

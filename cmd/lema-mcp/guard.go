@@ -268,7 +268,7 @@ func loadADRClosed(dir string) []source.Atom {
 // permission decision to stdout. It always exits 0 and, on any error (bad JSON,
 // missing store), emits nothing so a guard failure never blocks the agent —
 // fail-open is correct for an advisory enforcement layer (ADR-0052).
-func runGuard(args []string) {
+func runGuard(args []string, refreshRuntime *hostedWriteRuntime) {
 	// Fast-path: if guard is disabled, skip all file I/O and corpus loading.
 	mode := os.Getenv(guardModeEnvVar)
 	if mode == "" {
@@ -296,8 +296,10 @@ func runGuard(args []string) {
 	// hosted closed set into the local cache and exits — the network stays off
 	// the per-edit path entirely.
 	if refreshCache {
-		runGuardRefresh(capturePath)
-		os.Exit(0)
+		if refreshRuntime != nil {
+			runGuardRefresh(capturePath, *refreshRuntime)
+		}
+		return
 	}
 
 	type readResult struct {

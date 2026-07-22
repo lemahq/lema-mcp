@@ -173,7 +173,7 @@ func captureRunGuard(t *testing.T, stdin string, args []string) string {
 	origIn, origOut := os.Stdin, os.Stdout
 	os.Stdin, os.Stdout = rIn, wOut
 	defer func() { os.Stdin, os.Stdout = origIn, origOut }()
-	runGuard(args)
+	runGuard(args, nil)
 	wOut.Close()
 	b, _ := io.ReadAll(rOut)
 	return string(b)

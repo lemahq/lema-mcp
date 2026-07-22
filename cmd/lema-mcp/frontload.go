@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -194,7 +193,7 @@ func firstNonEmpty(a, b string) string {
 // hosted /ask the agent uses, and writes the cited context block to stdout (the
 // UserPromptSubmit injection channel). Always exits 0 and writes nothing on
 // abstain/error — a reader hook must never wedge or pollute a session.
-func runFrontload(args []string) {
+func runFrontload(args []string, runtime hostedWriteRuntime) {
 	if !frontloadEnabled() {
 		return
 	}
@@ -206,29 +205,26 @@ func runFrontload(args []string) {
 	if json.Unmarshal(data, &in) != nil {
 		return
 	}
-	apiURL, token, _ := resolveHostedConfig()
-	workspaceID := resolveWorkspaceID()
-	client := &http.Client{Timeout: frontloadTimeout}
-	hosted := source.NewHosted(apiURL, token, client)
-	r := frontloadRunner{
-		ask: func(ctx context.Context, query string) (source.AskResult, error) {
-			return hosted.Ask(ctx, query, scopeWorkspaceIDs(workspaceID))
-		},
-		knowledge: newKnowledgeFetcher(client, apiURL, token, workspaceID).fetch,
-		canQuery:  apiURL != "" && token != "" && workspaceID != "",
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), frontloadTimeout)
 	defer cancel()
-	if out := r.run(ctx, in); out != "" {
+	if out := frontloadWithRuntime(ctx, runtime, in); out != "" {
 		fmt.Fprint(os.Stdout, out)
 	}
 }
 
-// scopeWorkspaceIDs focuses retrieval on the configured workspace, or nil to let
-// the server resolve the caller's full scope.
-func scopeWorkspaceIDs(ws string) []string {
-	if ws == "" {
-		return nil
+func frontloadWithRuntime(ctx context.Context, runtime hostedWriteRuntime, in frontloadInput) string {
+	out, err := withHostedReadScope(ctx, runtime, nil, func(ctx context.Context, scope []string, receipt targetContext) (string, error) {
+		r := frontloadRunner{
+			ask: func(ctx context.Context, query string) (source.AskResult, error) {
+				return runtime.hosted.Ask(ctx, query, scope)
+			},
+			knowledge: newKnowledgeFetcher(runtime.client, runtime.apiURL, runtime.token, receipt.RepositoryWorkspaceID).fetch,
+			canQuery:  true,
+		}
+		return r.run(ctx, in), nil
+	})
+	if err != nil {
+		return ""
 	}
-	return []string{ws}
+	return out
 }

@@ -105,7 +105,7 @@ func resolve(ctx context.Context, req *mcp.CallToolRequest, in resolveInput) (*m
 			}
 			return nil, resolveOutput{Intent: "id", Record: &g}, nil
 		}
-		_, s, err := searchDecisions(ctx, req, searchInput{Query: in.Query})
+		_, s, err := searchDecisions(ctx, req, searchInput{Query: in.Query, WorkspaceIDs: in.WorkspaceIDs})
 		if err != nil {
 			return nil, resolveOutput{Intent: "id"}, err
 		}

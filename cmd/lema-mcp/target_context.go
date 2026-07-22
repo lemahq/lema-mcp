@@ -75,6 +75,12 @@ type targetProvider interface {
 // operation-specific target.
 var processTargetProvider targetProvider
 
+// processHostedRuntime is the one credentials/client/provider bundle built at
+// the MCP process boundary. Hosted read handlers reuse it so they cannot reopen
+// credentials or construct a second resolver/cache that could disagree with
+// the write paths.
+var processHostedRuntime *hostedWriteRuntime
+
 // hostedWriteRuntime is constructed once at the process or subcommand
 // boundary after credentials load. Operation helpers receive it by value and
 // never reopen credentials, construct providers, or select a fallback target.
@@ -82,6 +88,7 @@ type hostedWriteRuntime struct {
 	client      *http.Client
 	apiURL      string
 	token       string
+	hosted      *source.Hosted
 	targets     targetProvider
 	targetInput resolveTargetInput
 	now         func() time.Time
@@ -107,6 +114,7 @@ func newHostedWriteRuntime(client *http.Client, apiURL, token, explicitWorkspace
 		client:  client,
 		apiURL:  strings.TrimRight(apiURL, "/"),
 		token:   token,
+		hosted:  source.NewHosted(apiURL, token, client),
 		targets: newHostedTargetProvider(client, apiURL, token),
 		targetInput: resolveTargetInput{
 			ExplicitWorkspaceID: strings.TrimSpace(explicitWorkspaceID),

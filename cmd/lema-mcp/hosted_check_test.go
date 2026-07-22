@@ -23,8 +23,18 @@ import (
 func swapHostedGlobals(t *testing.T, hosted *source.Hosted) {
 	t.Helper()
 	oldSrc, oldCapture := src, capture
-	t.Cleanup(func() { src, capture = oldSrc, oldCapture })
+	oldRuntime, oldProvider := processHostedRuntime, processTargetProvider
+	t.Cleanup(func() {
+		src, capture = oldSrc, oldCapture
+		processHostedRuntime, processTargetProvider = oldRuntime, oldProvider
+	})
 	src = hosted
+	runtime := hostedWriteRuntime{
+		hosted:  hosted,
+		targets: &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: projectReadContext()}},
+	}
+	processHostedRuntime = &runtime
+	processTargetProvider = runtime.targets
 	cs, err := source.NewCaptureStore(filepath.Join(t.TempDir(), "decisions.jsonl"))
 	if err != nil {
 		t.Fatalf("NewCaptureStore: %v", err)
