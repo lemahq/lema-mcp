@@ -17,7 +17,7 @@ import (
 
 type askInput struct {
 	Query        string   `json:"query" jsonschema:"the natural-language question about your team's decisions"`
-	WorkspaceIDs []string `json:"workspace_ids,omitempty" jsonschema:"optional workspace ids to focus the search; omit to search every workspace you can see"`
+	WorkspaceIDs []string `json:"workspace_ids,omitempty" jsonschema:"workspace ids may only narrow within the resolved Project repository set; omit to use the complete resolved Project repository set"`
 }
 
 // askSourceOut is one cited source behind a [n] in the answer. source.AskSource

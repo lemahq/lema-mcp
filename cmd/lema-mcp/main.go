@@ -159,7 +159,7 @@ type searchInput struct {
 	Query        string   `json:"query" jsonschema:"natural-language question about this repo's decisions"`
 	K            int      `json:"k,omitempty" jsonschema:"max atoms to consider (default 8)"`
 	MaxTokens    int      `json:"max_tokens,omitempty" jsonschema:"token budget for the returned atoms (default 1500)"`
-	WorkspaceIDs []string `json:"workspace_ids,omitempty" jsonschema:"optional workspace ids to narrow a hosted read within the resolved project repositories"`
+	WorkspaceIDs []string `json:"workspace_ids,omitempty" jsonschema:"workspace ids may only narrow within the resolved Project repository set; omit to use the complete resolved Project repository set"`
 }
 
 // searchOutput is the ADR-0025 §4 response contract: shared fields once, a
