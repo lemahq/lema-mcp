@@ -206,15 +206,19 @@ func reduce(lines []DecisionRecord) ([]DecisionRecord, map[string]int) {
 	return out, byID
 }
 
-// decisionID derives a stable, content-keyed id from the decision's identity
-// (title + chosen), so re-recording the same decision updates in place rather
-// than duplicating. Distinct decisions effectively never collide.
+// decisionID derives the legacy stable 24-bit content id from normalized title
+// and chosen text. Because distinct content can collide, consumers that recover
+// additional state by this id must also compare the full normalized identity.
 func decisionID(title, chosen string) string {
 	h := fnv.New32a()
-	_, _ = h.Write([]byte(strings.ToLower(strings.TrimSpace(title))))
+	_, _ = h.Write([]byte(normalizeDecisionIdentity(title)))
 	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(strings.ToLower(strings.TrimSpace(chosen))))
+	_, _ = h.Write([]byte(normalizeDecisionIdentity(chosen)))
 	return fmt.Sprintf("d_%06x", h.Sum32()&0xffffff)
+}
+
+func normalizeDecisionIdentity(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 // Record validates, stamps, and appends a decision as accepted, returning the
@@ -281,7 +285,11 @@ func (s *CaptureStore) DraftTargetEvidence(title, chosen string) (TargetEvidence
 	if !ok || s.records[index].Status != "proposed" || s.records[index].TargetEvidence == nil {
 		return TargetEvidence{}, false
 	}
-	return *cloneTargetEvidence(s.records[index].TargetEvidence), true
+	record := s.records[index]
+	if normalizeDecisionIdentity(record.Title) != normalizeDecisionIdentity(title) || normalizeDecisionIdentity(record.Chosen) != normalizeDecisionIdentity(chosen) {
+		return TargetEvidence{}, false
+	}
+	return *cloneTargetEvidence(record.TargetEvidence), true
 }
 
 func cloneTargetEvidence(in *TargetEvidence) *TargetEvidence {

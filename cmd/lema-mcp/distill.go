@@ -51,10 +51,9 @@ type distilled struct {
 	Repo string
 }
 
-// distillRunner is runDistill's testable core with the I/O seams injected (the
-// gate, the scan+scrub, the HTTP post, and whether credentials resolved). The
-// shell runDistill wires the real implementations; tests pass fakes. Mirrors
-// pushRunner deliberately so the fail-open/gate-first discipline is identical.
+// distillRunner is runDistillInput's fail-open core with the I/O seams injected
+// (gate, scan+scrub, HTTP post, and whether credentials resolved). It mirrors
+// pushRunner so the fail-open/gate-first discipline is identical.
 type distillRunner struct {
 	// gate reports whether the distiller is on for this deployment (the
 	// lema-session-distill WorkOS flag, via the API pre-check). Checked BEFORE
@@ -118,9 +117,6 @@ func runDistillWithRuntime(args []string, runtime hostedWriteRuntime) {
 	if json.Unmarshal(data, &in) != nil {
 		return
 	}
-	if in.StopHookActive || strings.TrimSpace(in.TranscriptPath) == "" || strings.TrimSpace(in.SessionID) == "" {
-		return
-	}
 	// Bound the whole op with pushTimeout so a slow/hung API can never delay the
 	// agent's turn-end (the stdin read is already bounded; the gate pre-check and
 	// the POST share this budget). The gate fires only inside run(), after the
@@ -128,31 +124,32 @@ func runDistillWithRuntime(args []string, runtime hostedWriteRuntime) {
 	// Stop costs no WorkOS call and never opens the transcript.
 	ctx, cancel := context.WithTimeout(context.Background(), pushTimeout)
 	defer cancel()
-	_, _ = withResolvedTarget(ctx, runtime.targets, runtime.targetInput, func(ctx context.Context, receipt targetContext) (struct{}, error) {
+	if n := runDistillInput(ctx, runtime, in, scanTranscriptForDistill); n > 0 {
+		fmt.Fprintf(os.Stderr, "lema-mcp distill: harvested %d proposed atom(s) from this session — review and accept in-app to confirm and record them\n", n)
+	}
+}
+
+// runDistillInput is the production post-stdin hook boundary. Cheap Stop-payload
+// no-ops happen before resolution; every network request and transcript scan is
+// then enclosed by one immutable resolved receipt.
+func runDistillInput(ctx context.Context, runtime hostedWriteRuntime, in stopHookInput, scan func(string) (distilled, error)) int {
+	if in.StopHookActive || strings.TrimSpace(in.TranscriptPath) == "" || strings.TrimSpace(in.SessionID) == "" {
+		return 0
+	}
+	n, _ := withResolvedTarget(ctx, runtime.targets, runtime.targetInput, func(ctx context.Context, receipt targetContext) (int, error) {
 		r := distillRunner{
 			gate: func(ctx context.Context) bool {
 				return sessionDistillEnabled(ctx, runtime.client, runtime.apiURL, runtime.token)
 			},
-			scan: scanTranscriptForDistill,
+			scan: scan,
 			post: func(ctx context.Context, sessionID string, d distilled) (int, error) {
 				return postSessionDistill(ctx, runtime.client, runtime.apiURL, runtime.token, receipt.RepositoryWorkspaceID, sessionID, d)
 			},
 			canPush: runtime.apiURL != "" && runtime.token != "",
 		}
-		if n := r.run(ctx, in); n > 0 {
-			fmt.Fprintf(os.Stderr, "lema-mcp distill: harvested %d proposed atom(s) from this session — review and accept in-app to confirm and record them\n", n)
-		}
-		return struct{}{}, nil
+		return r.run(ctx, in), nil
 	})
-}
-
-// distillWithTarget is the hosted ingest boundary. Resolution happens before
-// any ingest operation HTTP and the deliberation is sent only to the receipt's
-// repository leaf.
-func distillWithTarget(ctx context.Context, runtime hostedWriteRuntime, sessionID string, d distilled) (int, error) {
-	return withResolvedTarget(ctx, runtime.targets, runtime.targetInput, func(ctx context.Context, receipt targetContext) (int, error) {
-		return postSessionDistill(ctx, runtime.client, runtime.apiURL, runtime.token, receipt.RepositoryWorkspaceID, sessionID, d)
-	})
+	return n
 }
 
 // sessionDistillEnabled asks the hosted API whether the session-end distiller is on

@@ -54,9 +54,8 @@ type stopHookInput struct {
 	StopHookActive bool   `json:"stop_hook_active"`
 }
 
-// pushRunner is runPush's testable core with the I/O seams injected (transcript
-// scan, the HTTP push, the clock, and whether credentials resolved). The shell
-// runPush wires the real implementations; tests pass fakes.
+// pushRunner is runPushInput's fail-open core with the I/O seams injected
+// (transcript scan, HTTP push, clock, and whether credentials resolved).
 type pushRunner struct {
 	// gate reports whether the producer is on for this deployment (the
 	// lema-fuse-push WorkOS flag, via the API pre-check). Checked before scan, so
@@ -118,41 +117,39 @@ func runPushWithRuntime(args []string, runtime hostedWriteRuntime) {
 	if json.Unmarshal(data, &in) != nil {
 		return
 	}
-	if in.StopHookActive || strings.TrimSpace(in.TranscriptPath) == "" {
-		return
-	}
 	// Bound the whole op so a slow/hung API can never delay the agent's turn-end
 	// (the stdin read is already bounded; the gate pre-check and push share this
 	// budget). The gate fires only inside run(), after the cheap re-entrant/
 	// no-transcript/no-credentials checks — so a no-op Stop costs no WorkOS call.
 	ctx, cancel := context.WithTimeout(context.Background(), pushTimeout)
 	defer cancel()
-	_, _ = withResolvedTarget(ctx, runtime.targets, runtime.targetInput, func(ctx context.Context, receipt targetContext) (struct{}, error) {
+	if n := runPushInput(ctx, runtime, in, scanTranscriptForCandidates); n > 0 {
+		fmt.Fprintf(os.Stderr, "lema-mcp push: drafted %d decision(s) as proposed — accept in-app to confirm and record them\n", n)
+	}
+}
+
+// runPushInput is the production post-stdin hook boundary. Cheap Stop-payload
+// no-ops happen before resolution; every network request and transcript scan is
+// then enclosed by one immutable resolved receipt.
+func runPushInput(ctx context.Context, runtime hostedWriteRuntime, in stopHookInput, scan func(string) ([]pushCandidate, error)) int {
+	if in.StopHookActive || strings.TrimSpace(in.TranscriptPath) == "" {
+		return 0
+	}
+	n, _ := withResolvedTarget(ctx, runtime.targets, runtime.targetInput, func(ctx context.Context, receipt targetContext) (int, error) {
 		r := pushRunner{
 			gate: func(ctx context.Context) bool {
 				return pushProducerEnabled(ctx, runtime.client, runtime.apiURL, runtime.token)
 			},
-			scan: scanTranscriptForCandidates,
+			scan: scan,
 			push: func(ctx context.Context, records []pushRecord) (pushResponse, error) {
 				return pushDecisions(ctx, runtime.client, runtime.apiURL, runtime.token, receipt.RepositoryWorkspaceID, records)
 			},
 			now:     runtime.timeNow,
 			canPush: runtime.apiURL != "" && runtime.token != "",
 		}
-		if n := r.run(ctx, in); n > 0 {
-			fmt.Fprintf(os.Stderr, "lema-mcp push: drafted %d decision(s) as proposed — accept in-app to confirm and record them\n", n)
-		}
-		return struct{}{}, nil
+		return r.run(ctx, in), nil
 	})
-}
-
-// pushWithTarget is the hosted import boundary. Resolution must succeed before
-// the import client is invoked, and the path is always the receipt's repository
-// leaf UUID.
-func pushWithTarget(ctx context.Context, runtime hostedWriteRuntime, records []pushRecord) (pushResponse, error) {
-	return withResolvedTarget(ctx, runtime.targets, runtime.targetInput, func(ctx context.Context, receipt targetContext) (pushResponse, error) {
-		return pushDecisions(ctx, runtime.client, runtime.apiURL, runtime.token, receipt.RepositoryWorkspaceID, records)
-	})
+	return n
 }
 
 // pushProducerEnabled asks the hosted API whether the Signal-A producer is on

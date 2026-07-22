@@ -25,6 +25,18 @@ func testHostedWriteRuntime(provider targetProvider, server *httptest.Server) ho
 	}
 }
 
+type orderedTargetProvider struct {
+	result resolutionResult
+	events *[]string
+	calls  int
+}
+
+func (p *orderedTargetProvider) Resolve(context.Context, resolveTargetInput) (resolutionResult, error) {
+	p.calls++
+	*p.events = append(*p.events, "resolve")
+	return p.result, nil
+}
+
 func leafRoutingContext() targetContext {
 	receipt := validRoutingContext()
 	receipt.ProjectWorkspaceID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -63,41 +75,61 @@ func TestTargetRoutingRecordAndProposeUseReceiptRepositoryLeaf(t *testing.T) {
 	}
 }
 
-func TestTargetRoutingPushUsesReceiptRepositoryLeaf(t *testing.T) {
-	var path string
+func TestTargetRoutingPushHookResolvesBeforeGateScanAndRepositoryLeafUpload(t *testing.T) {
+	var events []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		path = request.URL.Path
-		_ = json.NewEncoder(w).Encode(pushResponse{Created: 1})
+		events = append(events, request.URL.Path)
+		switch request.URL.Path {
+		case "/push-enabled":
+			_ = json.NewEncoder(w).Encode(map[string]bool{"enabled": true})
+		case "/workspaces/" + leafRoutingContext().RepositoryWorkspaceID + "/import-decisions":
+			_ = json.NewEncoder(w).Encode(pushResponse{Created: 1})
+		default:
+			http.NotFound(w, request)
+		}
 	}))
 	defer server.Close()
-	provider := &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: leafRoutingContext()}}
+	provider := &orderedTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: leafRoutingContext()}, events: &events}
 
-	_, err := pushWithTarget(context.Background(), testHostedWriteRuntime(provider, server), []pushRecord{{ID: "d_1", Title: "push", Chosen: "leaf", Status: pushStatusProposed}})
-	if err != nil {
-		t.Fatal(err)
+	n := runPushInput(context.Background(), testHostedWriteRuntime(provider, server), stopHookInput{TranscriptPath: "not-opened-by-test"}, func(path string) ([]pushCandidate, error) {
+		events = append(events, "scan:"+path)
+		return []pushCandidate{{Approach: "Use the repository leaf"}}, nil
+	})
+	if n != 1 || provider.calls != 1 {
+		t.Fatalf("pushed=%d provider calls=%d, want 1/1", n, provider.calls)
 	}
-	want := "/workspaces/" + leafRoutingContext().RepositoryWorkspaceID + "/import-decisions"
-	if path != want {
-		t.Fatalf("push path = %q, want %q", path, want)
+	want := []string{"resolve", "/push-enabled", "scan:not-opened-by-test", "/workspaces/" + leafRoutingContext().RepositoryWorkspaceID + "/import-decisions"}
+	if strings.Join(events, "|") != strings.Join(want, "|") {
+		t.Fatalf("push hook events = %v, want %v", events, want)
 	}
 }
 
-func TestTargetRoutingDistillUsesReceiptRepositoryLeaf(t *testing.T) {
-	var path string
+func TestTargetRoutingDistillHookResolvesBeforeGateScanAndRepositoryLeafUpload(t *testing.T) {
+	var events []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		path = request.URL.Path
-		_ = json.NewEncoder(w).Encode(distillResponse{SessionID: "session-1", Status: "ingested", Claims: 1})
+		events = append(events, request.URL.Path)
+		switch request.URL.Path {
+		case "/session-distill-enabled":
+			_ = json.NewEncoder(w).Encode(map[string]bool{"enabled": true})
+		case "/workspaces/" + leafRoutingContext().RepositoryWorkspaceID + "/ingest-session":
+			_ = json.NewEncoder(w).Encode(distillResponse{SessionID: "session-1", Status: "ingested", Claims: 1})
+		default:
+			http.NotFound(w, request)
+		}
 	}))
 	defer server.Close()
-	provider := &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: leafRoutingContext()}}
+	provider := &orderedTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: leafRoutingContext()}, events: &events}
 
-	_, err := distillWithTarget(context.Background(), testHostedWriteRuntime(provider, server), "session-1", distilled{Text: "User: choose leaf"})
-	if err != nil {
-		t.Fatal(err)
+	n := runDistillInput(context.Background(), testHostedWriteRuntime(provider, server), stopHookInput{SessionID: "session-1", TranscriptPath: "not-opened-by-test"}, func(path string) (distilled, error) {
+		events = append(events, "scan:"+path)
+		return distilled{Text: "User: choose leaf"}, nil
+	})
+	if n != 1 || provider.calls != 1 {
+		t.Fatalf("harvested=%d provider calls=%d, want 1/1", n, provider.calls)
 	}
-	want := "/workspaces/" + leafRoutingContext().RepositoryWorkspaceID + "/ingest-session"
-	if path != want {
-		t.Fatalf("distill path = %q, want %q", path, want)
+	want := []string{"resolve", "/session-distill-enabled", "scan:not-opened-by-test", "/workspaces/" + leafRoutingContext().RepositoryWorkspaceID + "/ingest-session"}
+	if strings.Join(events, "|") != strings.Join(want, "|") {
+		t.Fatalf("distill hook events = %v, want %v", events, want)
 	}
 }
 
@@ -126,7 +158,7 @@ func TestTargetRoutingSettleValidatesDecisionInReceiptRepositoryLeaf(t *testing.
 	}
 }
 
-func TestTargetRoutingEveryUnresolvedOperationSendsNoHTTP(t *testing.T) {
+func TestTargetRoutingEveryUnresolvedInteractiveOperationSendsNoHTTP(t *testing.T) {
 	operations := []struct {
 		name string
 		run  func(context.Context, hostedWriteRuntime) error
@@ -140,14 +172,6 @@ func TestTargetRoutingEveryUnresolvedOperationSendsNoHTTP(t *testing.T) {
 			decisionRecorder = newHostedRecorder(runtime, nil, "")
 			defer func() { decisionRecorder = previous }()
 			_, _, err := propose(ctx, nil, proposeInput{Title: "propose", Chosen: "leaf"})
-			return err
-		}},
-		{"push", func(ctx context.Context, runtime hostedWriteRuntime) error {
-			_, err := pushWithTarget(ctx, runtime, []pushRecord{{ID: "d_1", Title: "push", Chosen: "leaf"}})
-			return err
-		}},
-		{"distill", func(ctx context.Context, runtime hostedWriteRuntime) error {
-			_, err := distillWithTarget(ctx, runtime, "session-1", distilled{Text: "User: leaf"})
 			return err
 		}},
 		{"settle", func(ctx context.Context, runtime hostedWriteRuntime) error {
@@ -166,6 +190,45 @@ func TestTargetRoutingEveryUnresolvedOperationSendsNoHTTP(t *testing.T) {
 				t.Fatalf("provider calls=%d HTTP requests=%d, want 1/0", provider.calls, requests)
 			}
 		})
+	}
+}
+
+func TestTargetRoutingNonResolvedHooksSendNoGateOrUploadHTTPAndDoNotScan(t *testing.T) {
+	results := []struct {
+		name   string
+		result resolutionResult
+	}{
+		{"unresolved", resolutionResult{Status: resolutionUnresolved}},
+		{"ambiguous", resolutionResult{Status: resolutionAmbiguous}},
+		{"forbidden", resolutionResult{Status: resolutionForbidden}},
+		{"stale", resolutionResult{Status: resolutionStale}},
+		{"malformed", resolutionResult{Status: resolutionResolved, Context: targetContext{}}},
+	}
+	for _, hook := range []string{"push", "distill"} {
+		for _, tc := range results {
+			t.Run(hook+"/"+tc.name, func(t *testing.T) {
+				requests, scans := 0, 0
+				server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests++ }))
+				defer server.Close()
+				provider := &fakeTargetProvider{result: tc.result}
+				runtime := testHostedWriteRuntime(provider, server)
+				switch hook {
+				case "push":
+					runPushInput(context.Background(), runtime, stopHookInput{TranscriptPath: "must-not-open"}, func(string) ([]pushCandidate, error) {
+						scans++
+						return []pushCandidate{{Approach: "must not route"}}, nil
+					})
+				case "distill":
+					runDistillInput(context.Background(), runtime, stopHookInput{SessionID: "session-1", TranscriptPath: "must-not-open"}, func(string) (distilled, error) {
+						scans++
+						return distilled{Text: "must not route"}, nil
+					})
+				}
+				if provider.calls != 1 || requests != 0 || scans != 0 {
+					t.Fatalf("provider calls=%d HTTP requests=%d scans=%d, want 1/0/0", provider.calls, requests, scans)
+				}
+			})
+		}
 	}
 }
 
@@ -219,5 +282,37 @@ func TestTargetRoutingOfflineDraftPersistsRedactedReceiptAndRevalidatesBeforeRet
 	}
 	if staleProvider.input.LocalAssociation == nil || staleProvider.input.LocalAssociation.ProjectWorkspaceID != receipt.ProjectWorkspaceID || staleProvider.input.LocalAssociation.RepositoryWorkspaceID != receipt.RepositoryWorkspaceID {
 		t.Fatalf("retry did not revalidate the persisted receipt: %+v", staleProvider.input)
+	}
+}
+
+func TestTargetRoutingTruncatedIDCollisionCannotReuseOfflineReceipt(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "decisions.jsonl")
+	store, err := source.NewCaptureStore(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := leafRoutingContext()
+	if _, err := store.RecordDraft(source.DecisionRecord{
+		Title:          "title-1821",
+		Chosen:         "chosen-1821",
+		TargetEvidence: targetEvidenceFromContext(receipt),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests++ }))
+	defer server.Close()
+	provider := &fakeTargetProvider{result: resolutionResult{Status: resolutionUnresolved}}
+	recorder := newHostedRecorder(testHostedWriteRuntime(provider, server), store, storePath)
+	out, err := recorder.record(context.Background(), source.DecisionRecord{Title: "title-4163", Chosen: "chosen-4163"})
+	if err != nil || out.Status != "local_draft" {
+		t.Fatalf("colliding capture fallback = (%+v, %v), want local draft", out, err)
+	}
+	if provider.input.LocalAssociation != nil {
+		t.Fatalf("colliding capture reused receipt A: %+v", provider.input.LocalAssociation)
+	}
+	if requests != 0 {
+		t.Fatalf("colliding capture sent %d operation requests, want zero", requests)
 	}
 }
