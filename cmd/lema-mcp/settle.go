@@ -20,6 +20,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -70,22 +71,13 @@ type settleDecision struct {
 	CurrentStatus string `json:"current_status"`
 }
 
-func newSettleClient() (*settleClient, error) {
-	apiURL, token, usedFile := resolveHostedConfig()
-	if apiURL == "" || token == "" {
-		return nil, fmt.Errorf("hosted credentials not configured: set %s and %s (or the credentials file)", "LEMA_API_URL", "LEMA_API_TOKEN")
-	}
-	if usedFile {
-		// The credentials file is per-user and can point at a different org
-		// than the repo you are standing in — say so, loudly, before writing.
-		fmt.Fprintf(os.Stderr, "settle: using credentials file %s — verify the target below is the org you mean\n", credentialsPath())
-	}
+func newSettleClient(runtime hostedWriteRuntime, receipt targetContext) *settleClient {
 	return &settleClient{
-		apiURL:      strings.TrimRight(apiURL, "/"),
-		token:       token,
-		workspaceID: resolveWorkspaceID(),
-		httpClient:  &http.Client{Timeout: settleTimeout},
-	}, nil
+		apiURL:      strings.TrimRight(runtime.apiURL, "/"),
+		token:       runtime.token,
+		workspaceID: receipt.RepositoryWorkspaceID,
+		httpClient:  runtime.client,
+	}
 }
 
 func (c *settleClient) do(method, path string, body any) (int, []byte, error) {
@@ -127,21 +119,6 @@ func apiErrorMessage(status int, body []byte) string {
 		return fmt.Sprintf("%s (HTTP %d)", e.Error, status)
 	}
 	return fmt.Sprintf("HTTP %d", status)
-}
-
-func (c *settleClient) getDecision(id string) (settleDecision, error) {
-	status, body, err := c.do(http.MethodGet, "/decisions/"+id+"/", nil)
-	if err != nil {
-		return settleDecision{}, err
-	}
-	if status != http.StatusOK {
-		return settleDecision{}, fmt.Errorf("fetch decision %s: %s", id, apiErrorMessage(status, body))
-	}
-	var d settleDecision
-	if err := json.Unmarshal(body, &d); err != nil {
-		return settleDecision{}, fmt.Errorf("decode decision %s: %w", id, err)
-	}
-	return d, nil
 }
 
 // listDecisions asks the server for decisions whose UUID starts with the
@@ -200,11 +177,8 @@ func (c *settleClient) resolveDecisionID(raw string) (settleDecision, error) {
 	if strings.HasPrefix(in, "d_") {
 		return settleDecision{}, fmt.Errorf("%q is a d_ locator — a content hash, not a UUID: open the decision page (or search_decisions) and pass the UUID from its URL", raw)
 	}
-	if uuidRe.MatchString(in) {
-		return c.getDecision(in)
-	}
 	compact := strings.ReplaceAll(in, "-", "")
-	if !hexPrefixRe.MatchString(compact) {
+	if !uuidRe.MatchString(in) && !hexPrefixRe.MatchString(compact) {
 		return settleDecision{}, fmt.Errorf("%q is not a decision id: pass a full UUID or a 6+ hex-char prefix", raw)
 	}
 	list, err := c.listDecisions(compact)
@@ -292,17 +266,12 @@ func printAppliedResult(w io.Writer, verb string, d settleDecision, extra string
 	fmt.Fprintf(w, "    %s/decisions/%s\n", settleWebURL(), d.ID)
 }
 
-func runSettle(args []string) error {
+func runSettleWithClient(args []string, client *settleClient) error {
 	if len(args) < 1 {
 		return fmt.Errorf("%s", settleUsage)
 	}
 	verb := args[0]
 	rest := args[1:]
-
-	client, err := newSettleClient()
-	if err != nil {
-		return err
-	}
 	fmt.Fprintf(os.Stderr, "settle: target %s (workspace %s)\n", client.apiURL, orUnset(client.workspaceID))
 
 	switch verb {
@@ -401,6 +370,16 @@ func runSettle(args []string) error {
 	default:
 		return fmt.Errorf("unknown settle verb %q\n%s", verb, settleUsage)
 	}
+}
+
+// settleWithTarget resolves once before any decision lookup or event append.
+// The leaf-scoped list proves that a direct decision ID is compatible with the
+// receipt; the existing decision-event endpoint remains the write door.
+func settleWithTarget(ctx context.Context, runtime hostedWriteRuntime, args []string) error {
+	_, err := withResolvedTarget(ctx, runtime.targets, runtime.targetInput, func(_ context.Context, receipt targetContext) (struct{}, error) {
+		return struct{}{}, runSettleWithClient(args, newSettleClient(runtime, receipt))
+	})
+	return err
 }
 
 func statusNote(d settleDecision) string {

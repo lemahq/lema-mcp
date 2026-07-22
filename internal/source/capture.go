@@ -30,24 +30,43 @@ type RejectedAlt struct {
 	Why    string `json:"why,omitempty"`
 }
 
+// TargetEvidence is the redacted resolver receipt retained only when a hosted
+// write falls back to an offline draft. It contains stable server identifiers,
+// canonical repository identity, and already-redacted evidence values. It must
+// never contain credentials, an API URL, a username, or a raw local path.
+type TargetEvidence struct {
+	SchemaVersion         int                  `json:"schema_version"`
+	ProjectWorkspaceID    string               `json:"project_workspace_id"`
+	RepositoryWorkspaceID string               `json:"repository_workspace_id"`
+	RepositoryCanonical   string               `json:"repository_canonical"`
+	ResolvedBy            string               `json:"resolved_by"`
+	Evidence              []TargetEvidenceItem `json:"evidence"`
+}
+
+type TargetEvidenceItem struct {
+	Kind  string `json:"kind"`
+	Value string `json:"value"`
+}
+
 // DecisionRecord is one decision captured at deliberation, persisted as a single
 // line in .lema/decisions.jsonl (ADR-0042). It is the local, account-less,
 // agent-authored half of the lema decision graph: the calling agent forms it,
 // the server only stores and projects it. Status is derived, not authored —
 // "superseded" is set when a later record supersedes this one.
 type DecisionRecord struct {
-	ID           string        `json:"id"`
-	TS           string        `json:"ts"`
-	Title        string        `json:"title"`
-	Chosen       string        `json:"chosen"`
-	Rejected     []RejectedAlt `json:"rejected,omitempty"`
-	Rationale    string        `json:"rationale,omitempty"`
-	Refs         []string      `json:"refs,omitempty"`
-	Constraint   string        `json:"constraint,omitempty"`
-	Consequence  string        `json:"consequence,omitempty"`
-	Supersedes   []string      `json:"supersedes,omitempty"`
-	SupersededBy *string       `json:"superseded_by,omitempty"`
-	Status       string        `json:"status"`
+	ID             string          `json:"id"`
+	TS             string          `json:"ts"`
+	Title          string          `json:"title"`
+	Chosen         string          `json:"chosen"`
+	Rejected       []RejectedAlt   `json:"rejected,omitempty"`
+	Rationale      string          `json:"rationale,omitempty"`
+	Refs           []string        `json:"refs,omitempty"`
+	Constraint     string          `json:"constraint,omitempty"`
+	Consequence    string          `json:"consequence,omitempty"`
+	Supersedes     []string        `json:"supersedes,omitempty"`
+	SupersededBy   *string         `json:"superseded_by,omitempty"`
+	Status         string          `json:"status"`
+	TargetEvidence *TargetEvidence `json:"target_evidence,omitempty"`
 }
 
 // CaptureStore is a writable, JSONL-backed local store of decisions captured at
@@ -229,6 +248,7 @@ func (s *CaptureStore) record(in DecisionRecord, status string) (DecisionRecord,
 	in.ID = decisionID(in.Title, in.Chosen)
 	in.TS = time.Now().UTC().Format("2006-01-02T15:04Z")
 	in.Status = status
+	in.TargetEvidence = cloneTargetEvidence(in.TargetEvidence)
 
 	if err := s.appendLine(in); err != nil {
 		return DecisionRecord{}, err
@@ -245,6 +265,32 @@ func (s *CaptureStore) record(in DecisionRecord, status string) (DecisionRecord,
 		fmt.Fprintf(os.Stderr, "lema-mcp: capture: reload after write failed: %v\n", err)
 	}
 	return in, nil
+}
+
+// DraftTargetEvidence returns a detached copy of the resolver evidence stored
+// on the content-keyed proposed draft. Re-recording the same title/chosen pair
+// is the existing manual retry path for a failed hosted capture.
+func (s *CaptureStore) DraftTargetEvidence(title, chosen string) (TargetEvidence, bool) {
+	if s == nil {
+		return TargetEvidence{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refreshIfStale()
+	index, ok := s.byID[decisionID(title, chosen)]
+	if !ok || s.records[index].Status != "proposed" || s.records[index].TargetEvidence == nil {
+		return TargetEvidence{}, false
+	}
+	return *cloneTargetEvidence(s.records[index].TargetEvidence), true
+}
+
+func cloneTargetEvidence(in *TargetEvidence) *TargetEvidence {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Evidence = append([]TargetEvidenceItem(nil), in.Evidence...)
+	return &out
 }
 
 // appendLine writes one record as a JSON line, creating the store's directory on

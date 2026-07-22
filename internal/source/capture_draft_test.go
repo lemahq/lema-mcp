@@ -1,10 +1,52 @@
 package source
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestCaptureDraftTargetEvidenceIsOptionalAndRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "decisions.jsonl")
+	s, err := NewCaptureStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &TargetEvidence{
+		SchemaVersion:         1,
+		ProjectWorkspaceID:    "project-1",
+		RepositoryWorkspaceID: "repository-1",
+		RepositoryCanonical:   "git:example.test/acme/api",
+		ResolvedBy:            "canonical_git",
+		Evidence:              []TargetEvidenceItem{{Kind: "cwd_path_hash", Value: "sha256:0123456789abcdef"}},
+	}
+	if _, err := s.RecordDraft(DecisionRecord{Title: "offline", Chosen: "leaf", TargetEvidence: want}); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := NewCaptureStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := reloaded.DraftTargetEvidence("offline", "leaf")
+	if !ok || got.ProjectWorkspaceID != want.ProjectWorkspaceID || got.RepositoryWorkspaceID != want.RepositoryWorkspaceID || got.RepositoryCanonical != want.RepositoryCanonical || len(got.Evidence) != 1 {
+		t.Fatalf("target evidence = (%+v, %v), want persisted snapshot", got, ok)
+	}
+	got.Evidence[0].Value = "mutated"
+	again, _ := reloaded.DraftTargetEvidence("offline", "leaf")
+	if again.Evidence[0].Value != want.Evidence[0].Value {
+		t.Fatal("DraftTargetEvidence returned mutable store-owned evidence")
+	}
+
+	plain, err := json.Marshal(DecisionRecord{Title: "solo", Chosen: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(plain), "target_evidence") {
+		t.Fatalf("empty optional evidence changed the existing wire shape: %s", plain)
+	}
+}
 
 // A hosted-mode capture whose push failed is preserved as a LOCAL DRAFT
 // (status proposed): durable and searchable, but non-binding — its rejected

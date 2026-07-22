@@ -94,9 +94,10 @@ func (r pushRunner) run(ctx context.Context, in stopHookInput) int {
 	return resp.Created + resp.Updated
 }
 
-// runPush is the `lema-mcp push` Stop-hook body — the thin I/O shell over the
-// tested pushRunner. It reads the Stop payload from stdin, resolves the hosted
-// credentials + target workspace (LEMA_WORKSPACE_ID), and — only when the
+// runPushWithRuntime is the `lema-mcp push` Stop-hook body — the thin I/O shell
+// over the tested pushRunner. Its process boundary has already loaded hosted
+// credentials and built the target provider; this function resolves exactly one
+// immutable repository target and — only when the
 // hosted env-wide WorkOS flag lema-fuse-push is on (the gate) — drafts any
 // Signal-A adoptions as proposed. Always returns (exit 0) and never writes a
 // block decision to stdout: a producer failure must never wedge a session, and
@@ -108,7 +109,7 @@ func (r pushRunner) run(ctx context.Context, in stopHookInput) int {
 //
 //	"Stop": [{ "matcher": "", "hooks": [{ "type": "command",
 //	  "command": "lema-mcp push" }]}]
-func runPush(args []string) {
+func runPushWithRuntime(args []string, runtime hostedWriteRuntime) {
 	data, ok := readStopStdin(3 * time.Second)
 	if !ok {
 		return
@@ -117,27 +118,41 @@ func runPush(args []string) {
 	if json.Unmarshal(data, &in) != nil {
 		return
 	}
-	apiURL, token, _ := resolveHostedConfig()
-	workspaceID := resolveWorkspaceID()
+	if in.StopHookActive || strings.TrimSpace(in.TranscriptPath) == "" {
+		return
+	}
 	// Bound the whole op so a slow/hung API can never delay the agent's turn-end
 	// (the stdin read is already bounded; the gate pre-check and push share this
 	// budget). The gate fires only inside run(), after the cheap re-entrant/
 	// no-transcript/no-credentials checks — so a no-op Stop costs no WorkOS call.
-	client := &http.Client{Timeout: pushTimeout}
-	r := pushRunner{
-		gate: func(ctx context.Context) bool { return pushProducerEnabled(ctx, client, apiURL, token) },
-		scan: scanTranscriptForCandidates,
-		push: func(ctx context.Context, records []pushRecord) (pushResponse, error) {
-			return pushDecisions(ctx, client, apiURL, token, workspaceID, records)
-		},
-		now:     time.Now,
-		canPush: apiURL != "" && token != "" && workspaceID != "",
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), pushTimeout)
 	defer cancel()
-	if n := r.run(ctx, in); n > 0 {
-		fmt.Fprintf(os.Stderr, "lema-mcp push: drafted %d decision(s) as proposed — accept in-app to confirm and record them\n", n)
-	}
+	_, _ = withResolvedTarget(ctx, runtime.targets, runtime.targetInput, func(ctx context.Context, receipt targetContext) (struct{}, error) {
+		r := pushRunner{
+			gate: func(ctx context.Context) bool {
+				return pushProducerEnabled(ctx, runtime.client, runtime.apiURL, runtime.token)
+			},
+			scan: scanTranscriptForCandidates,
+			push: func(ctx context.Context, records []pushRecord) (pushResponse, error) {
+				return pushDecisions(ctx, runtime.client, runtime.apiURL, runtime.token, receipt.RepositoryWorkspaceID, records)
+			},
+			now:     runtime.timeNow,
+			canPush: runtime.apiURL != "" && runtime.token != "",
+		}
+		if n := r.run(ctx, in); n > 0 {
+			fmt.Fprintf(os.Stderr, "lema-mcp push: drafted %d decision(s) as proposed — accept in-app to confirm and record them\n", n)
+		}
+		return struct{}{}, nil
+	})
+}
+
+// pushWithTarget is the hosted import boundary. Resolution must succeed before
+// the import client is invoked, and the path is always the receipt's repository
+// leaf UUID.
+func pushWithTarget(ctx context.Context, runtime hostedWriteRuntime, records []pushRecord) (pushResponse, error) {
+	return withResolvedTarget(ctx, runtime.targets, runtime.targetInput, func(ctx context.Context, receipt targetContext) (pushResponse, error) {
+		return pushDecisions(ctx, runtime.client, runtime.apiURL, runtime.token, receipt.RepositoryWorkspaceID, records)
+	})
 }
 
 // pushProducerEnabled asks the hosted API whether the Signal-A producer is on
@@ -706,17 +721,6 @@ func pushDecisions(ctx context.Context, client *http.Client, apiURL, token, work
 	if len(records) == 0 {
 		return pushResponse{}, nil
 	}
-	// Resolve a slug-configured workspace to the UUID the authed
-	// /workspaces/{id}/import-decisions path parser requires. Without this a slug
-	// (e.g. lemahq-lema, the canonical .mcp.json value) 400s "invalid workspaceID"
-	// and record_decision falls back to a silent local draft — surfaces in search,
-	// never binds, not in the team corpus. Shared with the collector sync path
-	// (a9ca2c5); a value already in UUID form passes through with no extra call.
-	uuid, err := resolveWorkspaceValueUUID(ctx, client, apiURL, token, workspaceID)
-	if err != nil {
-		return pushResponse{}, err
-	}
-	workspaceID = uuid
 	body, err := json.Marshal(pushRequest{
 		SchemaVersion: pushSchemaVersion,
 		ActorName:     pushActorName,

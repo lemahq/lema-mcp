@@ -60,7 +60,28 @@ type captureSink interface {
 type recorder struct {
 	capture     captureSink
 	capturePath string
-	pushHosted  func(ctx context.Context, dr source.DecisionRecord) (recordOutput, error)
+	targets     targetProvider
+	targetInput resolveTargetInput
+	pushHosted  func(ctx context.Context, receipt targetContext, dr source.DecisionRecord) (recordOutput, error)
+}
+
+type draftTargetEvidenceSource interface {
+	DraftTargetEvidence(title, chosen string) (source.TargetEvidence, bool)
+}
+
+func newHostedRecorder(runtime hostedWriteRuntime, capture captureSink, capturePath string) recorder {
+	return recorder{
+		capture:     capture,
+		capturePath: capturePath,
+		targets:     runtime.targets,
+		targetInput: runtime.targetInput,
+		pushHosted: func(ctx context.Context, receipt targetContext, dr source.DecisionRecord) (recordOutput, error) {
+			push := func(ctx context.Context, records []pushRecord) (pushResponse, error) {
+				return pushDecisions(ctx, runtime.client, runtime.apiURL, runtime.token, receipt.RepositoryWorkspaceID, records)
+			}
+			return recordToHosted(ctx, dr, runtime.timeNow(), push)
+		},
+	}
 }
 
 // record validates the capture and persists it via the active sink. Title and
@@ -75,12 +96,36 @@ func (r recorder) record(ctx context.Context, dr source.DecisionRecord) (recordO
 		return recordOutput{}, fmt.Errorf("title and chosen are required")
 	}
 	if r.pushHosted != nil {
-		out, err := r.pushHosted(ctx, dr)
+		if dr.TargetEvidence == nil {
+			if drafts, ok := r.capture.(draftTargetEvidenceSource); ok {
+				if evidence, found := drafts.DraftTargetEvidence(dr.Title, dr.Chosen); found {
+					dr.TargetEvidence = &evidence
+				}
+			}
+		}
+		input, inputErr := targetInputForOfflineRetry(r.targetInput, dr.TargetEvidence)
+		var receipt targetContext
+		var out recordOutput
+		var err error
+		if inputErr != nil {
+			err = inputErr
+		} else {
+			out, err = withResolvedTarget(ctx, r.targets, input, func(ctx context.Context, resolved targetContext) (recordOutput, error) {
+				receipt = resolved
+				return r.pushHosted(ctx, resolved, dr)
+			})
+		}
 		if err == nil {
 			return out, nil
 		}
+		if dr.TargetEvidence != nil && targetResolutionStatusFromError(err) == resolutionStale {
+			return recordOutput{}, err
+		}
 		if r.capture == nil {
 			return recordOutput{}, err // nowhere to preserve the capture — fail loud
+		}
+		if validResolvedTargetContext(receipt) {
+			dr.TargetEvidence = targetEvidenceFromContext(receipt)
 		}
 		rec, derr := r.capture.RecordDraft(dr)
 		if derr != nil {
@@ -94,13 +139,14 @@ func (r recorder) record(ctx context.Context, dr source.DecisionRecord) (recordO
 			ID:     rec.ID,
 			Status: "local_draft",
 			Recorded: fmt.Sprintf(
-				"%v — the capture was preserved locally as a draft in %s (id %s). It surfaces in search but does not enforce, and it is NOT in your team's corpus; fix the hosted workspace mapping (%s), then record this decision again to push it.",
-				err, path, rec.ID, workspaceIDHint),
+				"%v — the capture was preserved locally as a draft in %s (id %s). It surfaces in search but does not enforce, and it is NOT in your team's corpus; run lema-mcp doctor context and fix the target mapping, then record this decision again to revalidate and push it.",
+				err, path, rec.ID),
 		}, nil
 	}
 	if r.capture == nil {
 		return recordOutput{}, fmt.Errorf("capture store is not available")
 	}
+	dr.TargetEvidence = nil
 	rec, err := r.capture.Record(dr)
 	if err != nil {
 		return recordOutput{}, err

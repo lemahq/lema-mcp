@@ -363,7 +363,9 @@ func main() {
 			// as proposed. Dark unless the env-wide WorkOS flag lema-fuse-push is on
 			// (checked via the hosted GET /push-enabled, ADR-0111); fail-open;
 			// always exit 0; never blocks the stop.
-			runPush(os.Args[2:])
+			if runtime, _, err := loadHostedWriteRuntime(pushTimeout); err == nil {
+				runPushWithRuntime(os.Args[2:], runtime)
+			}
 			return
 		case "distill":
 			// Stop hook (ADR-0140, Stage 3 — the session-end distiller): scan +
@@ -373,7 +375,9 @@ func main() {
 			// lema-session-distill is on (checked via GET /session-distill-enabled,
 			// BEFORE any read); the local binary stays LLM-free/no-network for model
 			// work; fail-open; always exit 0; never blocks the stop.
-			runDistill(os.Args[2:])
+			if runtime, _, err := loadHostedWriteRuntime(pushTimeout); err == nil {
+				runDistillWithRuntime(os.Args[2:], runtime)
+			}
 			return
 		case "frontload":
 			// UserPromptSubmit hook (agent-session-loop P1, the loop's reader): retrieve
@@ -421,7 +425,14 @@ func main() {
 			// supersede DRAFTS the ruling via the hosted API and prints the
 			// deep link; the browser "Confirm ruling" click is the only
 			// binding act (ADR-0125 — a programmatic credential never binds).
-			if err := runSettle(os.Args[2:]); err != nil {
+			runtime, usedFile, runtimeErr := loadHostedWriteRuntime(settleTimeout)
+			if runtimeErr != nil {
+				log.Fatalf("lema settle: %v", runtimeErr)
+			}
+			if usedFile {
+				fmt.Fprintln(os.Stderr, "settle: using the configured credentials file — verify the resolved target below is the repository you mean")
+			}
+			if err := settleWithTarget(context.Background(), runtime, os.Args[2:]); err != nil {
 				log.Fatalf("lema settle: %v", err)
 			}
 			return
@@ -485,15 +496,18 @@ func main() {
 	// the per-user ~/.config/lema/credentials file filling whatever env leaves
 	// unset (ADR-0060 resolved question 1 — the channel for GUI-launched
 	// editors whose MCP child doesn't inherit shell env). Env always wins.
-	hostedAPIURL, hostedToken, hostedViaFile := resolveHostedConfig()
+	hostedConfig := resolveHostedWriteConfig()
+	hostedAPIURL, hostedToken, hostedViaFile := hostedConfig.APIURL, hostedConfig.Token, hostedConfig.UsedFile
+	var writeRuntime hostedWriteRuntime
 	if hostedAPIURL != "" {
 		if hostedToken == "" {
 			log.Fatal("lema-mcp: LEMA_API_TOKEN is required when LEMA_API_URL is set (env, or ~/.config/lema/credentials)")
 		}
 		// The hosted operation provider owns only credential-derived resolver
 		// adapters and bounded mappings, never an active target. Concrete
-		// operations enter through withResolvedTarget in later routing tasks.
-		processTargetProvider = newHostedTargetProvider(&http.Client{Timeout: 10 * time.Second}, hostedAPIURL, hostedToken)
+		// repository-scoped writes enter through withResolvedTarget.
+		writeRuntime = newHostedWriteRuntime(&http.Client{Timeout: recordPushTimeout}, hostedAPIURL, hostedToken, hostedConfig.WorkspaceID, "")
+		processTargetProvider = writeRuntime.targets
 		hostedSrc = source.NewHosted(hostedAPIURL, hostedToken, nil)
 		src = hostedSrc
 		corpusSize = -1 // hosted: remote corpus size is unknown
@@ -636,27 +650,14 @@ func main() {
 	// (LEMA_API_URL set): push captures to the org corpus, where the server
 	// adjudicates the landed status and a human's in-app accept binds (ADR-0125).
 	// SOLO: append to the local capture store, which binds on this machine.
-	// Hosted with no LEMA_WORKSPACE_ID does NOT hard-fail (#348): the recorder
-	// auto-resolves the target from GET /workspaces when this credential can see
-	// exactly one, and otherwise errors with the workspace list + where to set
-	// the env var — never a dead end that eats the capture. And a hosted push
-	// FAILURE preserves the capture as a loud, NON-BINDING local draft
+	// Hosted target selection always uses the process-scoped Target Context
+	// provider. A hosted push FAILURE preserves the capture as a loud,
+	// NON-BINDING local draft
 	// (recorder.record) rather than losing the write. It still never silently
 	// binds a draft locally.
 	if hostedSrc != nil {
-		client := &http.Client{Timeout: recordPushTimeout}
-		if workspaceID := resolveWorkspaceID(); workspaceID == "" {
-			decisionRecorder = recorder{capture: capture, capturePath: capturePath, pushHosted: newWorkspaceAutoResolvingPush(hostedAPIURL, hostedToken, client)}
-			fmt.Fprintf(os.Stderr, "lema-mcp: record_decision: %s unset — will auto-resolve the workspace from %s/workspaces on first capture (#348)\n", workspaceIDEnv, strings.TrimRight(hostedAPIURL, "/"))
-		} else {
-			push := func(ctx context.Context, recs []pushRecord) (pushResponse, error) {
-				return pushDecisions(ctx, client, hostedAPIURL, hostedToken, workspaceID, recs)
-			}
-			decisionRecorder = recorder{capture: capture, capturePath: capturePath, pushHosted: func(ctx context.Context, dr source.DecisionRecord) (recordOutput, error) {
-				return recordToHosted(ctx, dr, time.Now(), push)
-			}}
-			fmt.Fprintf(os.Stderr, "lema-mcp: record_decision drafts to hosted workspace %s\n", workspaceID)
-		}
+		decisionRecorder = newHostedRecorder(writeRuntime, capture, capturePath)
+		fmt.Fprintln(os.Stderr, "lema-mcp: record_decision resolves the current repository target before each hosted write")
 	} else {
 		decisionRecorder = recorder{capture: capture}
 	}

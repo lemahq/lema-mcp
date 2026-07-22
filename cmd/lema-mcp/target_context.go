@@ -4,12 +4,16 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/lemahq/lema-mcp/internal/source"
 )
 
 // resolutionStatus keeps resolution failures typed so callers cannot turn an
@@ -70,6 +74,131 @@ type targetProvider interface {
 // Future operation adapters receive it as a dependency; it never contains an
 // operation-specific target.
 var processTargetProvider targetProvider
+
+// hostedWriteRuntime is constructed once at the process or subcommand
+// boundary after credentials load. Operation helpers receive it by value and
+// never reopen credentials, construct providers, or select a fallback target.
+type hostedWriteRuntime struct {
+	client      *http.Client
+	apiURL      string
+	token       string
+	targets     targetProvider
+	targetInput resolveTargetInput
+	now         func() time.Time
+}
+
+type fixedTargetProvider struct {
+	result resolutionResult
+	err    error
+}
+
+func (p fixedTargetProvider) Resolve(context.Context, resolveTargetInput) (resolutionResult, error) {
+	return p.result, p.err
+}
+
+func newHostedWriteRuntime(client *http.Client, apiURL, token, explicitWorkspaceID, cwd string) hostedWriteRuntime {
+	if client == nil {
+		client = &http.Client{Timeout: recordPushTimeout}
+	}
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	runtime := hostedWriteRuntime{
+		client:  client,
+		apiURL:  strings.TrimRight(apiURL, "/"),
+		token:   token,
+		targets: newHostedTargetProvider(client, apiURL, token),
+		targetInput: resolveTargetInput{
+			ExplicitWorkspaceID: strings.TrimSpace(explicitWorkspaceID),
+			CWD:                 cwd,
+		},
+	}
+	if runtime.targetInput.ExplicitWorkspaceID != "" {
+		return runtime
+	}
+	association, found, err := loadContextAssociation(cwd, readContextGitEvidence)
+	if err != nil {
+		status := resolutionUnresolved
+		if found && isContextAssociationStale(err) {
+			status = resolutionStale
+		}
+		runtime.targets = fixedTargetProvider{result: resolutionResult{Status: status}}
+		return runtime
+	}
+	if found {
+		runtime.targetInput.LocalAssociation = &association
+		runtime.targetInput.PersistedAssociation = true
+	}
+	return runtime
+}
+
+func loadHostedWriteRuntime(timeout time.Duration) (hostedWriteRuntime, bool, error) {
+	config := resolveHostedWriteConfig()
+	if config.APIURL == "" || config.Token == "" {
+		return hostedWriteRuntime{}, config.UsedFile, fmt.Errorf("hosted credentials not configured: set %s and %s (or the credentials file)", "LEMA_API_URL", "LEMA_API_TOKEN")
+	}
+	return newHostedWriteRuntime(&http.Client{Timeout: timeout}, config.APIURL, config.Token, config.WorkspaceID, ""), config.UsedFile, nil
+}
+
+func (r hostedWriteRuntime) timeNow() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now().UTC()
+}
+
+const offlineTargetEvidenceSchemaVersion = 1
+
+func targetEvidenceFromContext(receipt targetContext) *source.TargetEvidence {
+	evidence := make([]source.TargetEvidenceItem, 0, len(receipt.Evidence))
+	for _, item := range receipt.Evidence {
+		switch item.Kind {
+		case "canonical_remote", "cwd_path_hash", "git_root_path_hash", "local_root_hash", "validated_receipt":
+			evidence = append(evidence, source.TargetEvidenceItem{Kind: item.Kind, Value: item.Value})
+		}
+	}
+	return &source.TargetEvidence{
+		SchemaVersion:         offlineTargetEvidenceSchemaVersion,
+		ProjectWorkspaceID:    receipt.ProjectWorkspaceID,
+		RepositoryWorkspaceID: receipt.RepositoryWorkspaceID,
+		RepositoryCanonical:   receipt.Repository.Canonical,
+		ResolvedBy:            receipt.ResolvedBy,
+		Evidence:              evidence,
+	}
+}
+
+func targetInputForOfflineRetry(base resolveTargetInput, stored *source.TargetEvidence) (resolveTargetInput, error) {
+	if stored == nil {
+		return base, nil
+	}
+	if stored.SchemaVersion != offlineTargetEvidenceSchemaVersion ||
+		strings.TrimSpace(stored.ProjectWorkspaceID) == "" ||
+		strings.TrimSpace(stored.RepositoryWorkspaceID) == "" ||
+		strings.TrimSpace(stored.RepositoryCanonical) == "" ||
+		strings.TrimSpace(stored.ResolvedBy) == "" || len(stored.Evidence) == 0 {
+		return resolveTargetInput{}, &targetResolutionError{status: resolutionStale, rung: "offline_receipt"}
+	}
+	evidence := make([]resolutionEvidence, 0, len(stored.Evidence))
+	for _, item := range stored.Evidence {
+		if strings.TrimSpace(item.Kind) == "" || strings.TrimSpace(item.Value) == "" {
+			return resolveTargetInput{}, &targetResolutionError{status: resolutionStale, rung: "offline_receipt"}
+		}
+		evidence = append(evidence, resolutionEvidence{Kind: item.Kind, Value: item.Value})
+	}
+	base.ExplicitWorkspaceID = ""
+	base.ExplicitProjectID = ""
+	base.ExplicitRepositoryID = ""
+	base.ExplicitRepository = repositoryIdentity{}
+	base.LocalAssociation = &targetContext{
+		ProjectWorkspaceID:    stored.ProjectWorkspaceID,
+		RepositoryWorkspaceID: stored.RepositoryWorkspaceID,
+		Repository:            repositoryIdentity{Canonical: stored.RepositoryCanonical},
+		ResolvedBy:            stored.ResolvedBy,
+		Evidence:              evidence,
+	}
+	base.PersistedAssociation = true
+	return base, nil
+}
 
 // newHostedTargetProvider builds the real process provider from credentials
 // already loaded by main. The operation gate never rereads credentials.
@@ -184,10 +313,11 @@ type resolveTargetInput struct {
 	PersistedAssociation  bool
 }
 
-// targetWorkspace is the pure representation supplied by a future adapter for
+// targetWorkspace is the pure representation supplied by the hosted adapter for
 // GET /workspaces. It intentionally does not perform transport itself.
 type targetWorkspace struct {
 	ID             string
+	Slug           string
 	OrganizationID string
 	IsRepository   bool
 	Archived       bool
@@ -295,7 +425,7 @@ func (r *targetResolver) resolveExplicit(ctx context.Context, in resolveTargetIn
 	}
 	if in.ExplicitWorkspaceID != "" {
 		for _, workspace := range workspaces {
-			if workspace.ID != in.ExplicitWorkspaceID {
+			if workspace.ID != in.ExplicitWorkspaceID && !strings.EqualFold(workspace.Slug, in.ExplicitWorkspaceID) {
 				continue
 			}
 			if workspace.Archived {

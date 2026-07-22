@@ -80,6 +80,18 @@ func TestTargetResolverExplicitFailureStopsBeforeGit(t *testing.T) {
 	}
 }
 
+func TestTargetResolverAcceptsLegacyExplicitWorkspaceSlug(t *testing.T) {
+	base := resolverFixture(t)
+	base.workspaces[0].Slug = "acme-api"
+	result, err := base.resolver().Resolve(context.Background(), resolveTargetInput{OrganizationID: "org-1", ExplicitWorkspaceID: "acme-api"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != resolutionResolved || result.Context.RepositoryWorkspaceID != base.workspaces[0].ID {
+		t.Fatalf("legacy slug resolution = %#v, want repository leaf %q", result, base.workspaces[0].ID)
+	}
+}
+
 func TestTargetResolverProjectParents(t *testing.T) {
 	for _, tc := range []struct {
 		name        string

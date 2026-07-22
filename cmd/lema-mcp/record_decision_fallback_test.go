@@ -9,8 +9,8 @@ import (
 	"github.com/lemahq/lema-mcp/internal/source"
 )
 
-func failingPush(err error) func(ctx context.Context, dr source.DecisionRecord) (recordOutput, error) {
-	return func(ctx context.Context, dr source.DecisionRecord) (recordOutput, error) {
+func failingPush(err error) func(ctx context.Context, receipt targetContext, dr source.DecisionRecord) (recordOutput, error) {
+	return func(ctx context.Context, receipt targetContext, dr source.DecisionRecord) (recordOutput, error) {
 		return recordOutput{}, err
 	}
 }
@@ -27,6 +27,7 @@ func TestRecorder_HostedPushFailurePreservesLocalDraft(t *testing.T) {
 	r := recorder{
 		capture:     fake,
 		capturePath: ".lema/decisions.jsonl",
+		targets:     &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: validRoutingContext()}},
 		pushHosted:  failingPush(errWorkspace404),
 	}
 
@@ -52,7 +53,8 @@ func TestRecorder_HostedPushFailurePreservesLocalDraft(t *testing.T) {
 		"draft",                 // what the capture landed as
 		".lema/decisions.jsonl", // where it landed
 		"does not enforce",      // honest about non-binding
-		workspaceIDEnv,          // how to fix the mapping
+		"doctor context",        // how to diagnose the mapping
+		"revalidate",            // what the retry does before upload
 	} {
 		if !strings.Contains(out.Recorded, want) {
 			t.Fatalf("message missing %q:\n%s", want, out.Recorded)
@@ -63,7 +65,7 @@ func TestRecorder_HostedPushFailurePreservesLocalDraft(t *testing.T) {
 // Without a local store there is nowhere to preserve the capture — the
 // original fail-loud behavior stands.
 func TestRecorder_HostedPushFailureWithoutLocalStoreStaysError(t *testing.T) {
-	r := recorder{pushHosted: failingPush(errWorkspace404)}
+	r := recorder{targets: &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: validRoutingContext()}}, pushHosted: failingPush(errWorkspace404)}
 	if _, err := r.record(context.Background(), sampleDecisionRecord()); err == nil {
 		t.Fatal("no local store to preserve into — the call must fail loud")
 	}
@@ -73,7 +75,7 @@ func TestRecorder_HostedPushFailureWithoutLocalStoreStaysError(t *testing.T) {
 // must surface both failures so nothing is silent.
 func TestRecorder_HostedFallbackDraftFailureSurfacesBoth(t *testing.T) {
 	fake := &fakeCapture{draftErr: errors.New("disk full")}
-	r := recorder{capture: fake, pushHosted: failingPush(errWorkspace404)}
+	r := recorder{capture: fake, targets: &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: validRoutingContext()}}, pushHosted: failingPush(errWorkspace404)}
 	_, err := r.record(context.Background(), sampleDecisionRecord())
 	if err == nil {
 		t.Fatal("both sinks failed — the call must error")
