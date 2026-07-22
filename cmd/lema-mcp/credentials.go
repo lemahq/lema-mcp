@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,6 +22,15 @@ import (
 // must never live in a repo — it is per-user, chmod 600.
 
 const credentialsRelPath = ".config/lema/credentials"
+
+// credentialFingerprint gives internal cache keys a stable token discriminator.
+// It is deliberately never included in logs or diagnostics; callers only use
+// it as an opaque SHA-256 value to prevent one credential's authority receipt
+// from serving another credential.
+func credentialFingerprint(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
 
 // workspaceIDEnv names the target workspace a hosted capture (record_decision /
 // the Stop-hook push) drafts into, and the workspace the frontload retrieval is

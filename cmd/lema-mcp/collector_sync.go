@@ -82,13 +82,82 @@ func looksLikeUUID(s string) bool {
 	return true
 }
 
-// workspaceUUIDCache memoizes slug→id resolutions per (apiURL, value) so the
-// long-lived MCP server pays one listing per target; hook processes are
-// one-shot and pay one listing per boundary event, bounded by the 5s budget.
-var (
-	workspaceUUIDMu    sync.Mutex
-	workspaceUUIDCache = map[string]string{}
-)
+// workspaceUUIDCache memoizes validated values per API URL, SHA-256 credential
+// fingerprint, and configured override so one credential cannot reuse another
+// credential's authority result. It is deliberately small and short-lived:
+// workspace slugs are mutable authority metadata, not permanent identifiers.
+const workspaceUUIDCacheTTL = time.Minute
+
+var workspaceUUIDCache = newWorkspaceUUIDCache(64, workspaceUUIDCacheTTL, time.Now)
+
+type workspaceUUIDCacheEntry struct {
+	workspaceID string
+	expires     time.Time
+}
+
+type workspaceUUIDResolutionCache struct {
+	mu       sync.Mutex
+	capacity int
+	ttl      time.Duration
+	now      func() time.Time
+	values   map[string]workspaceUUIDCacheEntry
+	order    []string
+}
+
+func newWorkspaceUUIDCache(capacity int, ttl time.Duration, now func() time.Time) *workspaceUUIDResolutionCache {
+	if capacity < 1 {
+		capacity = 1
+	}
+	if ttl <= 0 {
+		ttl = workspaceUUIDCacheTTL
+	}
+	if now == nil {
+		now = time.Now
+	}
+	return &workspaceUUIDResolutionCache{capacity: capacity, ttl: ttl, now: now, values: make(map[string]workspaceUUIDCacheEntry)}
+}
+
+func (c *workspaceUUIDResolutionCache) get(key string) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.values[key]
+	if !ok {
+		return "", false
+	}
+	if !c.now().Before(entry.expires) {
+		c.delete(key)
+		return "", false
+	}
+	return entry.workspaceID, true
+}
+
+func (c *workspaceUUIDResolutionCache) put(key, workspaceID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, exists := c.values[key]; !exists {
+		c.order = append(c.order, key)
+	}
+	c.values[key] = workspaceUUIDCacheEntry{workspaceID: workspaceID, expires: c.now().Add(c.ttl)}
+	for len(c.order) > c.capacity {
+		c.delete(c.order[0])
+	}
+}
+
+func (c *workspaceUUIDResolutionCache) delete(key string) {
+	delete(c.values, key)
+	for i, candidate := range c.order {
+		if candidate == key {
+			c.order = append(c.order[:i], c.order[i+1:]...)
+			return
+		}
+	}
+}
+
+func (c *workspaceUUIDResolutionCache) len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.values)
+}
 
 // resolveWorkspaceUUID turns the configured workspace value into the UUID the
 // API's path parser requires. Thin receiver-bound wrapper over
