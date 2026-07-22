@@ -170,11 +170,231 @@ func TestTargetResolverCacheIsBoundedAndCredentialScoped(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if base.workspaceCalls != 3 {
-		t.Fatalf("workspace fetches = %d, want 3: API URL and credential fingerprints must never share cache entries", base.workspaceCalls)
+	if base.workspaceCalls != 4 {
+		t.Fatalf("workspace fetches = %d, want 4: every cache lookup revalidates current authority and API URL/credential fingerprints remain isolated", base.workspaceCalls)
 	}
 	if got := base.cache.len(); got > 2 {
 		t.Fatalf("cache size = %d, want bounded at 2", got)
+	}
+}
+
+func TestTargetResolverCacheRevalidatesWarmReceipt(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*targetResolverFixture)
+	}{
+		{"repository visibility revoked", func(base *targetResolverFixture) {
+			base.workspaces = removeWorkspace(base.workspaces, "repo-api")
+		}},
+		{"project link revoked", func(base *targetResolverFixture) {
+			base.parents = nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := resolverFixture(t)
+			base.parents = []string{"project-payments"}
+			in := resolveTargetInput{APIURL: "https://api.example", CredentialFingerprint: "cred-a", OrganizationID: "org-1", CWD: "/repo"}
+			first, err := base.resolver().Resolve(context.Background(), in)
+			if err != nil || first.Status != resolutionResolved {
+				t.Fatalf("warm resolution = %#v, %v", first, err)
+			}
+			before := base.workspaceCalls
+			tc.mutate(base)
+			second, err := base.resolver().Resolve(context.Background(), in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if second.Status == resolutionResolved {
+				t.Fatalf("warm cache returned a resolved context after authoritative %s: %#v", tc.name, second)
+			}
+			if base.workspaceCalls <= before {
+				t.Fatalf("cache hit did not re-fetch authoritative visibility: before=%d after=%d", before, base.workspaceCalls)
+			}
+		})
+	}
+}
+
+func TestTargetResolverCacheRequiresFingerprintAndExpires(t *testing.T) {
+	base := resolverFixture(t)
+	base.cache = newTargetResolutionCache(2)
+	base.now = time.Unix(1, 0).UTC()
+	in := resolveTargetInput{APIURL: "https://api.example", CWD: "/repo"}
+	if _, err := base.resolver().Resolve(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if got := base.cache.len(); got != 0 {
+		t.Fatalf("cache size without credential fingerprint = %d, want 0", got)
+	}
+	in.CredentialFingerprint = "cred-a"
+	if _, err := base.resolver().Resolve(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if got := base.cache.len(); got != 1 {
+		t.Fatalf("cache size with credential fingerprint = %d, want 1", got)
+	}
+	base.now = base.now.Add(targetCacheTTL + time.Second)
+	if _, ok := base.cache.get(base.resolver().cacheKey(in, mustRepository(t, "https://github.com/acme/api.git")), base.now); ok {
+		t.Fatal("expired cache entry remained usable")
+	}
+}
+
+func TestTargetResolverRebuildsReceiptsFromCurrentAuthority(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input func(targetContext) resolveTargetInput
+	}{
+		{"run", func(receipt targetContext) resolveTargetInput {
+			return resolveTargetInput{OrganizationID: "org-1", RunID: "run-1"}
+		}},
+		{"local association", func(receipt targetContext) resolveTargetInput {
+			return resolveTargetInput{OrganizationID: "org-1", CWD: "/no-git", LocalAssociation: &receipt}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := resolverFixture(t)
+			base.workspaces = append(base.workspaces, targetWorkspace{ID: "repo-web", OrganizationID: "org-1", IsRepository: true, Repository: mustRepository(t, "https://github.com/acme/web.git")})
+			base.links = map[string][]string{"project-payments": {"repo-api", "repo-web"}}
+			receipt := resolvedTarget("project-payments", "repo-api", "https://github.com/acme/api.git", "prior")
+			receipt.VisibleRepositoryWorkspaceIDs = []string{"repo-api", "repo-web"}
+			receipt.Evidence = []resolutionEvidence{{Kind: "prior", Value: "immutable"}}
+			base.run = receipt
+			base.workspaces = removeWorkspace(base.workspaces, "repo-web")
+
+			result, err := base.resolver().Resolve(context.Background(), tc.input(receipt))
+			if err != nil || result.Status != resolutionResolved {
+				t.Fatalf("result = %#v, %v", result, err)
+			}
+			if got, want := strings.Join(result.Context.VisibleRepositoryWorkspaceIDs, ","), "repo-api"; got != want {
+				t.Fatalf("visible repositories = %q, want %q after secondary visibility revocation", got, want)
+			}
+			result.Context.VisibleRepositoryWorkspaceIDs[0] = "mutated"
+			result.Context.Evidence[0].Value = "mutated"
+			if got := strings.Join(receipt.VisibleRepositoryWorkspaceIDs, ","); got != "repo-api,repo-web" || receipt.Evidence[0].Value != "immutable" {
+				t.Fatalf("returned context aliases caller receipt: %#v", receipt)
+			}
+		})
+	}
+}
+
+func TestTargetResolverRejectsArchivedOrRepositoryProjectReceipts(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*targetWorkspace)
+	}{
+		{"archived", func(project *targetWorkspace) { project.Archived = true }},
+		{"repository leaf", func(project *targetWorkspace) { project.IsRepository = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := resolverFixture(t)
+			base.links = map[string][]string{"project-payments": {"repo-api"}}
+			base.run = resolvedTarget("project-payments", "repo-api", "https://github.com/acme/api.git", "prior")
+			for i := range base.workspaces {
+				if base.workspaces[i].ID == "project-payments" {
+					tc.mutate(&base.workspaces[i])
+				}
+			}
+			result, err := base.resolver().Resolve(context.Background(), resolveTargetInput{OrganizationID: "org-1", RunID: "run-1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Status != resolutionStale {
+				t.Fatalf("status = %q, want stale for %s project", result.Status, tc.name)
+			}
+		})
+	}
+}
+
+func TestTargetResolverRequiresLinkAuthority(t *testing.T) {
+	base := resolverFixture(t)
+	resolver := base.resolver()
+	resolver.fetchLinks = nil
+	result, err := resolver.Resolve(context.Background(), resolveTargetInput{OrganizationID: "org-1", CWD: "/repo"})
+	if err == nil && result.Status == resolutionResolved {
+		t.Fatalf("missing link authority resolved singleton context: %#v", result)
+	}
+}
+
+func TestTargetResolverSingletonReceiptRequiresLinkAuthority(t *testing.T) {
+	base := resolverFixture(t)
+	base.run = resolvedTarget("repo-api", "repo-api", "https://github.com/acme/api.git", "prior")
+	resolver := base.resolver()
+	resolver.fetchLinks = nil
+	result, err := resolver.Resolve(context.Background(), resolveTargetInput{OrganizationID: "org-1", RunID: "run-1"})
+	if err == nil && result.Status == resolutionResolved {
+		t.Fatalf("missing link authority revalidated a singleton receipt: %#v", result)
+	}
+}
+
+func TestTargetResolverNeverCrossesOrganization(t *testing.T) {
+	base := resolverFixture(t)
+	for i := range base.workspaces {
+		if base.workspaces[i].ID == "repo-api" {
+			base.workspaces[i].OrganizationID = "org-foreign"
+		}
+	}
+	for _, in := range []resolveTargetInput{
+		{OrganizationID: "org-1", CWD: "/repo"},
+		{OrganizationID: "org-1", ExplicitWorkspaceID: "repo-api"},
+	} {
+		result, err := base.resolver().Resolve(context.Background(), in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Status == resolutionResolved {
+			t.Fatalf("foreign workspace resolved under selected organization: %#v", result)
+		}
+	}
+}
+
+func TestRepositoryIdentityFromRemoteRedactsAndNormalizes(t *testing.T) {
+	for _, tc := range []struct {
+		remote string
+		want   string
+		ok     bool
+	}{
+		{"https://token:secret@GitHub.com:443/acme/api.git?token=leak#fragment", "git:github.com/acme/api", true},
+		{"ssh://git@github.com:22/acme/api.git?token=leak#fragment", "git:github.com/acme/api", true},
+		{"git@github.com:acme/api.git?token=leak#fragment", "git:github.com/acme/api", true},
+		{"https://github.com:8443/acme/api.git", "git:github.com:8443/acme/api", true},
+		{"ftp://github.com/acme/api.git", "", false},
+	} {
+		identity, ok := repositoryIdentityFromRemote(tc.remote)
+		if ok != tc.ok || identity.Canonical != tc.want {
+			t.Errorf("repositoryIdentityFromRemote(%q) = (%#v,%v), want canonical=%q ok=%v", tc.remote, identity, ok, tc.want, tc.ok)
+		}
+		if strings.Contains(identity.Canonical, "secret") || strings.Contains(identity.Canonical, "leak") || strings.Contains(identity.Canonical, "#") || strings.Contains(identity.Canonical, "?") {
+			t.Errorf("canonical identity leaked remote secret/suffix: %q", identity.Canonical)
+		}
+	}
+}
+
+func TestTargetResolverExplicitProjectUsesVisibleLeafIntersection(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		links      []string
+		addWeb     bool
+		wantStatus resolutionStatus
+		wantRepo   string
+		wantCount  int
+	}{
+		{"one visible linked leaf", []string{"repo-api"}, false, resolutionResolved, "repo-api", 0},
+		{"no visible linked leaf", []string{"hidden-repo"}, false, resolutionUnresolved, "", 0},
+		{"multiple visible linked leaves", []string{"repo-api", "repo-web"}, true, resolutionAmbiguous, "", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := resolverFixture(t)
+			if tc.addWeb {
+				base.workspaces = append(base.workspaces, targetWorkspace{ID: "repo-web", OrganizationID: "org-1", IsRepository: true, Repository: mustRepository(t, "https://github.com/acme/web.git")})
+			}
+			base.links = map[string][]string{"project-payments": tc.links}
+			result, err := base.resolver().Resolve(context.Background(), resolveTargetInput{OrganizationID: "org-1", ExplicitProjectID: "project-payments"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Status != tc.wantStatus || result.Context.RepositoryWorkspaceID != tc.wantRepo || len(result.Candidates) != tc.wantCount {
+				t.Fatalf("result = %#v, want status=%q repo=%q candidates=%d", result, tc.wantStatus, tc.wantRepo, tc.wantCount)
+			}
+		})
 	}
 }
 
@@ -186,6 +406,8 @@ type targetResolverFixture struct {
 	local          *targetContext
 	readGit        func(context.Context, string) (gitTargetEvidence, error)
 	cache          *targetResolutionCache
+	links          map[string][]string
+	now            time.Time
 	gitCalls       int
 	workspaceCalls int
 }
@@ -223,6 +445,9 @@ func (f *targetResolverFixture) resolver() *targetResolver {
 			return f.workspaces, nil
 		},
 		fetchLinks: func(_ context.Context, _ resolveTargetInput, projectID string) ([]string, error) {
+			if f.links != nil {
+				return append([]string(nil), f.links[projectID]...), nil
+			}
 			switch projectID {
 			case "run-project":
 				return []string{"repo-run"}, nil
@@ -243,8 +468,13 @@ func (f *targetResolverFixture) resolver() *targetResolver {
 			return resolutionResult{Status: resolutionResolved, Context: f.run}, nil
 		},
 		readGit: readGit,
-		now:     func() time.Time { return time.Unix(1, 0).UTC() },
-		cache:   f.cache,
+		now: func() time.Time {
+			if !f.now.IsZero() {
+				return f.now
+			}
+			return time.Unix(1, 0).UTC()
+		},
+		cache: f.cache,
 	}
 }
 
@@ -269,6 +499,16 @@ func evidenceValue(evidence []resolutionEvidence, kind string) string {
 		}
 	}
 	return ""
+}
+
+func removeWorkspace(workspaces []targetWorkspace, id string) []targetWorkspace {
+	out := make([]targetWorkspace, 0, len(workspaces))
+	for _, workspace := range workspaces {
+		if workspace.ID != id {
+			out = append(out, workspace)
+		}
+	}
+	return out
 }
 
 var errNoGitEvidence = fmt.Errorf("no git evidence")

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -95,6 +96,8 @@ type targetResolver struct {
 	cache           *targetResolutionCache
 }
 
+const targetCacheTTL = time.Minute
+
 func (r *targetResolver) Resolve(ctx context.Context, in resolveTargetInput) (resolutionResult, error) {
 	if hasExplicitTarget(in) {
 		return r.resolveExplicit(ctx, in)
@@ -118,14 +121,20 @@ func (r *targetResolver) Resolve(ctx context.Context, in resolveTargetInput) (re
 			}
 			if git.Repository.Canonical != "" {
 				key := r.cacheKey(in, git.Repository)
-				if cached, ok := r.cache.get(key); ok {
-					return resolutionResult{Status: resolutionResolved, Context: cached}, nil
+				if key != "" {
+					if cached, ok := r.cache.get(key, r.timeNow()); ok {
+						// A cache entry only saves discovery work. Current workspace,
+						// membership, and link authority must still validate this receipt.
+						return r.validateContext(ctx, in, cached, "canonical_git")
+					}
 				}
 				res, err := r.resolveRepository(ctx, in, git.Repository, "canonical_git")
 				if err != nil || res.Status != resolutionUnresolved {
 					if err == nil && res.Status == resolutionResolved {
 						res.Context.Evidence = append(res.Context.Evidence, gitEvidence(in, git)...)
-						r.cache.put(key, res.Context)
+						if key != "" {
+							r.cache.put(key, res.Context, r.timeNow())
+						}
 					}
 					return res, err
 				}
@@ -155,6 +164,9 @@ func (r *targetResolver) resolveExplicit(ctx context.Context, in resolveTargetIn
 			if workspace.Archived {
 				return resolutionResult{Status: resolutionStale, Reason: "explicit workspace is archived"}, nil
 			}
+			if !r.workspaceInOrganization(in, workspace) {
+				return resolutionResult{Status: resolutionStale, Reason: "explicit workspace is not visible in the selected organization"}, nil
+			}
 			if !workspace.IsRepository {
 				return resolutionResult{Status: resolutionStale, Reason: "explicit workspace is not a repository target"}, nil
 			}
@@ -162,12 +174,55 @@ func (r *targetResolver) resolveExplicit(ctx context.Context, in resolveTargetIn
 		}
 		return resolutionResult{Status: resolutionStale, Reason: "explicit workspace is no longer visible"}, nil
 	}
+	if in.ExplicitRepository.Canonical == "" && in.ExplicitProjectID != "" {
+		return r.resolveExplicitProject(ctx, in, workspaces)
+	}
 	for _, workspace := range workspaces {
-		if workspace.IsRepository && workspace.Repository.Canonical == in.ExplicitRepository.Canonical && !workspace.Archived {
+		if workspace.IsRepository && workspace.Repository.Canonical == in.ExplicitRepository.Canonical && !workspace.Archived && r.workspaceInOrganization(in, workspace) {
 			return r.resolveRepositoryWithWorkspaces(ctx, in, workspace, workspaces, in.ExplicitProjectID, "explicit")
 		}
 	}
 	return resolutionResult{Status: resolutionForbidden, Reason: "explicit repository is not visible to this credential"}, nil
+}
+
+func (r *targetResolver) resolveExplicitProject(ctx context.Context, in resolveTargetInput, workspaces []targetWorkspace) (resolutionResult, error) {
+	if r.fetchLinks == nil {
+		return resolutionResult{Status: resolutionUnresolved, Reason: "project link authority is unavailable"}, nil
+	}
+	var project *targetWorkspace
+	for i := range workspaces {
+		workspace := &workspaces[i]
+		if workspace.ID == in.ExplicitProjectID && !workspace.IsRepository && !workspace.Archived && r.workspaceInOrganization(in, *workspace) {
+			project = workspace
+			break
+		}
+	}
+	if project == nil {
+		return resolutionResult{Status: resolutionStale, Reason: "explicit project is not visible or active"}, nil
+	}
+	visible, err := r.visibleRepositories(ctx, in, *project, workspaces)
+	if err != nil {
+		return resolutionResult{}, err
+	}
+	byID := make(map[string]targetWorkspace, len(workspaces))
+	for _, workspace := range workspaces {
+		if workspace.IsRepository && !workspace.Archived && r.workspaceInOrganization(in, workspace) && workspace.OrganizationID == project.OrganizationID {
+			byID[workspace.ID] = workspace
+		}
+	}
+	switch len(visible) {
+	case 0:
+		return resolutionResult{Status: resolutionUnresolved, Reason: "explicit project has no visible linked repository"}, nil
+	case 1:
+		repository := byID[visible[0]]
+		return resolutionResult{Status: resolutionResolved, Context: r.contextFor(in, *project, repository, visible, "explicit")}, nil
+	default:
+		candidates := make([]targetContext, 0, len(visible))
+		for _, id := range visible {
+			candidates = append(candidates, r.contextFor(in, *project, byID[id], visible, ""))
+		}
+		return resolutionResult{Status: resolutionAmbiguous, Candidates: candidates, Reason: "explicit project has multiple visible linked repositories"}, nil
+	}
 }
 
 func (r *targetResolver) resolveRepository(ctx context.Context, in resolveTargetInput, identity repositoryIdentity, resolvedBy string) (resolutionResult, error) {
@@ -176,7 +231,7 @@ func (r *targetResolver) resolveRepository(ctx context.Context, in resolveTarget
 		return resolutionResult{}, err
 	}
 	for _, workspace := range workspaces {
-		if workspace.IsRepository && !workspace.Archived && workspace.Repository.Canonical == identity.Canonical {
+		if workspace.IsRepository && !workspace.Archived && r.workspaceInOrganization(in, workspace) && workspace.Repository.Canonical == identity.Canonical {
 			return r.resolveRepositoryWithWorkspaces(ctx, in, workspace, workspaces, "", resolvedBy)
 		}
 	}
@@ -184,7 +239,10 @@ func (r *targetResolver) resolveRepository(ctx context.Context, in resolveTarget
 }
 
 func (r *targetResolver) resolveRepositoryWithWorkspaces(ctx context.Context, in resolveTargetInput, repository targetWorkspace, workspaces []targetWorkspace, explicitProjectID, resolvedBy string) (resolutionResult, error) {
-	parents, err := r.parents(ctx, in, repository.ID, workspaces)
+	if r.fetchLinks == nil {
+		return resolutionResult{Status: resolutionUnresolved, Reason: "project link authority is unavailable"}, nil
+	}
+	parents, err := r.parents(ctx, in, repository, workspaces)
 	if err != nil {
 		return resolutionResult{}, err
 	}
@@ -228,19 +286,34 @@ func (r *targetResolver) validateContext(ctx context.Context, in resolveTargetIn
 	if err != nil {
 		return resolutionResult{}, err
 	}
-	var repository *targetWorkspace
-	projectFound := receipt.ProjectWorkspaceID == receipt.RepositoryWorkspaceID
+	var repository, project *targetWorkspace
 	for i := range workspaces {
 		workspace := &workspaces[i]
-		if workspace.ID == receipt.RepositoryWorkspaceID && workspace.IsRepository && !workspace.Archived && workspace.Repository.Canonical == receipt.Repository.Canonical {
+		if workspace.ID == receipt.RepositoryWorkspaceID && workspace.IsRepository && !workspace.Archived && r.workspaceInOrganization(in, *workspace) && workspace.Repository.Canonical == receipt.Repository.Canonical {
 			repository = workspace
 		}
-		if workspace.ID == receipt.ProjectWorkspaceID && !workspace.Archived {
-			projectFound = true
+		if workspace.ID == receipt.ProjectWorkspaceID && !workspace.IsRepository && !workspace.Archived && r.workspaceInOrganization(in, *workspace) {
+			project = workspace
 		}
 	}
-	if repository == nil || !projectFound {
+	if repository == nil {
 		return resolutionResult{Status: resolutionStale, Reason: "stored target is no longer visible"}, nil
+	}
+	if receipt.ProjectWorkspaceID == receipt.RepositoryWorkspaceID {
+		if r.fetchLinks == nil {
+			return resolutionResult{Status: resolutionUnresolved, Reason: "project link authority is unavailable"}, nil
+		}
+		parents, err := r.parents(ctx, in, *repository, workspaces)
+		if err != nil {
+			return resolutionResult{}, err
+		}
+		if len(parents) != 0 {
+			return resolutionResult{Status: resolutionStale, Reason: "stored singleton repository is now linked to a project"}, nil
+		}
+		return resolutionResult{Status: resolutionResolved, Context: r.contextFor(in, *repository, *repository, []string{repository.ID}, resolvedBy)}, nil
+	}
+	if project == nil || project.OrganizationID != repository.OrganizationID {
+		return resolutionResult{Status: resolutionStale, Reason: "stored project is no longer an active project in the repository organization"}, nil
 	}
 	if receipt.ProjectWorkspaceID != receipt.RepositoryWorkspaceID {
 		linked, err := r.linked(ctx, in, receipt.ProjectWorkspaceID, receipt.RepositoryWorkspaceID)
@@ -251,18 +324,22 @@ func (r *targetResolver) validateContext(ctx context.Context, in resolveTargetIn
 			return resolutionResult{Status: resolutionStale, Reason: "stored project no longer links the repository"}, nil
 		}
 	}
-	receipt.ResolvedBy = resolvedBy
-	receipt.Evidence = append(receipt.Evidence, resolutionEvidence{Kind: "validated_receipt", Value: receipt.Repository.Canonical})
-	return resolutionResult{Status: resolutionResolved, Context: receipt}, nil
+	visible, err := r.visibleRepositories(ctx, in, *project, workspaces)
+	if err != nil {
+		return resolutionResult{}, err
+	}
+	context := r.contextFor(in, *project, *repository, visible, resolvedBy)
+	context.Evidence = append(context.Evidence, resolutionEvidence{Kind: "validated_receipt", Value: repository.Repository.Canonical})
+	return resolutionResult{Status: resolutionResolved, Context: context}, nil
 }
 
-func (r *targetResolver) parents(ctx context.Context, in resolveTargetInput, repositoryID string, workspaces []targetWorkspace) ([]targetWorkspace, error) {
+func (r *targetResolver) parents(ctx context.Context, in resolveTargetInput, repository targetWorkspace, workspaces []targetWorkspace) ([]targetWorkspace, error) {
 	var out []targetWorkspace
 	for _, workspace := range workspaces {
-		if workspace.IsRepository || workspace.Archived || (in.OrganizationID != "" && workspace.OrganizationID != in.OrganizationID) {
+		if workspace.IsRepository || workspace.Archived || !r.workspaceInOrganization(in, workspace) || workspace.OrganizationID != repository.OrganizationID {
 			continue
 		}
-		linked, err := r.linked(ctx, in, workspace.ID, repositoryID)
+		linked, err := r.linked(ctx, in, workspace.ID, repository.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -303,7 +380,7 @@ func (r *targetResolver) visibleRepositories(ctx context.Context, in resolveTarg
 	}
 	visible := make([]string, 0, len(linked))
 	for _, workspace := range workspaces {
-		if workspace.IsRepository && !workspace.Archived && (in.OrganizationID == "" || workspace.OrganizationID == in.OrganizationID) && linked[workspace.ID] {
+		if workspace.IsRepository && !workspace.Archived && r.workspaceInOrganization(in, workspace) && workspace.OrganizationID == project.OrganizationID && linked[workspace.ID] {
 			visible = append(visible, workspace.ID)
 		}
 	}
@@ -311,11 +388,11 @@ func (r *targetResolver) visibleRepositories(ctx context.Context, in resolveTarg
 }
 
 func (r *targetResolver) contextFor(in resolveTargetInput, project, repository targetWorkspace, visible []string, resolvedBy string) targetContext {
-	organizationID := repository.OrganizationID
-	if in.OrganizationID != "" {
-		organizationID = in.OrganizationID
-	}
-	return targetContext{OrganizationID: organizationID, ProjectWorkspaceID: project.ID, RepositoryWorkspaceID: repository.ID, VisibleRepositoryWorkspaceIDs: visible, Repository: repository.Repository, ResolvedBy: resolvedBy, Evidence: []resolutionEvidence{{Kind: "canonical_remote", Value: repository.Repository.Canonical}}, ResolvedAt: r.timeNow()}
+	return targetContext{OrganizationID: repository.OrganizationID, ProjectWorkspaceID: project.ID, RepositoryWorkspaceID: repository.ID, VisibleRepositoryWorkspaceIDs: append([]string(nil), visible...), Repository: repository.Repository, ResolvedBy: resolvedBy, Evidence: []resolutionEvidence{{Kind: "canonical_remote", Value: repository.Repository.Canonical}}, ResolvedAt: r.timeNow()}
+}
+
+func (r *targetResolver) workspaceInOrganization(in resolveTargetInput, workspace targetWorkspace) bool {
+	return in.OrganizationID == "" || workspace.OrganizationID == in.OrganizationID
 }
 
 func (r *targetResolver) workspaces(ctx context.Context, in resolveTargetInput) ([]targetWorkspace, error) {
@@ -356,12 +433,23 @@ func repositoryIdentityFromRemote(remote string) (repositoryIdentity, bool) {
 		if err != nil || u.Host == "" {
 			return repositoryIdentity{}, false
 		}
-		host, path = u.Host, u.Path
+		scheme := strings.ToLower(u.Scheme)
+		if scheme != "http" && scheme != "https" && scheme != "ssh" {
+			return repositoryIdentity{}, false
+		}
+		host = strings.ToLower(u.Hostname())
+		port := u.Port()
+		if port != "" && !isDefaultGitPort(scheme, port) {
+			host += ":" + port
+		}
+		path = u.Path
 	} else if colon := strings.Index(s, ":"); colon > 0 { // scp-style git@host:owner/repo
 		host, path = s[:colon], s[colon+1:]
 		if at := strings.LastIndex(host, "@"); at >= 0 {
 			host = host[at+1:]
 		}
+		path = strings.SplitN(path, "?", 2)[0]
+		path = strings.SplitN(path, "#", 2)[0]
 	} else {
 		return repositoryIdentity{}, false
 	}
@@ -376,21 +464,32 @@ func repositoryIdentityFromRemote(remote string) (repositoryIdentity, bool) {
 		return repositoryIdentity{}, false
 	}
 	owner := strings.ToLower(segments[len(segments)-2])
-	name := strings.ToLower(strings.TrimSuffix(segments[len(segments)-1], ".git"))
+	name := strings.TrimSuffix(strings.ToLower(segments[len(segments)-1]), ".git")
 	if owner == "" || name == "" {
 		return repositoryIdentity{}, false
 	}
 	return repositoryIdentity{Host: host, Owner: owner, Name: name, Canonical: "git:" + host + "/" + owner + "/" + name}, true
 }
 
+func isDefaultGitPort(scheme, port string) bool {
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		return false
+	}
+	return (scheme == "http" && p == 80) || (scheme == "https" && p == 443) || (scheme == "ssh" && p == 22)
+}
+
 func (r *targetResolver) cacheKey(in resolveTargetInput, repository repositoryIdentity) string {
+	if in.CredentialFingerprint == "" {
+		return ""
+	}
 	return strings.Join([]string{in.APIURL, in.CredentialFingerprint, in.OrganizationID, repository.Canonical, in.ExplicitProjectID, pathHash(in.CWD)}, "\x00")
 }
 
 type targetResolutionCache struct {
 	mu       sync.Mutex
 	capacity int
-	values   map[string]targetContext
+	values   map[string]targetCacheEntry
 	order    []string
 }
 
@@ -398,20 +497,38 @@ func newTargetResolutionCache(capacity int) *targetResolutionCache {
 	if capacity < 1 {
 		capacity = 1
 	}
-	return &targetResolutionCache{capacity: capacity, values: make(map[string]targetContext)}
+	return &targetResolutionCache{capacity: capacity, values: make(map[string]targetCacheEntry)}
 }
 
-func (c *targetResolutionCache) get(key string) (targetContext, bool) {
+type targetCacheEntry struct {
+	context targetContext
+	expires time.Time
+}
+
+func (c *targetResolutionCache) get(key string, now time.Time) (targetContext, bool) {
 	if c == nil {
 		return targetContext{}, false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	value, ok := c.values[key]
-	return cloneContext(value), ok
+	if !ok {
+		return targetContext{}, false
+	}
+	if !now.Before(value.expires) {
+		delete(c.values, key)
+		for i, candidate := range c.order {
+			if candidate == key {
+				c.order = append(c.order[:i], c.order[i+1:]...)
+				break
+			}
+		}
+		return targetContext{}, false
+	}
+	return cloneContext(value.context), true
 }
 
-func (c *targetResolutionCache) put(key string, value targetContext) {
+func (c *targetResolutionCache) put(key string, value targetContext, now time.Time) {
 	if c == nil {
 		return
 	}
@@ -420,7 +537,7 @@ func (c *targetResolutionCache) put(key string, value targetContext) {
 	if _, exists := c.values[key]; !exists {
 		c.order = append(c.order, key)
 	}
-	c.values[key] = cloneContext(value)
+	c.values[key] = targetCacheEntry{context: cloneContext(value), expires: now.Add(targetCacheTTL)}
 	for len(c.order) > c.capacity {
 		oldest := c.order[0]
 		c.order = c.order[1:]
