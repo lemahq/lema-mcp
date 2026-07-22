@@ -21,6 +21,20 @@ type syncCapture struct {
 	events     []map[string]any
 }
 
+type collectorRoutingProvider struct {
+	receipts map[string]targetContext
+	calls    int
+}
+
+func (p *collectorRoutingProvider) Resolve(_ context.Context, input resolveTargetInput) (resolutionResult, error) {
+	p.calls++
+	receipt, ok := p.receipts[input.CWD]
+	if !ok {
+		return resolutionResult{Status: resolutionUnresolved}, nil
+	}
+	return resolutionResult{Status: resolutionResolved, Context: receipt}, nil
+}
+
 func newSyncTestServer(t *testing.T, cap *syncCapture, eventStatus int) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -28,7 +42,7 @@ func newSyncTestServer(t *testing.T, cap *syncCapture, eventStatus int) *httptes
 		if r.Header.Get("Authorization") != "Bearer tok" {
 			t.Errorf("missing bearer token on workspace validation")
 		}
-		_, _ = w.Write([]byte(`{"workspaces":[{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}]}`))
+		_, _ = w.Write([]byte(`{"workspaces":[{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","org_id":"org-1","is_repo":true,"repo_url":"https://github.com/acme/proj.git"}]}`))
 	})
 	mux.HandleFunc("POST /workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/runs", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer tok" {
@@ -139,6 +153,156 @@ func TestSyncSendsRepoAndBranchOnRunCreate(t *testing.T) {
 	}
 }
 
+// Collector Runs are project-scoped lifecycle state. A frontend session and an
+// API session can therefore converge on the same Work Unit under the Project,
+// while the Run body preserves which repository each harness actually touched.
+func TestCollectorSyncHomesCrossRepositoryRunsOnOneProject(t *testing.T) {
+	const (
+		projectID  = "11111111-1111-1111-1111-111111111111"
+		frontendID = "22222222-2222-2222-2222-222222222222"
+		apiID      = "33333333-3333-3333-3333-333333333333"
+	)
+	type create struct {
+		path string
+		body map[string]string
+	}
+	var creates []create
+	var eventPaths []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /workspaces/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path[len(r.URL.Path)-5:] == "/runs" {
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			creates = append(creates, create{path: r.URL.Path, body: body})
+			_, _ = w.Write([]byte(`{"run":{"id":"44444444-4444-4444-4444-444444444444"}}`))
+			return
+		}
+		eventPaths = append(eventPaths, r.URL.Path)
+		w.WriteHeader(http.StatusCreated)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	restoreRemote, restoreBranch := gitRemoteURL, gitCurrentBranch
+	t.Cleanup(func() { gitRemoteURL, gitCurrentBranch = restoreRemote, restoreBranch })
+	gitRemoteURL = func(cwd string) (string, bool) {
+		switch cwd {
+		case "/repo/frontend":
+			return "https://github.com/acme/frontend.git", true
+		case "/repo/api":
+			return "https://github.com/acme/api.git", true
+		default:
+			return "", false
+		}
+	}
+	gitCurrentBranch = func(string) (string, bool) { return "main", true }
+
+	provider := &collectorRoutingProvider{receipts: map[string]targetContext{
+		"/repo/frontend": collectorRoutingReceipt(projectID, frontendID, "git:github.com/acme/frontend"),
+		"/repo/api":      collectorRoutingReceipt(projectID, apiID, "git:github.com/acme/api"),
+	}}
+	s := &collectorSyncer{
+		apiURL: srv.URL, token: "tok", client: srv.Client(),
+		runtime: &hostedWriteRuntime{client: srv.Client(), apiURL: srv.URL, token: "tok", targets: provider},
+	}
+	ctx := context.Background()
+	for _, cp := range []collectorCheckpoint{
+		{CWD: "/repo/frontend", RunID: "frontend-run", Summary: "frontend", UpdatedAt: "2026-07-22T00:00:00Z"},
+		{CWD: "/repo/api", RunID: "api-run", Summary: "api", UpdatedAt: "2026-07-22T00:00:00Z"},
+	} {
+		if err := s.syncCheckpoint(ctx, "claude-code", cp); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	wantRunPath := "/workspaces/" + projectID + "/runs"
+	wantEventPath := wantRunPath + "/44444444-4444-4444-4444-444444444444/events"
+	if len(creates) != 2 || creates[0].path != wantRunPath || creates[1].path != wantRunPath {
+		t.Fatalf("Run create paths = %#v, want both %q", creates, wantRunPath)
+	}
+	if len(eventPaths) != 2 || eventPaths[0] != wantEventPath || eventPaths[1] != wantEventPath {
+		t.Fatalf("Run event paths = %v, want both %q", eventPaths, wantEventPath)
+	}
+	if creates[0].body["repo"] != "acme/frontend" || creates[1].body["repo"] != "acme/api" {
+		t.Fatalf("Run create repository provenance = %#v, want frontend then api", creates)
+	}
+	if provider.calls != 2 {
+		t.Fatalf("target resolutions = %d, want one immutable receipt per sync", provider.calls)
+	}
+}
+
+func collectorRoutingReceipt(projectID, repositoryID, canonical string) targetContext {
+	receipt := validRoutingContext()
+	receipt.ProjectWorkspaceID = projectID
+	receipt.RepositoryWorkspaceID = repositoryID
+	receipt.VisibleRepositoryWorkspaceIDs = []string{repositoryID}
+	receipt.Repository.Canonical = canonical
+	receipt.Evidence = []resolutionEvidence{{Kind: "canonical_remote", Value: canonical}}
+	return receipt
+}
+
+func TestCollectorSyncUsesSingletonRepositoryLeafForBothRunRoutes(t *testing.T) {
+	const leafID = "55555555-5555-5555-5555-555555555555"
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path == "/workspaces/"+leafID+"/runs" {
+			_, _ = w.Write([]byte(`{"run":{"id":"66666666-6666-6666-6666-666666666666"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	provider := &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: collectorRoutingReceipt(leafID, leafID, "git:github.com/acme/singleton")}}
+	s := &collectorSyncer{
+		apiURL: server.URL, token: "tok", client: server.Client(),
+		runtime: &hostedWriteRuntime{client: server.Client(), apiURL: server.URL, token: "tok", targets: provider},
+	}
+	cp := collectorCheckpoint{CWD: "/repo/singleton", RunID: "singleton-run", Summary: "singleton", UpdatedAt: "2026-07-22T00:00:00Z"}
+	if err := s.syncCheckpoint(context.Background(), "claude-code", cp); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"/workspaces/" + leafID + "/runs",
+		"/workspaces/" + leafID + "/runs/66666666-6666-6666-6666-666666666666/events",
+	}
+	if len(paths) != len(want) || paths[0] != want[0] || paths[1] != want[1] {
+		t.Fatalf("singleton routes = %v, want %v", paths, want)
+	}
+}
+
+func TestCollectorSyncNonResolvedOrMalformedReceiptPostsNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result resolutionResult
+	}{
+		{"unresolved", resolutionResult{Status: resolutionUnresolved}},
+		{"ambiguous", resolutionResult{Status: resolutionAmbiguous}},
+		{"forbidden", resolutionResult{Status: resolutionForbidden}},
+		{"stale", resolutionResult{Status: resolutionStale}},
+		{"malformed", resolutionResult{Status: resolutionResolved, Context: targetContext{}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests++ }))
+			defer server.Close()
+			provider := &fakeTargetProvider{result: tc.result}
+			s := &collectorSyncer{
+				apiURL: server.URL, token: "tok", client: server.Client(),
+				runtime: &hostedWriteRuntime{client: server.Client(), apiURL: server.URL, token: "tok", targets: provider},
+			}
+			err := s.syncCheckpoint(context.Background(), "claude-code", collectorCheckpoint{CWD: "/repo/no-route", RunID: "no-route"})
+			if err == nil {
+				t.Fatal("non-resolved receipt must reject collector sync")
+			}
+			if provider.calls != 1 || requests != 0 {
+				t.Fatalf("provider calls=%d operation HTTP=%d, want 1/0", provider.calls, requests)
+			}
+		})
+	}
+}
+
 func TestSyncRefusesFileSourcedWorkspace(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("no HTTP call may happen when the workspace comes from the credentials file, got %s %s", r.Method, r.URL.Path)
@@ -176,16 +340,16 @@ func TestSyncRefusesFileSourcedWorkspace(t *testing.T) {
 	}
 }
 
-// Zero-config multi-repo (decision d_d9caf0): with no LEMA_WORKSPACE_ID pin,
-// the sync derives the workspace from the run's git remote — owner/repo →
-// slug (owner-repo) → the credential's own listing → the id — and syncs there.
-func TestSyncDerivesWorkspaceFromGitRemote(t *testing.T) {
+// With no explicit pin, sync uses the shared resolver's canonical Git evidence
+// to select a visible repository receipt. This must exercise the real Git
+// reader: the collector-specific remote-to-slug adapter no longer exists.
+func TestSyncResolvesTargetFromCanonicalGitRemote(t *testing.T) {
 	resetWorkspaceUUIDCache(t)
 
 	cap := &syncCapture{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /workspaces", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"workspaces":[{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","slug":"lemahq-lema","name":"lemahq/lema"}]}`))
+		_, _ = w.Write([]byte(`{"workspaces":[{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","org_id":"org-1","slug":"lemahq-lema","name":"lemahq/lema","is_repo":true,"repo_url":"https://github.com/lemahq/lema.git"}]}`))
 	})
 	mux.HandleFunc("POST /workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/runs", func(w http.ResponseWriter, r *http.Request) {
 		cap.runCreates++
@@ -203,16 +367,21 @@ func TestSyncDerivesWorkspaceFromGitRemote(t *testing.T) {
 
 	t.Setenv("LEMA_API_URL", srv.URL)
 	t.Setenv("LEMA_API_TOKEN", "tok")
-	t.Setenv("LEMA_WORKSPACE_ID", "") // no pin — derive
-	restoreGit := gitRemoteURL
-	t.Cleanup(func() { gitRemoteURL = restoreGit })
-	gitRemoteURL = func(string) (string, bool) { return "git@github.com:lemahq/lema.git", true }
+	t.Setenv("LEMA_WORKSPACE_ID", "")
+	root := t.TempDir()
+	gitHere(t, root, "init")
+	gitHere(t, root, "remote", "add", "origin", "https://github.com/lemahq/lema.git")
 
 	dir := t.TempDir()
-	writeTestCheckpoint(t, dir, "sess-derive")
-	syncOnBoundary(dir, "claude-code", mkEnv("sess-derive", "stop", nil))
+	cp := distillEnvelopes([]collectorEnvelope{mkEnv("sess-derive", "user_prompt", map[string]string{"prompt": "sync me"})}, root)
+	if err := writeCollectorCheckpoint(dir, cp); err != nil {
+		t.Fatal(err)
+	}
+	ev := mkEnv("sess-derive", "stop", nil)
+	ev.Evidence["cwd"] = root
+	syncOnBoundary(dir, "claude-code", ev)
 	if cap.runCreates != 1 || len(cap.events) != 1 {
-		t.Fatalf("derived workspace must resolve and sync: creates=%d events=%d", cap.runCreates, len(cap.events))
+		t.Fatalf("canonical Git target must resolve and sync: creates=%d events=%d", cap.runCreates, len(cap.events))
 	}
 }
 
@@ -326,7 +495,7 @@ func TestSyncResolvesSlugWorkspace(t *testing.T) {
 	cap := &syncCapture{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /workspaces", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"workspaces":[{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","slug":"lemahq-lema","name":"lemahq/lema"}]}`))
+		_, _ = w.Write([]byte(`{"workspaces":[{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","org_id":"org-1","slug":"lemahq-lema","name":"lemahq/lema","is_repo":true,"repo_url":"https://github.com/lemahq/lema.git"}]}`))
 	})
 	mux.HandleFunc("POST /workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/runs", func(w http.ResponseWriter, r *http.Request) {
 		cap.runCreates++
