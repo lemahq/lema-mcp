@@ -1,6 +1,6 @@
 {
   "name": "lema-mcp",
-  "version": "0.21.0",
+  "version": "0.21.1",
   "mcpName": "io.github.lemahq/lema-mcp",
   "description": "MCP server that gives your coding agent the recorded why behind decisions — and what was already ruled out — cited. Check React, Rust, and Kubernetes out of the box, or capture and enforce never-reopen on your own repo. Local, no account.",
   "bin": {
@@ -14,10 +14,10 @@
     "prepack": "cp ../../README.md ./README.md && cp ../../LICENSE ./LICENSE"
   },
   "optionalDependencies": {
-    "lema-mcp-darwin-arm64": "0.21.0",
-    "lema-mcp-darwin-x64": "0.21.0",
-    "lema-mcp-linux-x64": "0.21.0",
-    "lema-mcp-linux-arm64": "0.21.0"
+    "lema-mcp-darwin-arm64": "0.21.1",
+    "lema-mcp-darwin-x64": "0.21.1",
+    "lema-mcp-linux-x64": "0.21.1",
+    "lema-mcp-linux-arm64": "0.21.1"
   },
   "engines": {
     "node": ">=18"
