@@ -10,12 +10,9 @@ import (
 	"sync"
 )
 
-// Version is the running binary's version string, set by -ldflags -X at build time.
-var Version = "0.0.0"
-
-// versionOrLatest returns Version for use in npx hook commands. When the binary
-// was not built with -ldflags (Version=="0.0.0"), it falls back to "latest" so
-// dev and CI builds don't write an unpublished version string into user config.
+// versionOrLatest returns the release source version for npx hook commands. The
+// 0.0.0 fallback remains only for explicitly injected development builds, so a
+// local experiment cannot pin an unpublished sentinel into user configuration.
 func versionOrLatest() string {
 	if Version == "0.0.0" {
 		return "latest"

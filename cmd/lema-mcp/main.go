@@ -44,6 +44,23 @@ var (
 	corpusSize  int        // number of indexed decisions; 0 means empty corpus
 )
 
+// Version is the release version advertised by every MCP mode and recorded in
+// local compatibility metrics. PUBLISHING.md keeps this source default aligned
+// with npm/lema-mcp/package.json; build-npm.sh injects that package version via
+// -ldflags so published artifacts cannot silently retain a development value.
+var Version = "0.21.0"
+
+func lemaMCPImplementation() *mcp.Implementation {
+	return &mcp.Implementation{Name: "lema-mcp", Version: Version}
+}
+
+func newLemaMCPServer(instructions string) *mcp.Server {
+	return mcp.NewServer(
+		lemaMCPImplementation(),
+		&mcp.ServerOptions{Instructions: instructions},
+	)
+}
+
 // defaultPublicAPIURL is the compiled-in public lema-api root for public_ask:
 // api.lema.sh — a Cloud Run domain mapping onto the prod lema-api (ADR-0088).
 // LEMA_PUBLIC_API_URL always overrides it (stage / CI / self-host). So a fresh
@@ -710,10 +727,7 @@ func main() {
 	// The authed server gains the same proactive steering channel the public funnel
 	// already uses (try.go) — it shipped nil, priming agents with nothing (ADR-0124,
 	// the v1 read wedge). Steering rides instructions, never the tool descriptions.
-	server := mcp.NewServer(
-		&mcp.Implementation{Name: "lema-mcp", Version: "0.21.0"},
-		&mcp.ServerOptions{Instructions: authedServerInstructions},
-	)
+	server := newLemaMCPServer(authedServerInstructions)
 	server.AddReceivingMiddleware(stateBriefSchemaMetricMiddleware)
 	mcp.AddTool(server, searchDecisionsTool, searchDecisions)
 	mcp.AddTool(server, getDecisionTool, getDecision)

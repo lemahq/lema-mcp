@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -27,6 +28,17 @@ func installTargetMetricLog(t *testing.T) *os.File {
 		_ = file.Close()
 	})
 	return file
+}
+
+func installSynchronousTargetShadow(t *testing.T) {
+	t.Helper()
+	old := launchTargetShadow
+	launchTargetShadow = func(parent context.Context, observe func(context.Context)) {
+		child, cancel := context.WithCancel(parent)
+		defer cancel()
+		observe(child)
+	}
+	t.Cleanup(func() { launchTargetShadow = old })
 }
 
 func readTargetMetrics(t *testing.T, file *os.File) []map[string]string {
@@ -133,6 +145,7 @@ func metricContext(projectID, repositoryID, rung string) targetContext {
 
 func TestObservedTargetProviderShadowsLegacyWithoutChangingItsOperationTarget(t *testing.T) {
 	file := installTargetMetricLog(t)
+	installSynchronousTargetShadow(t)
 	base := &compatibilityTargetProvider{
 		primary: resolutionResult{Status: resolutionResolved, Context: metricContext(
 			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
@@ -184,6 +197,7 @@ func TestObservedTargetProviderShadowsLegacyWithoutChangingItsOperationTarget(t 
 
 func TestObservedTargetProviderNeverBroadensFailedExplicitResolution(t *testing.T) {
 	file := installTargetMetricLog(t)
+	installSynchronousTargetShadow(t)
 	base := &compatibilityTargetProvider{
 		primary: resolutionResult{Status: resolutionStale, Reason: "secret path and token"},
 		shadow:  resolutionResult{Status: resolutionResolved, Context: metricContext("project-shadow", "repo-shadow", "canonical_git")},
@@ -209,6 +223,157 @@ func TestObservedTargetProviderNeverBroadensFailedExplicitResolution(t *testing.
 	}
 	if strings.Contains(string(mustJSON(t, records)), "secret") || strings.Contains(string(mustJSON(t, records)), "private") {
 		t.Fatalf("failed resolution leaked reason or input: %#v", records)
+	}
+}
+
+type blockingShadowProvider struct {
+	primary        resolutionResult
+	shadowStarted  chan struct{}
+	releaseShadow  chan struct{}
+	shadowFinished chan struct{}
+}
+
+func (p *blockingShadowProvider) Resolve(ctx context.Context, in resolveTargetInput) (resolutionResult, error) {
+	if hasExplicitTarget(in) {
+		return p.primary, nil
+	}
+	close(p.shadowStarted)
+	select {
+	case <-p.releaseShadow:
+	case <-ctx.Done():
+	}
+	close(p.shadowFinished)
+	return resolutionResult{Status: resolutionUnresolved}, nil
+}
+
+func TestObservedTargetProviderBlockedShadowCannotDelayOperation(t *testing.T) {
+	file := installTargetMetricLog(t)
+	base := &blockingShadowProvider{
+		primary: resolutionResult{Status: resolutionResolved, Context: metricContext(
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+			"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+			"explicit",
+		)},
+		shadowStarted:  make(chan struct{}),
+		releaseShadow:  make(chan struct{}),
+		shadowFinished: make(chan struct{}),
+	}
+	provider := newObservedTargetProvider(base)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	var operations int
+	got, err := withResolvedTarget(ctx, provider, resolveTargetInput{
+		ExplicitWorkspaceID: "legacy-private-slug",
+		CWD:                 "/private/operator/repository",
+	}, func(operationCtx context.Context, receipt targetContext) (string, error) {
+		operations++
+		<-base.shadowStarted
+		if operationCtx.Err() != nil {
+			t.Fatalf("operation callback received consumed context: %v", operationCtx.Err())
+		}
+		select {
+		case <-base.shadowFinished:
+			t.Fatal("operation callback waited for the blocked compatibility shadow")
+		default:
+		}
+		return receipt.RepositoryWorkspaceID, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" || operations != 1 {
+		t.Fatalf("operation result=%q calls=%d, want authoritative primary exactly once", got, operations)
+	}
+	close(base.releaseShadow)
+	<-base.shadowFinished
+
+	records := readTargetMetrics(t, file)
+	if len(records) != 2 || records[0]["mismatch_category"] != targetMismatchLegacyUse || records[1]["mismatch_category"] != targetMismatchStatus {
+		t.Fatalf("metrics after released shadow = %#v", records)
+	}
+}
+
+func TestObservedTargetProviderPinsMetricSinkBeforeBackgroundShadow(t *testing.T) {
+	oldLog, oldVersion := usageLog, Version
+	first, err := os.CreateTemp(t.TempDir(), "first-target-metrics-*.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.CreateTemp(t.TempDir(), "second-target-metrics-*.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	usageLog, Version = first, "first-version"
+	t.Cleanup(func() {
+		usageLog, Version = oldLog, oldVersion
+		_ = first.Close()
+		_ = second.Close()
+	})
+
+	base := &blockingShadowProvider{
+		primary: resolutionResult{Status: resolutionResolved, Context: metricContext(
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+			"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+			"explicit",
+		)},
+		shadowStarted:  make(chan struct{}),
+		releaseShadow:  make(chan struct{}),
+		shadowFinished: make(chan struct{}),
+	}
+	provider := newObservedTargetProvider(base)
+	_, err = withResolvedTarget(context.Background(), provider, resolveTargetInput{ExplicitWorkspaceID: "legacy"}, func(context.Context, targetContext) (struct{}, error) {
+		<-base.shadowStarted
+		return struct{}{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a later process/test changing the global destination while the
+	// first provider's compatibility observation is still in flight.
+	usageLog, Version = second, "second-version"
+	close(base.releaseShadow)
+	<-base.shadowFinished
+
+	firstRecords := readTargetMetrics(t, first)
+	if len(firstRecords) != 2 {
+		t.Fatalf("original sink records = %#v, want primary and shadow", firstRecords)
+	}
+	for _, record := range firstRecords {
+		if record["package_version"] != "first-version" {
+			t.Fatalf("background metric version = %q, want provider's pinned version", record["package_version"])
+		}
+	}
+	if secondRecords := readTargetMetrics(t, second); len(secondRecords) != 0 {
+		t.Fatalf("background shadow crossed into later metric sink: %#v", secondRecords)
+	}
+}
+
+func TestBoundedTargetShadowHonorsParentCancellation(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	finished := make(chan error, 1)
+	launchBoundedTargetShadow(parent, time.Hour, func(ctx context.Context) {
+		close(started)
+		<-ctx.Done()
+		finished <- ctx.Err()
+	})
+	<-started
+	cancel()
+	if err := <-finished; !errors.Is(err, context.Canceled) {
+		t.Fatalf("shadow context error = %v, want parent cancellation", err)
+	}
+}
+
+func TestBoundedTargetShadowCannotLeakPastTimeout(t *testing.T) {
+	finished := make(chan error, 1)
+	launchBoundedTargetShadow(context.Background(), 0, func(ctx context.Context) {
+		<-ctx.Done()
+		finished <- ctx.Err()
+	})
+	if err := <-finished; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shadow context error = %v, want bounded deadline", err)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -19,7 +20,31 @@ const (
 	targetMismatchProject       = "cross_operation_project"
 	targetMismatchRepository    = "cross_operation_repository"
 	targetMismatchSchemaFailure = "schema_failure"
+	// Git evidence has its own two-second command budget and Project discovery
+	// may issue sequential link reads. Five seconds bounds a stuck observation
+	// without systematically timing out healthy larger Organizations.
+	targetShadowTimeout = 5 * time.Second
 )
+
+type targetShadowLauncher func(context.Context, func(context.Context))
+
+var launchTargetShadow targetShadowLauncher = func(parent context.Context, observe func(context.Context)) {
+	launchBoundedTargetShadow(parent, targetShadowTimeout, observe)
+}
+
+// launchBoundedTargetShadow starts compatibility-only work without making the
+// primary operation wait for it. The child keeps parent cancellation and also
+// owns a short deadline so a stuck resolver cannot leak a goroutine indefinitely.
+func launchBoundedTargetShadow(parent context.Context, timeout time.Duration, observe func(context.Context)) {
+	if observe == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	go func() {
+		defer cancel()
+		observe(ctx)
+	}()
+}
 
 // targetMetric is the complete local compatibility-observation contract. Keep
 // this deliberately smaller than the general usage log: target observations
@@ -34,15 +59,34 @@ type targetMetric struct {
 }
 
 func writeTargetMetric(metric targetMetric) {
-	metric.PackageVersion = Version
+	captureTargetMetricSink().write(metric)
+}
+
+// targetMetricSink is captured with an observed provider so asynchronous
+// compatibility work cannot follow a later global log-file change or version
+// override. Production config is process-stable; pinning also makes that
+// ownership explicit and prevents late writes from crossing destinations.
+type targetMetricSink struct {
+	packageVersion string
+	usageLog       *os.File
+}
+
+func captureTargetMetricSink() targetMetricSink {
+	logMu.Lock()
+	defer logMu.Unlock()
+	return targetMetricSink{packageVersion: Version, usageLog: usageLog}
+}
+
+func (sink targetMetricSink) write(metric targetMetric) {
+	metric.PackageVersion = sink.packageVersion
 	line, err := json.Marshal(metric)
 	if err != nil {
 		return
 	}
 	fmt.Fprintln(os.Stderr, "lema-mcp target_metric "+string(line))
-	if usageLog != nil {
+	if sink.usageLog != nil {
 		logMu.Lock()
-		fmt.Fprintln(usageLog, string(line))
+		fmt.Fprintln(sink.usageLog, string(line))
 		logMu.Unlock()
 	}
 }
@@ -79,10 +123,11 @@ func validMetricUUID(id string) bool {
 
 type observedTargetProvider struct {
 	primary targetProvider
+	metrics targetMetricSink
 }
 
 func newObservedTargetProvider(primary targetProvider) targetProvider {
-	return &observedTargetProvider{primary: primary}
+	return &observedTargetProvider{primary: primary, metrics: captureTargetMetricSink()}
 }
 
 // Resolve observes every primary outcome. During the explicit-pin compatibility
@@ -90,9 +135,14 @@ func newObservedTargetProvider(primary targetProvider) targetProvider {
 // shadow result is measured but never returned, so it cannot soften a failed
 // explicit resolution or invoke an operation callback.
 func (p *observedTargetProvider) Resolve(ctx context.Context, input resolveTargetInput) (resolutionResult, error) {
-	if p == nil || p.primary == nil {
+	if p == nil {
 		result := resolutionResult{Status: resolutionUnresolved}
 		writeTargetMetric(metricForTargetResult(result, nil, ""))
+		return result, nil
+	}
+	if p.primary == nil {
+		result := resolutionResult{Status: resolutionUnresolved}
+		p.metrics.write(metricForTargetResult(result, nil, ""))
 		return result, nil
 	}
 	primary, primaryErr := p.primary.Resolve(ctx, input)
@@ -103,7 +153,7 @@ func (p *observedTargetProvider) Resolve(ctx context.Context, input resolveTarge
 		primaryMetric.ResolutionRung = "explicit"
 		primaryMetric.MismatchCategory = category
 	}
-	writeTargetMetric(primaryMetric)
+	p.metrics.write(primaryMetric)
 	if !hasExplicitTarget(input) {
 		return primary, primaryErr
 	}
@@ -113,8 +163,10 @@ func (p *observedTargetProvider) Resolve(ctx context.Context, input resolveTarge
 	shadowInput.ExplicitProjectID = ""
 	shadowInput.ExplicitRepositoryID = ""
 	shadowInput.ExplicitRepository = repositoryIdentity{}
-	shadow, shadowErr := p.primary.Resolve(ctx, shadowInput)
-	writeTargetMetric(metricForTargetResult(shadow, shadowErr, compareTargetResults(primary, primaryErr, shadow, shadowErr)))
+	launchTargetShadow(ctx, func(shadowCtx context.Context) {
+		shadow, shadowErr := p.primary.Resolve(shadowCtx, shadowInput)
+		p.metrics.write(metricForTargetResult(shadow, shadowErr, compareTargetResults(primary, primaryErr, shadow, shadowErr)))
+	})
 	return primary, primaryErr
 }
 

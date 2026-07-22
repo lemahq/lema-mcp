@@ -19,7 +19,7 @@ build() {
 	mkdir -p "$(dirname "$out")"
 	echo "  → $dir ($goos/$goarch)"
 	( cd "$DIST" && CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-		go build -trimpath -ldflags "-s -w" -o "$out" ./cmd/lema-mcp )
+		go build -trimpath -ldflags "-s -w -X main.Version=$VERSION" -o "$out" ./cmd/lema-mcp )
 }
 
 build darwin-arm64 darwin arm64
