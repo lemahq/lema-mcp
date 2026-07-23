@@ -100,8 +100,8 @@ smoke_candidate() {
     fi
     if ! grep -Fq '"id":2' "$output" ||
       ! grep -Fq '"name":"get_state_brief"' "$output" ||
-      ! grep -Fq '"sections":true' "$output" ||
-      ! grep -Fq '"silences":true' "$output" ||
+      ! grep -Fq '"sections":{}' "$output" ||
+      ! grep -Fq '"silences":{}' "$output" ||
       ! grep -Fq '"id":3' "$output" ||
       ! grep -Fq '"structuredContent":{"note":"state brief unavailable: target lookup unresolved' "$output"; then
       echo "candidate stdio process $process handshake, schema, or State Brief call check failed" >&2

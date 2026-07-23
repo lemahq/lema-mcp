@@ -391,3 +391,78 @@ func TestStateBriefHonestWhenUnavailable(t *testing.T) {
 		t.Fatalf("missing runtime must be named without requiring a workspace pin: %+v", out)
 	}
 }
+
+// Claude Code validates every outputSchema property as an object schema during
+// tools/list. jsonschema-go emits boolean `true` schemas for Go `any` fields,
+// which are valid JSON Schema but make Claude reject the entire lema tool list.
+// Sections and silences must remain permissive per lema:d_94d86f, so their
+// client-compatible representation is `{}`, not a hand-maintained wire mirror.
+func TestGetStateBriefOutputSchemaUsesClientCompatiblePermissiveProperties(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "test"}, nil)
+	mcp.AddTool(server, getStateBriefTool, getStateBrief)
+
+	ctx := context.Background()
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverSession.Close()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "test"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientSession.Close()
+
+	result, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("tools/list: %v", err)
+	}
+	for _, tool := range result.Tools {
+		if tool.Name != "get_state_brief" {
+			continue
+		}
+		raw, err := json.Marshal(tool.OutputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var schema struct {
+			Properties           map[string]json.RawMessage `json:"properties"`
+			AdditionalProperties bool                       `json:"additionalProperties"`
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatalf("outputSchema unparseable: %v\n%s", err, raw)
+		}
+		if schema.AdditionalProperties {
+			t.Fatalf("outputSchema must keep additionalProperties:false: %s", raw)
+		}
+		for name, property := range schema.Properties {
+			var object map[string]any
+			if err := json.Unmarshal(property, &object); err != nil {
+				t.Fatalf("property %q is not an object schema: %s", name, property)
+			}
+		}
+		for _, name := range []string{"scope", "as_of", "note"} {
+			var stable map[string]any
+			if err := json.Unmarshal(schema.Properties[name], &stable); err != nil {
+				t.Fatalf("property %q is not an object schema: %s", name, schema.Properties[name])
+			}
+			if stable["type"] != "string" {
+				t.Fatalf("property %q lost string validation: %s", name, schema.Properties[name])
+			}
+		}
+		for _, name := range []string{"sections", "silences"} {
+			var permissive map[string]any
+			if err := json.Unmarshal(schema.Properties[name], &permissive); err != nil {
+				t.Fatalf("property %q is not an object schema: %s", name, schema.Properties[name])
+			}
+			if len(permissive) != 0 {
+				t.Fatalf("property %q must remain permissive, got %s", name, schema.Properties[name])
+			}
+		}
+		return
+	}
+	t.Fatal("get_state_brief not present in tools/list")
+}
