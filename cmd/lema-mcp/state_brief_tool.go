@@ -31,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -55,13 +56,41 @@ type stateBriefOutput struct {
 	Note     string `json:"note,omitempty"`
 }
 
+// stateBriefOutputSchema keeps stateBriefOutput as the single source of the
+// tool contract while adapting jsonschema-go's permissive boolean property
+// schemas to the object form required by stricter MCP clients. Only `true`
+// values directly under properties are rewritten; constraints such as
+// additionalProperties:false remain unchanged.
+func stateBriefOutputSchema() map[string]any {
+	inferred, err := jsonschema.For[stateBriefOutput](nil)
+	if err != nil {
+		panic(fmt.Sprintf("infer get_state_brief output schema: %v", err))
+	}
+	raw, err := json.Marshal(inferred)
+	if err != nil {
+		panic(fmt.Sprintf("marshal get_state_brief output schema: %v", err))
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		panic(fmt.Sprintf("decode get_state_brief output schema: %v", err))
+	}
+	properties, _ := schema["properties"].(map[string]any)
+	for name, property := range properties {
+		if permissive, ok := property.(bool); ok && permissive {
+			properties[name] = map[string]any{}
+		}
+	}
+	return schema
+}
+
 var getStateBriefTool = &mcp.Tool{
 	Name: "get_state_brief",
 	Description: "Returns the scoped State Brief for a run: objective, last checkpoint, files in flight, " +
 		"settled decisions in scope (cited), binding rejected approaches, related active runs — " +
 		"composed deterministically from the recorded state, with every unavailable section named " +
 		"in silences. Omitting run resolves this project's prior session (the relay read).",
-	Annotations: readOnlyExternal("Get the State Brief (hosted)"),
+	Annotations:  readOnlyExternal("Get the State Brief (hosted)"),
+	OutputSchema: stateBriefOutputSchema(),
 }
 
 var errNoPriorStateBriefRun = errors.New("no prior run known for this project")
