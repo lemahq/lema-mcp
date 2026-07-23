@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -103,6 +104,62 @@ func TestToolsMeetDirectoryCriteria(t *testing.T) {
 		for _, b := range banned {
 			if strings.Contains(low, b) {
 				t.Errorf("%s: description contains behavioral phrase %q — describe what the tool does; move workflow guidance to AGENTS.md / the guard hook", tl.Name, b)
+			}
+		}
+
+		// CLASS GUARD: every property schema a host receives from tools/list must be a
+		// JSON OBJECT, never a bare boolean. A bare `any` field reflects to the boolean
+		// `true`, which a strict MCP client (Claude Code) rejects — failing the WHOLE
+		// tools/list and hiding every tool (get_state_brief's sections/silences, the
+		// 0.21.1/0.21.2 regression). This binds every current and future tool so the
+		// next `any`-typed field can't silently re-break discovery.
+		assertObjectPropertySchemas(t, tl.Name, "inputSchema", tl.InputSchema)
+		assertObjectPropertySchemas(t, tl.Name, "outputSchema", tl.OutputSchema)
+	}
+}
+
+// assertObjectPropertySchemas fails if any property schema anywhere in a tool's
+// schema is a bare JSON boolean rather than an object — the form a strict MCP client
+// rejects, failing the entire tools/list. A legitimate boolean `additionalProperties`
+// is intentionally NOT flagged; only values inside a `properties` map are checked.
+func assertObjectPropertySchemas(t *testing.T, toolName, field string, schema any) {
+	t.Helper()
+	if schema == nil {
+		return
+	}
+	raw, err := json.Marshal(schema)
+	if err != nil {
+		t.Fatalf("%s %s: marshal schema: %v", toolName, field, err)
+	}
+	var node any
+	if err := json.Unmarshal(raw, &node); err != nil {
+		t.Fatalf("%s %s: unmarshal schema: %v", toolName, field, err)
+	}
+	walkPropertySchemas(t, toolName, field, node)
+}
+
+func walkPropertySchemas(t *testing.T, toolName, field string, node any) {
+	t.Helper()
+	m, ok := node.(map[string]any)
+	if !ok {
+		return
+	}
+	if props, ok := m["properties"].(map[string]any); ok {
+		for name, val := range props {
+			if _, isObject := val.(map[string]any); !isObject {
+				t.Errorf("%s %s: property %q is a %T (%v), not an object schema — a strict MCP client rejects a non-object property schema and fails the whole tools/list", toolName, field, name, val, val)
+				continue
+			}
+			walkPropertySchemas(t, toolName, field, val)
+		}
+	}
+	if items, ok := m["items"].(map[string]any); ok {
+		walkPropertySchemas(t, toolName, field, items)
+	}
+	for _, key := range []string{"$defs", "definitions"} {
+		if defs, ok := m[key].(map[string]any); ok {
+			for _, d := range defs {
+				walkPropertySchemas(t, toolName, field, d)
 			}
 		}
 	}
