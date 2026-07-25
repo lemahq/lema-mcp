@@ -10,9 +10,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +25,11 @@ const (
 	checkpointMaxPrompts = 3
 	checkpointMaxFiles   = 8
 )
+
+// collectorSyncerForCheckpoint is a test seam over the CWD-bound constructor.
+// SessionStart always builds its target context from checkpoint evidence, never
+// the hook process's ambient directory.
+var collectorSyncerForCheckpoint = newCollectorSyncerForCWD
 
 // collectorCheckpoint is the distilled handoff state for one project dir.
 // RunID records which run produced it, so the injected block is attributable.
@@ -162,6 +169,126 @@ func formatCheckpointBlock(cp collectorCheckpoint) string {
 	return b.String()
 }
 
+// checkpointStateBrief is the SessionStart hosted relay read. The F4
+// checkpoint remains the fail-open source of continuity, while the hosted
+// projection becomes the preferred payload when it is complete and available.
+func checkpointStateBrief(cp collectorCheckpoint) (string, bool) {
+	s := collectorSyncerForCheckpoint(cp.CWD)
+	if s == nil || s.runtime == nil {
+		return "", false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), collectorSyncTimeout)
+	defer cancel()
+
+	input := s.runtime.targetInput
+	if input.CWD != cp.CWD {
+		// A local association belongs only to the CWD that loaded it. Do not
+		// carry ambient process evidence into a checkpoint-owned relay read.
+		input.CWD = cp.CWD
+		input.LocalAssociation = nil
+		input.PersistedAssociation = false
+	}
+	type resolvedBrief struct {
+		output stateBriefOutput
+		runID  string
+	}
+	result, err := withResolvedTarget(ctx, s.runtime.targets, input, func(ctx context.Context, receipt targetContext) (resolvedBrief, error) {
+		harness := strings.TrimSpace(cp.Harness)
+		if harness == "" {
+			harness = "claude-code"
+		}
+		run, err := s.ensureRunInWorkspace(ctx, receipt.ProjectWorkspaceID, harness, cp.RunID, cp.CWD)
+		if err != nil {
+			return resolvedBrief{}, err
+		}
+		briefSyncer := *s
+		briefSyncer.workspaceID = receipt.ProjectWorkspaceID
+		return resolvedBrief{
+			output: stateBriefForReceipt(ctx, &briefSyncer, receipt, run.ID, "SessionStart"),
+			runID:  run.ID,
+		}, nil
+	})
+	if err != nil {
+		return "", false
+	}
+	return formatStateBriefBlock(result.output, result.runID)
+}
+
+type injectedStateBriefSection struct {
+	Name  string `json:"name"`
+	Lines []struct {
+		Text string `json:"text"`
+		Cite string `json:"cite"`
+	} `json:"lines"`
+}
+
+// formatStateBriefBlock emits the server's deterministic projection compactly:
+// scope, every section and cited line, and every declared silence. It does not
+// invent a next action or blockers when those source classes are silent.
+func formatStateBriefBlock(out stateBriefOutput, hostedRunID string) (string, bool) {
+	if strings.TrimSpace(out.Scope) == "" {
+		return "", false
+	}
+	var sections []injectedStateBriefSection
+	if out.Sections != nil {
+		raw, err := json.Marshal(out.Sections)
+		if err != nil || json.Unmarshal(raw, &sections) != nil {
+			return "", false
+		}
+	}
+	var silences []string
+	if out.Silences != nil {
+		raw, err := json.Marshal(out.Silences)
+		if err != nil || json.Unmarshal(raw, &silences) != nil {
+			return "", false
+		}
+	}
+
+	if strings.TrimSpace(hostedRunID) == "" {
+		return "", false
+	}
+
+	webURL := strings.TrimRight(strings.TrimSpace(os.Getenv(settleWebURLEnv)), "/")
+	if webURL == "" {
+		webURL = defaultSettleWebURL
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Lema State Brief (hosted run %s; %s/runs/%s)\n", hostedRunID, webURL, url.PathEscape(hostedRunID))
+	fmt.Fprintf(&b, "Scope: %s\n", out.Scope)
+	b.WriteString("\nSections:\n")
+	if len(sections) == 0 {
+		b.WriteString("- none\n")
+	}
+	for _, section := range sections {
+		if strings.TrimSpace(section.Name) == "" {
+			return "", false
+		}
+		fmt.Fprintf(&b, "%s:\n", section.Name)
+		for _, line := range section.Lines {
+			if strings.TrimSpace(line.Text) == "" {
+				return "", false
+			}
+			if strings.TrimSpace(line.Cite) == "" {
+				fmt.Fprintf(&b, "- %s\n", line.Text)
+			} else {
+				fmt.Fprintf(&b, "- %s [%s]\n", line.Text, line.Cite)
+			}
+		}
+	}
+	b.WriteString("\nSilences:\n")
+	if len(silences) == 0 {
+		b.WriteString("- none\n")
+	}
+	for _, silence := range silences {
+		if strings.TrimSpace(silence) == "" {
+			return "", false
+		}
+		fmt.Fprintf(&b, "- %s\n", silence)
+	}
+	return b.String(), true
+}
+
 // checkpointOnBoundary distills and writes the checkpoint when the incoming
 // envelope marks a run boundary; injectOnStart emits the prior checkpoint on
 // a session start. Both are called from runCollect and stay fail-open.
@@ -202,6 +329,10 @@ func injectOnStart(dir string, ev collectorEnvelope) {
 		return
 	}
 	if cp, ok := readCollectorCheckpoint(dir, cwd, time.Now()); ok {
+		if brief, ok := checkpointStateBrief(cp); ok {
+			emitAdditionalContext("SessionStart", brief)
+			return
+		}
 		emitAdditionalContext("SessionStart", formatCheckpointBlock(cp))
 	}
 }
