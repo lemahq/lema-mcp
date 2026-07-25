@@ -30,6 +30,7 @@ import (
 	"testing"
 
 	"github.com/lemahq/lema-mcp/internal/source"
+	"github.com/lemahq/lema-mcp/internal/verdict"
 )
 
 type guardSpecimen struct {
@@ -44,9 +45,19 @@ type guardSpecimen struct {
 	Text               string `json:"text"`
 }
 
+type checkDecidedSpecimen struct {
+	Name               string `json:"name"`
+	WronglyFired       string `json:"wrongly_fired"`
+	Expected           string `json:"expected"`
+	KnownUnfixedReason string `json:"known_unfixed_reason"`
+	WhyFalse           string `json:"why_false"`
+	Topic              string `json:"topic"`
+}
+
 type guardSpecimenFile struct {
-	Negatives         []guardSpecimen `json:"negatives"`
-	PositiveTemplates []string        `json:"positive_templates"`
+	Negatives             []guardSpecimen        `json:"negatives"`
+	PositiveTemplates     []string               `json:"positive_templates"`
+	CheckDecidedNegatives []checkDecidedSpecimen `json:"check_decided_negatives"`
 }
 
 // loadEvalCorpus reads the real closed-atom feed THROUGH THE GUARD'S OWN CACHE
@@ -185,6 +196,91 @@ func TestGuardPrecisionEval(t *testing.T) {
 	const recallFloor = 95.0
 	if recall < recallFloor {
 		t.Errorf("recall %.1f%% below floor %.1f%% — a precision change must not gut the guard", recall, recallFloor)
+	}
+}
+
+// TestCheckDecidedPrecisionEval measures the OTHER matcher — the one behind
+// check_decided — on the same corpus.
+//
+// It exists because three of the eight false `ruled_out` fires in pain-point #27
+// came from check_decided, not the PreToolUse guard, and the adjacency fix does
+// not touch that path at all.
+//
+// The judgment is LOCAL despite the name: checkDecidedFor (capture_tools.go:105)
+// fetches closed atoms from the hosted API and then judges through
+// verdict.Build -> verdict.Governing. Governing is the STRUCTURALLY GATED path
+// (Match + structuralMatch), so these specimens cleared the very gate built to
+// stop them — and the whole thing reproduces offline against the same feed.
+// verdict.BuildConfirmed adds a cosine gate (ADR-0096) but needs server-supplied
+// embeddings, so the MCP path never reaches it.
+func TestCheckDecidedPrecisionEval(t *testing.T) {
+	corpus := loadEvalCorpus(t)
+	spec := loadGuardSpecimens(t)
+	if len(spec.CheckDecidedNegatives) == 0 {
+		t.Skip("no check_decided specimens")
+	}
+
+	falseRuledOut, cdKnownUnfixed := 0, 0
+	for _, neg := range spec.CheckDecidedNegatives {
+		v := verdict.Build(corpus, neg.Topic)
+		got := string(v.Verdict)
+		if got == neg.Expected {
+			t.Logf("PASS %-30s %s", neg.Name, got)
+			continue
+		}
+		var cited []string
+		for _, g := range v.GoverningDecisions {
+			if len(cited) < 4 {
+				cited = append(cited, fmt.Sprintf("%s[%s]", g.Ref, g.DerivedForce))
+			}
+		}
+		if neg.KnownUnfixedReason != "" {
+			cdKnownUnfixed++
+			t.Logf("KNOWN-UNFIXED %-24s got %q, cited %s\n    %s", neg.Name, got, strings.Join(cited, ", "), neg.KnownUnfixedReason)
+			continue
+		}
+		falseRuledOut++
+		t.Errorf("FALSE VERDICT %-24s got %q want %q; cited %s\n    topic: %s\n    why false: %s",
+			neg.Name, got, neg.Expected, strings.Join(cited, ", "), neg.Topic, neg.WhyFalse)
+	}
+
+	// Recall: naming a killed option as the topic must reach ruled_out. Same
+	// discipline as the guard eval — a precision change must not gut the verb.
+	var missed []string
+	eligible := 0
+	for _, a := range corpus {
+		if a.MatchKey == "" {
+			continue
+		}
+		eligible++
+		if string(verdict.Build(corpus, a.MatchKey).Verdict) != "ruled_out" {
+			missed = append(missed, fmt.Sprintf("%s(%q)", a.Ref, a.MatchKey))
+		}
+	}
+	recall := 100.0
+	if eligible > 0 {
+		recall = 100.0 * float64(eligible-len(missed)) / float64(eligible)
+	}
+
+	t.Logf("PRECISION: %d/%d topics correctly not_ruled_out (%d known-unfixed, %d regressions)",
+		len(spec.CheckDecidedNegatives)-falseRuledOut-cdKnownUnfixed, len(spec.CheckDecidedNegatives), cdKnownUnfixed, falseRuledOut)
+	t.Logf("RECALL:    %.1f%% (%d/%d killed options reach ruled_out when named as the topic)", recall, eligible-len(missed), eligible)
+	if len(missed) > 0 {
+		sort.Strings(missed)
+		// These atoms are UNENFORCEABLE: naming the killed option verbatim is the
+		// strongest possible relitigation signal, and check_decided still answers
+		// not_ruled_out. Cause is the same one that makes the guard over-fire —
+		// an option built from ordinary words carries no distinctive identity, so
+		// structuralMatch (which scores coverage of distinctive terms) can never
+		// find one. The guard has no such gate and over-fires on these; the gated
+		// path under-fires. One root cause, opposite failures, and neither is
+		// fixable in a matcher: the fix is a sharper key (ADR-0053).
+		t.Logf("  UNENFORCEABLE — cannot govern even their own option verbatim (%d/%d, %.1f%% of the binding corpus):\n    %s",
+			len(missed), eligible, 100*float64(len(missed))/float64(eligible), strings.Join(missed, "\n    "))
+	}
+	const recallFloor = 95.0
+	if recall < recallFloor {
+		t.Errorf("recall %.1f%% below floor %.1f%%", recall, recallFloor)
 	}
 }
 

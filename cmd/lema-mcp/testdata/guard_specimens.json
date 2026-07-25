@@ -56,5 +56,32 @@
     "I'm going to switch us to %s",
     "proposal: adopt %s for this",
     "we should just go with %s instead"
+  ],
+  "_comment_check_decided": "check_decided negatives: verbatim topics from the 2026-07-25 handoff-producer design session that returned a false `ruled_out`. NOTE the judgment is LOCAL — checkDecidedFor (capture_tools.go:105) fetches closed atoms from the hosted API and then judges through verdict.Build -> verdict.Governing, which is the STRUCTURALLY GATED path. So these fires cleared the gate that exists to stop them, and the whole thing is reproducible offline against the same corpus. verdict.BuildConfirmed adds a cosine gate (ADR-0096) but needs server-supplied embeddings, so the MCP path never reaches it. CAVEAT: these topics are RECONSTRUCTED from the agents' reports of what they asked, not captured verbatim, so two of the three no longer reproduce — phrasing moves the verdict. Only stop-hook-writes-handoff still reproduces. Treat the non-reproducing two as historical labels, not as pins; the durable finding from this eval is the RECALL miss, not the precision count.",
+  "check_decided_negatives": [
+    {
+      "name": "checkpoint-payload-extension",
+      "wrongly_fired": "d_672445",
+      "expected": "not_ruled_out",
+      "why_false": "d_672445 is about the commons fan-out v1 scope. The topic is about run_event payload shape. Nothing in that decision governs it.",
+      "topic": "extend the checkpoint payload with next_action and blockers instead of using the handoff kind",
+      "known_unfixed_reason": ""
+    },
+    {
+      "name": "stop-hook-writes-handoff",
+      "wrongly_fired": "ADR-0129",
+      "expected": "not_ruled_out",
+      "why_false": "ADR-0129 rejected a PostToolUse hook in favour of Stop for the Signal-A DECISION-capture producer. This topic is a different producer writing a different event class; the ADR does not reach it.",
+      "topic": "the Stop hook writes the handoff run event automatically without the agent stating it",
+      "known_unfixed_reason": "Reproduces on the STRUCTURALLY GATED path (verdict.Build -> Governing), so the gate built to stop this class does not stop it. Not fixable from the matcher without the data-layer change: ADR-0129's identity terms overlap this topic's genuinely (hook, stop, posttooluse), so no coverage threshold separates them. Needs a sharper match_key_derived (ADR-0053) or the cosine gate that verdict.BuildConfirmed already implements but the MCP path never reaches."
+    },
+    {
+      "name": "where-handoff-is-written",
+      "wrongly_fired": "ADR-0129 + ADR-0064 + d_672445",
+      "expected": "not_ruled_out",
+      "why_false": "Three unrelated decisions returned at once for a question about which component writes a handoff run_event. ADR-0064 is content-hash source identity; none of the three govern.",
+      "topic": "where a handoff run_event is written from, the client collector or a new MCP verb",
+      "known_unfixed_reason": ""
+    }
   ]
 }
