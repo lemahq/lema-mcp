@@ -126,6 +126,54 @@ func tokenSet(s string) map[string]bool {
 	return m
 }
 
+// tokenSeq is the ORDERED token stream of a query, kept alongside the
+// membership set so a multi-word killed option can require ADJACENCY.
+//
+// Why order is needed (pain-point #27): matching on set membership alone asks
+// "does every word of the option appear somewhere in this text", which over a
+// long document is nearly always yes for an option built from ordinary words.
+// `Build it on the lema (server) side` decomposes to build/it/on/the/lema/
+// server/side — every one of those appears in any substantial lema document, so
+// the fire was guaranteed rather than near. Adjacency asks the question that was
+// meant: does this text NAME the option.
+func tokenSeq(s string) []string { return verdict.Tokenize(s) }
+
+// guardQuery is one edit's text in both forms the matcher needs: the membership
+// set (single-word options, identifier hits) and the ordered stream (multi-word
+// adjacency). Built once per query.
+type guardText struct {
+	set map[string]bool
+	seq []string
+}
+
+func newGuardText(s string) guardText {
+	return guardText{set: tokenSet(s), seq: tokenSeq(s)}
+}
+
+func (q guardText) empty() bool { return len(q.set) == 0 }
+
+// containsRun reports whether seq contains pieces as a contiguous run. Tokens
+// are already punctuation-split, so "spring-boot" and "Spring Boot" both yield
+// [spring boot] and match — adjacency is over TOKENS, not raw characters.
+func containsRun(seq, pieces []string) bool {
+	if len(pieces) == 0 || len(seq) < len(pieces) {
+		return false
+	}
+	for i := 0; i+len(pieces) <= len(seq); i++ {
+		ok := true
+		for j, p := range pieces {
+			if seq[i+j] != p {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
 // alnumLower returns s lowercased with every non-alphanumeric rune removed, e.g.
 // "PostgreSQL" -> "postgresql" — the joined form used to match an option written
 // without its internal punctuation.
@@ -147,24 +195,34 @@ func alnumLower(s string) string {
 // killed option is never matched as a substring of a larger word, and it reads the
 // option NAME only — an edit echoing a decision's rationale prose does not fire
 // (ADR-0052).
-func optionMatches(key string, edit map[string]bool) (bool, float64) {
+// A MULTI-WORD option must appear as a contiguous token run (pain-point #27):
+// requiring only that each piece appear SOMEWHERE asks whether the document
+// contains the option's vocabulary, not whether it names the option, and over a
+// long document built from ordinary words the answer is always yes.
+// Single-word options keep set membership, which is what lets a killed option
+// match inside a lowercase identifier (`kafka.NewProducer()`).
+func optionMatches(key string, q guardText) (bool, float64) {
 	joined := alnumLower(key)
 	if len(joined) < 3 {
 		return false, 0 // too short/trivial to match safely
 	}
-	if edit[joined] {
+	if q.set[joined] {
 		return true, float64(len(joined))
 	}
 	pieces := verdict.Tokenize(key)
-	if len(pieces) == 0 {
+	switch len(pieces) {
+	case 0:
+		return false, 0
+	case 1:
+		if q.set[pieces[0]] {
+			return true, float64(len(joined))
+		}
 		return false, 0
 	}
-	for _, p := range pieces {
-		if !edit[p] {
-			return false, 0
-		}
+	if containsRun(q.seq, pieces) {
+		return true, float64(len(joined))
 	}
-	return true, float64(len(joined))
+	return false, 0
 }
 
 // matchClosed returns the CLOSED atoms whose killed option appears in the edit,
@@ -175,7 +233,7 @@ func optionMatches(key string, edit map[string]bool) (bool, float64) {
 // non-citation line, so the exemption structurally cannot apply to it — when
 // `full` is non-nil such atoms match against the full query instead of the
 // citation-stripped one (a false nudge beats a permanently silent guard).
-func matchClosed(closed []source.Atom, edit, full map[string]bool) []source.Atom {
+func matchClosed(closed []source.Atom, edit guardText, full *guardText) []source.Atom {
 	var out []source.Atom
 	for _, a := range closed {
 		if a.MatchKey == "" {
@@ -183,9 +241,9 @@ func matchClosed(closed []source.Atom, edit, full map[string]bool) []source.Atom
 		}
 		set := edit
 		if full != nil && guardCitationRE.MatchString(a.MatchKey) {
-			set = full
+			set = *full
 		}
-		if len(set) == 0 {
+		if set.empty() {
 			continue
 		}
 		if ok, score := optionMatches(a.MatchKey, set); ok {
@@ -200,7 +258,7 @@ func matchClosed(closed []source.Atom, edit, full map[string]bool) []source.Atom
 // guardMatch matches the killed options against one flat text (no citation
 // semantics) — the primitive matchClosed wraps.
 func guardMatch(closed []source.Atom, editText string) []source.Atom {
-	return matchClosed(closed, tokenSet(editText), nil)
+	return matchClosed(closed, newGuardText(editText), nil)
 }
 
 // guardFires is THE fire floor, shared by the fire decision and the suppression
@@ -221,12 +279,12 @@ func evaluateCitation(closed []source.Atom, query string) (hits []source.Atom, s
 	if !stripped {
 		return guardMatch(closed, kept), nil
 	}
-	fullSet := tokenSet(query)
-	hits = matchClosed(closed, tokenSet(kept), fullSet)
+	fullSet := newGuardText(query)
+	hits = matchClosed(closed, newGuardText(kept), &fullSet)
 	if guardFires(hits) {
 		return hits, nil
 	}
-	if full := matchClosed(closed, fullSet, fullSet); guardFires(full) {
+	if full := matchClosed(closed, fullSet, &fullSet); guardFires(full) {
 		suppressed = &full[0]
 	}
 	return hits, suppressed

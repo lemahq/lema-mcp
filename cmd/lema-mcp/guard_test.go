@@ -94,9 +94,17 @@ func TestOptionMatches(t *testing.T) {
 		{"PostgreSQL", "we use postgresql now", true},  // joined form
 		{"PostgreSQL", "we use PostgreSQL now", true},  // camelCase pieces
 		{"Go", "let it go now", false},                 // too short (<3)
+
+		// Adjacency (pain-point #27): a multi-word option must be NAMED, not
+		// merely have its vocabulary scattered through the text. Without this,
+		// any long document containing the ordinary words of an option fired it.
+		{"Spring Boot", "spring cleaning, then reboot the boot loader", false},
+		{"Keep \"lema Workspaces\"", "we keep the lema flag as-is; see /workspaces/{id}/runs", false},
+		{"Build it on the lema (server) side", "build the read path first; on the lema side that is a sibling", false},
+		{"Spring Boot", "migrate to Spring Boot 3", true}, // still fires when actually named
 	}
 	for _, c := range cases {
-		got, _ := optionMatches(c.key, tokenSet(c.edit))
+		got, _ := optionMatches(c.key, newGuardText(c.edit))
 		if got != c.want {
 			t.Errorf("optionMatches(%q, %q) = %v, want %v", c.key, c.edit, got, c.want)
 		}

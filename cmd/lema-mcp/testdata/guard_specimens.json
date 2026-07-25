@@ -1,0 +1,60 @@
+{
+  "_comment": "Labelled specimen set for the guard's precision/recall eval. NEGATIVES are verbatim excerpts of real documents that falsely tripped the PreToolUse never-reopen guard during the 2026-07-25 handoff-producer design session (pain-point #27). Each names the atom it wrongly fired, so a regression is legible. POSITIVES are generated from the live corpus by the eval itself (a query naming a killed option verbatim MUST fire), so recall is measured against all 500 atoms rather than a hand-picked few. Per d_23bf88 the eval runs against the real binding feed; a synthetic fixture is scale-lockable to whatever makes it pass.",
+  "negatives": [
+    {
+      "name": "api-route-segment",
+      "wrongly_fired": "ADR-0050",
+      "wrongly_fired_key": "Keep \"lema Workspaces\"",
+      "known_unfixed_reason": "",
+      "why_false": "ADR-0050 renames the desktop GUI. This text is an API route. The option's pieces (keep/lema/workspaces) are common words that co-occur in any long lema document.",
+      "text": "**Lift.** `syncOnBoundary` gains `syncHandoff`, a sibling of `syncCheckpoint`, firing on the existing boundary against the already-live `POST /workspaces/{id}/runs/{runID}/events` with `\"kind\": \"handoff\"`. No new endpoint. No migration. We keep the lema-run-state gate as-is, since that is the gate on the endpoint it POSTs to. Reading rides lema-state-brief. Both are env-wide WorkOS flags and both fail closed."
+    },
+    {
+      "name": "using-the-chosen-name",
+      "wrongly_fired": "d_e45c79",
+      "wrongly_fired_key": "Record",
+      "known_unfixed_reason": "single-token key that is an ordinary English word. Measured: no corpus statistic separates it from a genuine product name — text-df is record 6.6%, knowledge 1.0%, linear 0.6%, kafka 0.0%, so 'knowledge' and 'linear' score like 'Kafka'. This is d_23bf88's recorded finding ('no df bar separates coincidental-rare from identity-rare') re-derived on the guard path. Case-sensitivity is ruled out by the pinned kafka.NewProducer() behaviour. Fix belongs at the data layer: a sharper match_key_derived per ADR-0053, not in the matcher.",
+      "why_false": "The killed option is the bare name 'Record' (rejected as ambiguous); the chosen name is 'The Record'. This text USES the approved name and the record_decision verb. Using a chosen name is not re-proposing the alternative it beat.",
+      "text": "Judgment stays human. Automate draft, cluster, recommend — never auto-accept into the Record. The moment a decision lands, record_decision it: the why plus the rejected alternative are the expensive things to reconstruct later. An unreviewed inference stays a draft, so a handoff line must be marked stated by the agent and unreviewed rather than rendered with the standing an accepted decision earned."
+    },
+    {
+      "name": "server-side-build-plan",
+      "wrongly_fired": "d_3247c3",
+      "wrongly_fired_key": "Build it on the lema (server) side",
+      "known_unfixed_reason": "",
+      "why_false": "d_3247c3 is about the collector omitting repo/branch on run-create. Every piece of its key (build/it/on/the/lema/server/side) is a common word; the conjunction is meaningless over a long document.",
+      "text": "Order matters: build the read path first, so the producer has somewhere to land and you can seed a row by hand to test it. On the lema side that is a LatestLiveHandoff sibling plus a composer section; the server already accepts the kind, so there is no new endpoint and no migration. Then the producer, then the self-resolution fix."
+    },
+    {
+      "name": "pain-point-prose",
+      "wrongly_fired": "d_e45c79",
+      "wrongly_fired_key": "Record",
+      "known_unfixed_reason": "single-token key that is an ordinary English word. Measured: no corpus statistic separates it from a genuine product name — text-df is record 6.6%, knowledge 1.0%, linear 0.6%, kafka 0.0%, so 'knowledge' and 'linear' score like 'Kafka'. This is d_23bf88's recorded finding ('no df bar separates coincidental-rare from identity-rare') re-derived on the guard path. Case-sensitivity is ruled out by the pinned kafka.NewProducer() behaviour. Fix belongs at the data layer: a sharper match_key_derived per ADR-0053, not in the matcher.",
+      "why_false": "Prose ABOUT the guard's false fires, quoting the decision it fired. Documenting a closed decision is the citation case the guard already tries to exempt, and it must not fire on the exemption's own subject matter.",
+      "text": "The never-reopen guard fired false ruled_out eight times in one working session, across both matchers, and every fire was a bare token-overlap match against a decision that does not govern. A false not_ruled_out lets a bad idea through and a human catches it downstream; a false ruled_out stops correct work while asserting authority the record does not hold."
+    },
+    {
+      "name": "ordinary-english-linear",
+      "wrongly_fired": "*",
+      "wrongly_fired_key": "Linear",
+      "known_unfixed_reason": "single-token key that is an ordinary English word. Measured: no corpus statistic separates it from a genuine product name — text-df is record 6.6%, knowledge 1.0%, linear 0.6%, kafka 0.0%, so 'knowledge' and 'linear' score like 'Kafka'. This is d_23bf88's recorded finding ('no df bar separates coincidental-rare from identity-rare') re-derived on the guard path. Case-sensitivity is ruled out by the pinned kafka.NewProducer() behaviour. Fix belongs at the data layer: a sharper match_key_derived per ADR-0053, not in the matcher.",
+      "why_false": "'Linear' is a killed integration target AND an ordinary English adjective. Prose about linear scans must not read as re-proposing the Linear connector.",
+      "text": "The matcher does a linear scan over the closed set for each edit, which is fine at this corpus size: five hundred atoms times a token-set lookup is microseconds, and the cost grows linearly rather than quadratically because the token set is built once per query."
+    },
+    {
+      "name": "ordinary-english-knowledge",
+      "wrongly_fired": "*",
+      "wrongly_fired_key": "Knowledge",
+      "known_unfixed_reason": "single-token key that is an ordinary English word. Measured: no corpus statistic separates it from a genuine product name — text-df is record 6.6%, knowledge 1.0%, linear 0.6%, kafka 0.0%, so 'knowledge' and 'linear' score like 'Kafka'. This is d_23bf88's recorded finding ('no df bar separates coincidental-rare from identity-rare') re-derived on the guard path. Case-sensitivity is ruled out by the pinned kafka.NewProducer() behaviour. Fix belongs at the data layer: a sharper match_key_derived per ADR-0053, not in the matcher.",
+      "why_false": "'Knowledge' is a killed name AND an ordinary noun this product's own vision prose uses constantly.",
+      "text": "We are not building another place to store information, we are building the layer that makes a team's hard-won reasoning usable when it matters. That is knowledge the team already paid for, and it evaporates unless producing the record costs the human almost nothing."
+    }
+  ],
+  "true_positives_are_generated": true,
+  "positive_templates": [
+    "let's use %s",
+    "I'm going to switch us to %s",
+    "proposal: adopt %s for this",
+    "we should just go with %s instead"
+  ]
+}
