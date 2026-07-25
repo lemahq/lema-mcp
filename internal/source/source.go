@@ -304,11 +304,13 @@ type section struct {
 func splitSections(body string) []section {
 	var secs []section
 	cur := section{}
+	var sb strings.Builder
 	flush := func() {
-		cur.text = strings.TrimSpace(cur.text)
+		cur.text = strings.TrimSpace(sb.String())
 		if cur.heading != "" || cur.text != "" {
 			secs = append(secs, cur)
 		}
+		sb.Reset()
 	}
 	for ln := range strings.SplitSeq(body, "\n") {
 		t := strings.TrimSpace(ln)
@@ -322,7 +324,8 @@ func splitSections(body string) []section {
 			cur = section{heading: strings.TrimSpace(strings.TrimLeft(t, "# ")), level: 2}
 			continue
 		}
-		cur.text += ln + "\n"
+		sb.WriteString(ln)
+		sb.WriteByte('\n')
 	}
 	flush()
 	return secs
