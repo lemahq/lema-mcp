@@ -166,6 +166,103 @@ func TestInjectOnStartEmitsAdditionalContext(t *testing.T) {
 	}
 }
 
+func TestInjectOnStartPrefersHostedStateBrief(t *testing.T) {
+	dir := t.TempDir()
+	cp := distillEnvelopes([]collectorEnvelope{
+		mkEnv("r1", "user_prompt", map[string]string{"prompt": "ship F4"}),
+	}, "/repo/proj")
+	if err := writeCollectorCheckpoint(dir, cp); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, capture := newBriefTestServer(t, "claude-code", 200)
+	defer srv.Close()
+	provider := &fakeTargetProvider{result: resolutionResult{
+		Status: resolutionResolved, Context: stateBriefRoutingContext(),
+	}}
+	syncer := &collectorSyncer{
+		apiURL: srv.URL, token: "lema_live_routing_secret", client: srv.Client(),
+		runtime: &hostedWriteRuntime{
+			apiURL: srv.URL, token: "lema_live_routing_secret", client: srv.Client(),
+			targets: provider,
+		},
+	}
+	original := collectorSyncerForCheckpoint
+	collectorSyncerForCheckpoint = func(cwd string) *collectorSyncer {
+		if cwd != cp.CWD {
+			t.Errorf("syncer cwd = %q, want checkpoint cwd %q", cwd, cp.CWD)
+		}
+		return syncer
+	}
+	t.Cleanup(func() { collectorSyncerForCheckpoint = original })
+
+	out := captureStdout(t, func() {
+		injectOnStart(dir, mkEnv("r2-new-session", "session_start", nil))
+	})
+	var hook guardOutput
+	if err := json.Unmarshal([]byte(out), &hook); err != nil {
+		t.Fatalf("stdout must be one hook JSON object, got %q: %v", out, err)
+	}
+	ctx := hook.HookSpecificOutput.AdditionalContext
+	for _, want := range []string{
+		"Lema State Brief", "Scope: work unit wu-1", "objective:",
+		"ship it [work_unit:wu-1]", "Silences:",
+		"test status — not captured in v1",
+		"https://lema.sh/briefing?run=" + briefRunID,
+	} {
+		if !strings.Contains(ctx, want) {
+			t.Errorf("hosted brief missing %q:\n%s", want, ctx)
+		}
+	}
+	if strings.Contains(ctx, "lema handoff checkpoint for this project") {
+		t.Fatalf("hosted success must replace the local checkpoint identity:\n%s", ctx)
+	}
+	if capture.runCreates != 1 || len(capture.briefRuns) != 1 || capture.briefRuns[0] != briefRunID {
+		t.Fatalf("hosted run resolution = creates %d, brief runs %v", capture.runCreates, capture.briefRuns)
+	}
+}
+
+func TestInjectOnStartFallsBackWhenHostedBriefUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	cp := distillEnvelopes([]collectorEnvelope{
+		mkEnv("r1", "user_prompt", map[string]string{"prompt": "ship F4"}),
+	}, "/repo/proj")
+	if err := writeCollectorCheckpoint(dir, cp); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, _ := newBriefTestServer(t, "claude-code", 404)
+	defer srv.Close()
+	syncer := &collectorSyncer{
+		apiURL: srv.URL, token: "lema_live_routing_secret", client: srv.Client(),
+		runtime: &hostedWriteRuntime{
+			apiURL: srv.URL, token: "lema_live_routing_secret", client: srv.Client(),
+			targets: &fakeTargetProvider{result: resolutionResult{
+				Status: resolutionResolved, Context: stateBriefRoutingContext(),
+			}},
+		},
+	}
+	original := collectorSyncerForCheckpoint
+	collectorSyncerForCheckpoint = func(string) *collectorSyncer { return syncer }
+	t.Cleanup(func() { collectorSyncerForCheckpoint = original })
+
+	out := captureStdout(t, func() {
+		injectOnStart(dir, mkEnv("r2-new-session", "session_start", nil))
+	})
+	var hook guardOutput
+	if err := json.Unmarshal([]byte(out), &hook); err != nil {
+		t.Fatalf("stdout must be one hook JSON object, got %q: %v", out, err)
+	}
+	ctx := hook.HookSpecificOutput.AdditionalContext
+	if !strings.Contains(ctx, "lema handoff checkpoint for this project") ||
+		!strings.Contains(ctx, "ship F4") {
+		t.Fatalf("hosted failure must preserve local continuity:\n%s", ctx)
+	}
+	if strings.Contains(ctx, "Lema State Brief") {
+		t.Fatalf("unavailable hosted brief must not emit a partial brief:\n%s", ctx)
+	}
+}
+
 func TestInjectOnStartSilentWhenNoCheckpoint(t *testing.T) {
 	dir := t.TempDir()
 	out := captureStdout(t, func() {
