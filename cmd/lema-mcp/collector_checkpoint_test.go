@@ -208,7 +208,7 @@ func TestInjectOnStartPrefersHostedStateBrief(t *testing.T) {
 		"Lema State Brief", "Scope: work unit wu-1", "objective:",
 		"ship it [work_unit:wu-1]", "Silences:",
 		"test status — not captured in v1",
-		"https://lema.sh/runs/" + briefRunID,
+		"https://lema.sh/briefing?run=" + briefRunID,
 	} {
 		if !strings.Contains(ctx, want) {
 			t.Errorf("hosted brief missing %q:\n%s", want, ctx)
