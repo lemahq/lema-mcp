@@ -254,7 +254,7 @@ func formatStateBriefBlock(out stateBriefOutput, hostedRunID string) (string, bo
 		webURL = defaultSettleWebURL
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Lema State Brief (hosted run %s; %s/runs/%s)\n", hostedRunID, webURL, url.PathEscape(hostedRunID))
+	fmt.Fprintf(&b, "Lema State Brief (hosted run %s; %s/briefing?run=%s)\n", hostedRunID, webURL, url.QueryEscape(hostedRunID))
 	fmt.Fprintf(&b, "Scope: %s\n", out.Scope)
 	b.WriteString("\nSections:\n")
 	if len(sections) == 0 {
