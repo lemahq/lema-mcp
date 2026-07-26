@@ -326,13 +326,19 @@ func injectOnStart(dir string, ev collectorEnvelope) {
 	}
 	cwd := ev.Evidence["cwd"]
 	if cwd == "" {
+		collectorDebugf("no injection: session_start envelope for run %s carries no cwd evidence", ev.RunID)
 		return
 	}
-	if cp, ok := readCollectorCheckpoint(dir, cwd, time.Now()); ok {
-		if brief, ok := checkpointStateBrief(cp); ok {
-			emitAdditionalContext("SessionStart", brief)
-			return
-		}
-		emitAdditionalContext("SessionStart", formatCheckpointBlock(cp))
+	cp, ok := readCollectorCheckpoint(dir, cwd, time.Now())
+	if !ok {
+		collectorDebugf("no injection: no live checkpoint for %s — first session in this project, or older than the %s TTL", cwd, collectorTTL)
+		return
 	}
+	if brief, ok := checkpointStateBrief(cp); ok {
+		collectorDebugf("injected the hosted State Brief for %s", cwd)
+		emitAdditionalContext("SessionStart", brief)
+		return
+	}
+	collectorDebugf("fell back to the local checkpoint block for %s — the hosted State Brief was unavailable (target unresolved, run-ensure failed, or the read exceeded the %s budget); this is pre-0.21.4 output", cwd, collectorSyncTimeout)
+	emitAdditionalContext("SessionStart", formatCheckpointBlock(cp))
 }
