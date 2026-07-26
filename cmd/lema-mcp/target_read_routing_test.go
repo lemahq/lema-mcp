@@ -393,7 +393,7 @@ func TestGuardRefreshUnresolvedKeepsLocalEnforcementAndEmitsOnlyRedactedCounter(
 		ID: "local-closure", Ref: "ADR-1", Type: "rejected_alternative", Text: "Kafka rejected",
 		Closed: true, ClosedNote: "do not propose Kafka", MatchKey: "Kafka",
 	}}
-	out, atom := evaluateGuard(closed, ctxQuery("queue.go", "kafka.NewProducer()"), guardModeContext)
+	out, atom := evaluateGuard(closed, ctxQuery("queue.go", "kafka.NewProducer()"), "queue.go", guardModeContext)
 	if out == nil || atom == nil || atom.Ref != "ADR-1" {
 		t.Fatalf("local-only guard enforcement disappeared after unresolved refresh: out=%v atom=%+v", out, atom)
 	}

@@ -46,7 +46,7 @@ func httpGuard(w http.ResponseWriter, r *http.Request) {
 	// The same evaluation the PreToolUse hook runs — the matched CLOSED atom above
 	// the context floor. The terminal renders that atom; a human resolves it.
 	query := guardQuery(in.ToolInput)
-	hits, suppressed := evaluateCitation(closed, query)
+	hits, suppressed := evaluateCitation(closed, query, guardTargetPath(in.ToolInput))
 	_, atom := guardDecision(hits, mode)
 	out := guardCheckOutput{Decided: atom != nil}
 	if atom != nil {

@@ -79,7 +79,11 @@ func TestBuildGate_Recall(t *testing.T) {
 	corpus := syntheticGateCorpus()
 
 	cases := []struct{ name, topic, wantRef string }{
-		{"solo-identity", "let us reconsider ident7 for the redesign", "s7"},
+		// Naming the option's identity term ALONGSIDE the rest of its stated name.
+		// This case previously read "let us reconsider ident7 for the redesign" —
+		// the identity term on its own — and that contract was RETIRED on
+		// 2026-07-26 (see TestBuildGate_SoloTermNoLongerBinds below for why).
+		{"solo-identity", "let us reconsider the ident7 ledger pipeline", "s7"},
 		{"multi-identity", "switch back to sparrowdb thunderbolt", "multi"},
 	}
 	for _, c := range cases {

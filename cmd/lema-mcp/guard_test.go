@@ -116,7 +116,7 @@ func TestEvaluateGuard(t *testing.T) {
 
 	// Killed option reached via a real code identifier, context mode → a
 	// non-blocking nudge with NO permissionDecision (never skips the user's prompt).
-	out, atom := evaluateGuard(store.ClosedAtoms(), ctxQuery("queue.go", "kafka.NewProducer()"), guardModeContext)
+	out, atom := evaluateGuard(store.ClosedAtoms(), ctxQuery("queue.go", "kafka.NewProducer()"), "queue.go", guardModeContext)
 	if out == nil || out.HookSpecificOutput.PermissionDecision != "" {
 		t.Fatalf("context mode must nudge with no permissionDecision, got %+v", out)
 	}
@@ -125,32 +125,32 @@ func TestEvaluateGuard(t *testing.T) {
 	}
 
 	// Rationale prose alone must NOT fire (names the Why, not the option).
-	if out, _ := evaluateGuard(store.ClosedAtoms(), ctxQuery("x.go", "reduce operational burden across the system"), guardModeContext); out != nil {
+	if out, _ := evaluateGuard(store.ClosedAtoms(), ctxQuery("x.go", "reduce operational burden across the system"), "x.go", guardModeContext); out != nil {
 		t.Fatalf("rationale prose must not fire, got %+v", out)
 	}
 	// Substring of a larger word must NOT fire.
-	if out, _ := evaluateGuard(store.ClosedAtoms(), ctxQuery("x.go", "a very kafkaesque situation"), guardModeContext); out != nil {
+	if out, _ := evaluateGuard(store.ClosedAtoms(), ctxQuery("x.go", "a very kafkaesque situation"), "x.go", guardModeContext); out != nil {
 		t.Fatalf("substring must not fire, got %+v", out)
 	}
 
 	// Ask mode: a specific option (Kafka, score 5) prompts the human.
-	out, _ = evaluateGuard(store.ClosedAtoms(), ctxQuery("q.go", "wire up Kafka consumer"), guardModeAsk)
+	out, _ = evaluateGuard(store.ClosedAtoms(), ctxQuery("q.go", "wire up Kafka consumer"), "q.go", guardModeAsk)
 	if out == nil || out.HookSpecificOutput.PermissionDecision != "ask" {
 		t.Fatalf("strong hit in ask mode must prompt, got %+v", out)
 	}
 	// Ask mode: a weak/short option (JWT, score 3 < ask floor 5) degrades to a nudge.
-	out, _ = evaluateGuard(store.ClosedAtoms(), ctxQuery("auth.go", "use JWT here"), guardModeAsk)
+	out, _ = evaluateGuard(store.ClosedAtoms(), ctxQuery("auth.go", "use JWT here"), "auth.go", guardModeAsk)
 	if out == nil || out.HookSpecificOutput.PermissionDecision != "" {
 		t.Fatalf("weak hit in ask mode must degrade to a nudge, got %+v", out)
 	}
 
 	// Off mode → nothing, even on a hit.
-	if out, _ := evaluateGuard(store.ClosedAtoms(), "use Kafka", guardModeOff); out != nil {
+	if out, _ := evaluateGuard(store.ClosedAtoms(), "use Kafka", "", guardModeOff); out != nil {
 		t.Fatalf("off mode must emit nothing, got %+v", out)
 	}
 
 	// The shipped JSON must NOT carry permissionDecision in context mode.
-	out, _ = evaluateGuard(store.ClosedAtoms(), ctxQuery("q.go", "Kafka here"), guardModeContext)
+	out, _ = evaluateGuard(store.ClosedAtoms(), ctxQuery("q.go", "Kafka here"), "q.go", guardModeContext)
 	if b, _ := json.Marshal(out); strings.Contains(string(b), "permissionDecision") {
 		t.Fatalf("context-mode JSON must omit permissionDecision: %s", b)
 	}

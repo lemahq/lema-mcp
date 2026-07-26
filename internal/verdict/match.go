@@ -341,22 +341,54 @@ func structuralMatch(query string, a source.Atom, df map[string]int, n int) bool
 		q[t] = true
 	}
 	dd := distinctiveDF(n)
-	atomDistinct, shared := 0, 0
+	atomTerms, shared, sharedDistinct := 0, 0, 0
 	for _, t := range gateTerms(matchKeyFor(a)) {
-		if df[t] > dd {
-			continue // common in this corpus — category vocabulary, not identity
+		// Coverage is over the STATED identity — every content word the recorder
+		// actually wrote. Scoring coverage over only the corpus-RARE residue was
+		// the defect (2026-07-26): a term too common to be distinctive was dropped
+		// from the DENOMINATOR instead of counted as unmatched, so an option built
+		// mostly from common words collapsed to its one rare term and any query
+		// sharing that term scored 100% coverage. ADR-0055's "Index only, no
+		// content cache" reduced to {cache} (content df=11 > cutoff), so a Docker
+		// BUILD-LAYER cache topic covered a DOC-CONTENT-cache ruling completely and
+		// fired binding. Precision was inversely proportional to identity strength.
+		atomTerms++
+		if !q[t] {
+			continue
 		}
-		atomDistinct++
-		if q[t] {
-			shared++
+		// A term the query actually shares counts toward coverage whatever its
+		// document frequency: it is part of what this option IS, and excluding
+		// common-but-shared terms from the NUMERATOR while counting them in the
+		// denominator would cap coverage below the bar for any option containing
+		// one ordinary word (measured: recall 99.5% -> 85.9%, losing verbatim
+		// relitigations like "Index all repo markdown").
+		shared++
+		if df[t] <= dd {
+			sharedDistinct++
 		}
 	}
-	if atomDistinct == 0 || shared == 0 {
+	// At least one shared term must be DISTINCTIVE: agreement on category
+	// vocabulary alone ("data", "service", "cache") is not evidence of the same
+	// option, however much of the name it covers.
+	if atomTerms == 0 || sharedDistinct == 0 {
 		return false
 	}
-	cov := float64(shared) / float64(atomDistinct)
+	cov := float64(shared) / float64(atomTerms)
 	return (shared >= 2 && cov >= structuralCov) || cov >= structuralCovSolo
 }
+
+// A proper-noun escape hatch was tried here and REMOVED (2026-07-26). The idea:
+// exempt a single shared term whose OPTION-df is <= 2 on the theory that a term in
+// one option key is a name (neo4j, auth0) rather than category vocabulary, which
+// would restore the partial-naming recall that stated-identity coverage costs.
+// It re-created the exact bug it was meant to sit beside: "registry" is df-rare
+// among option keys, so a Docker-registry topic once again governed d_282c49's
+// PACKAGE-RESOLVER registry ruling — one shared term, different subject domains.
+// This is d_23bf88's recorded finding ("no df bar separates coincidental-rare from
+// identity-rare") re-derived a third time, now on the structural gate. Do not
+// re-propose a df-based solo exemption; the separating signal is not in the corpus
+// statistics. The recall it would have bought is bought honestly instead by the
+// ADVISORY tier below, which surfaces the atom without asserting a ruling.
 
 // Governing returns the CLOSED atoms whose option the query STRUCTURALLY reaches —
 // the subset of Match's lexical hits fit to govern a ruled_out, in Match's order.

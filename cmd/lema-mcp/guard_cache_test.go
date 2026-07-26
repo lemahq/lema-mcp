@@ -141,12 +141,12 @@ func TestGuardFiresFromCachedHostedAtom(t *testing.T) {
 	}
 
 	closed := loadGuardCacheAtoms(capturePath)
-	out, atom := evaluateGuard(closed, ctxQuery("queue.go", "kafka.NewProducer()"), guardModeContext)
+	out, atom := evaluateGuard(closed, ctxQuery("queue.go", "kafka.NewProducer()"), "queue.go", guardModeContext)
 	if out == nil || atom == nil || atom.MatchKey != "Kafka" {
 		t.Fatalf("a cached hosted closure must fire like a local one: out=%v atom=%+v", out, atom)
 	}
 	// And an unrelated edit stays silent — the cache adds coverage, not noise.
-	if out, _ := evaluateGuard(closed, ctxQuery("x.go", "reduce operational burden"), guardModeContext); out != nil {
+	if out, _ := evaluateGuard(closed, ctxQuery("x.go", "reduce operational burden"), "x.go", guardModeContext); out != nil {
 		t.Fatalf("no distinctive match must stay silent: %+v", out)
 	}
 }

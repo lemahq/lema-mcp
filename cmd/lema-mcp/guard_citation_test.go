@@ -71,63 +71,53 @@ func TestGuardCitationExemption(t *testing.T) {
 
 	// The pain #4 specimen: a HANDOFF line DOCUMENTING the rejected alternative
 	// must not fire — writing down what was rejected is surfacing, not proposing.
-	if out, _ := evaluateGuard(closed, ctxQuery("HANDOFF.md",
-		"- ADR-0141 sweep landed — rejected: per-row-only confirms (ceremony not judgment)"), guardModeContext); out != nil {
+	if out, _ := evaluateGuard(closed, ctxQuery("HANDOFF.md", "- ADR-0141 sweep landed — rejected: per-row-only confirms (ceremony not judgment)"), "HANDOFF.md", guardModeContext); out != nil {
 		t.Fatalf("citing a rejection must not fire, got %+v", out)
 	}
 	// The "relay" specimen: naming the settled decision by its ADR ref is a cite.
-	if out, _ := evaluateGuard(closed, ctxQuery("notes.md",
-		"we moved off relay per ADR-0140"), guardModeContext); out != nil {
+	if out, _ := evaluateGuard(closed, ctxQuery("notes.md", "we moved off relay per ADR-0140"), "notes.md", guardModeContext); out != nil {
 		t.Fatalf("ADR-ref cite must not fire, got %+v", out)
 	}
 	// "ruled out" prose is a cite.
-	if out, _ := evaluateGuard(closed, ctxQuery("notes.md",
-		"kafka was ruled out last year"), guardModeContext); out != nil {
+	if out, _ := evaluateGuard(closed, ctxQuery("notes.md", "kafka was ruled out last year"), "notes.md", guardModeContext); out != nil {
 		t.Fatalf("ruled-out cite must not fire, got %+v", out)
 	}
 	// Ask mode is exempt the same way (same matcher path).
-	if out, _ := evaluateGuard(closed, ctxQuery("notes.md",
-		"rejected: wire up Kafka consumer"), guardModeAsk); out != nil {
+	if out, _ := evaluateGuard(closed, ctxQuery("notes.md", "rejected: wire up Kafka consumer"), "notes.md", guardModeAsk); out != nil {
 		t.Fatalf("ask-mode cite must not fire, got %+v", out)
 	}
 
 	// A plain re-proposal still fires.
-	out, atom := evaluateGuard(closed, ctxQuery("plan.md",
-		"let's implement per-row-only confirms for binding"), guardModeContext)
+	out, atom := evaluateGuard(closed, ctxQuery("plan.md", "let's implement per-row-only confirms for binding"), "plan.md", guardModeContext)
 	if out == nil || atom == nil {
 		t.Fatal("plain re-proposal must still fire")
 	}
 	// A mixed edit — a citation line PLUS a genuine proposal line — still fires:
 	// the exemption is line-scoped, not whole-edit.
-	out, _ = evaluateGuard(closed, ctxQuery("plan.md",
-		"ADR-0141 landed the sweep\nnow wire up Kafka consumer here"), guardModeContext)
+	out, _ = evaluateGuard(closed, ctxQuery("plan.md", "ADR-0141 landed the sweep\nnow wire up Kafka consumer here"), "plan.md", guardModeContext)
 	if out == nil || !strings.Contains(out.HookSpecificOutput.AdditionalContext, "operational burden") {
 		t.Fatalf("proposal on a non-citation line must fire, got %+v", out)
 	}
 	// Option pieces split across a citation line and a plain line must not fire:
 	// citation text cannot supply match tokens.
-	if out, _ := evaluateGuard(closed, ctxQuery("x.md",
-		"per-row-only ceremony — rejected: yes\nthe confirms arrive later"), guardModeContext); out != nil {
+	if out, _ := evaluateGuard(closed, ctxQuery("x.md", "per-row-only ceremony — rejected: yes\nthe confirms arrive later"), "x.md", guardModeContext); out != nil {
 		t.Fatalf("pieces split across a citation line must not fire, got %+v", out)
 	}
 	// The file basename is its own line in the query, so a citation first line
 	// does not swallow it: an edit to kafka.go still fires on the basename.
-	out, _ = evaluateGuard(closed, ctxQuery("kafka.go",
-		"rejected: something unrelated\nplain code here"), guardModeContext)
+	out, _ = evaluateGuard(closed, ctxQuery("kafka.go", "rejected: something unrelated\nplain code here"), "kafka.go", guardModeContext)
 	if out == nil {
 		t.Fatal("basename must survive a citation first line and fire")
 	}
 	// INTENDED residual: the exemption is a whole-line bypass, so a genuine
 	// adoption that shares a line with any marker — even an unrelated ref — is
 	// exempt. Advisory mode + the citation-exempt log measure this trade.
-	if out, _ := evaluateGuard(closed, ctxQuery("q.go",
-		"use Kafka per ADR-0007 for retries"), guardModeContext); out != nil {
+	if out, _ := evaluateGuard(closed, ctxQuery("q.go", "use Kafka per ADR-0007 for retries"), "q.go", guardModeContext); out != nil {
 		t.Fatalf("marker-sharing line is exempt by design, got %+v", out)
 	}
 	// A marker in the FILENAME itself must not cost basename matching: a bare
 	// basename is a single word, and a single-word line is never a citation.
-	out, _ = evaluateGuard(closed, ctxQuery("kafka-adr-0140.go",
-		"package worker"), guardModeContext)
+	out, _ = evaluateGuard(closed, ctxQuery("kafka-adr-0140.go", "package worker"), "kafka-adr-0140.go", guardModeContext)
 	if out == nil {
 		t.Fatal("marker-bearing basename must stay matchable and fire")
 	}
@@ -147,17 +137,14 @@ func TestMarkerKeyedOptionStillFires(t *testing.T) {
 	).ClosedAtoms()
 
 	// Plain re-proposal of a marker-named option fires despite the marker word.
-	if out, _ := evaluateGuard(closed, ctxQuery("plan.md",
-		"enable the supersedes queue here"), guardModeContext); out == nil {
+	if out, _ := evaluateGuard(closed, ctxQuery("plan.md", "enable the supersedes queue here"), "plan.md", guardModeContext); out == nil {
 		t.Fatal("marker-named option must still fire on a plain proposal")
 	}
-	if out, _ := evaluateGuard(closed, ctxQuery("plan.md",
-		"wire the adr-0999 pipeline here"), guardModeContext); out == nil {
+	if out, _ := evaluateGuard(closed, ctxQuery("plan.md", "wire the adr-0999 pipeline here"), "plan.md", guardModeContext); out == nil {
 		t.Fatal("ADR-named option must still fire on a plain proposal")
 	}
 	// The accepted trade: even a citing line fires for a marker-named option.
-	if out, _ := evaluateGuard(closed, ctxQuery("HANDOFF.md",
-		"rejected: supersedes queue (no successor)"), guardModeContext); out == nil {
+	if out, _ := evaluateGuard(closed, ctxQuery("HANDOFF.md", "rejected: supersedes queue (no successor)"), "HANDOFF.md", guardModeContext); out == nil {
 		t.Fatal("marker-named option fires even when cited — the deliberate trade")
 	}
 }
@@ -173,8 +160,8 @@ func TestSuppressionConsistency(t *testing.T) {
 		ctxQuery("notes.md", "rejected: an option nobody recorded"),
 		ctxQuery("x.md", "nothing to see"),
 	} {
-		out, _ := evaluateGuard(closed, q, guardModeContext)
-		a := citationExemptAtom(closed, q)
+		out, _ := evaluateGuard(closed, q, "", guardModeContext)
+		a := citationExemptAtom(closed, q, "")
 		if out != nil && a != nil {
 			t.Fatalf("query %q: fired AND reported suppressed — the two must be exclusive", q)
 		}
@@ -224,22 +211,22 @@ func TestCitationExemptAtom(t *testing.T) {
 
 	// A suppressed fire is reported for the calibration log.
 	a := citationExemptAtom(closed, ctxQuery("HANDOFF.md",
-		"sweep landed — rejected: per-row-only confirms (ceremony)"))
+		"sweep landed — rejected: per-row-only confirms (ceremony)"), "HANDOFF.md")
 	if a == nil || a.MatchKey != "per-row-only confirms" {
 		t.Fatalf("suppressed fire must surface the atom, got %+v", a)
 	}
 	// No citation lines → nothing suppressed.
-	if a := citationExemptAtom(closed, ctxQuery("plan.md", "wire up Kafka consumer")); a != nil {
+	if a := citationExemptAtom(closed, ctxQuery("plan.md", "wire up Kafka consumer"), ""); a != nil {
 		t.Fatalf("no citation lines must report nil, got %+v", a)
 	}
 	// A real fire (kept lines still match) is not "suppressed".
 	if a := citationExemptAtom(closed, ctxQuery("plan.md",
-		"ADR-0141 landed\nwire up Kafka consumer")); a != nil {
+		"ADR-0141 landed\nwire up Kafka consumer"), ""); a != nil {
 		t.Fatalf("a surviving fire must report nil, got %+v", a)
 	}
 	// Citation lines with no underlying match → nil.
 	if a := citationExemptAtom(closed, ctxQuery("notes.md",
-		"rejected: an option nobody recorded")); a != nil {
+		"rejected: an option nobody recorded"), ""); a != nil {
 		t.Fatalf("cite without a match must report nil, got %+v", a)
 	}
 }
@@ -251,7 +238,7 @@ func TestGuardLogCitationExempt(t *testing.T) {
 	closed := citationTestStore(t).ClosedAtoms()
 	in := guardInput{ToolName: "Edit"}
 	query := ctxQuery("HANDOFF.md", "sweep landed — rejected: per-row-only confirms (ceremony)")
-	a := citationExemptAtom(closed, query)
+	a := citationExemptAtom(closed, query, "HANDOFF.md")
 	if a == nil {
 		t.Fatal("expected a suppressed atom")
 	}

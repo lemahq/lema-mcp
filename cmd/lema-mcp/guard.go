@@ -144,10 +144,84 @@ func tokenSeq(s string) []string { return verdict.Tokenize(s) }
 type guardText struct {
 	set map[string]bool
 	seq []string
+	// raw is the query text with its ORIGINAL casing, kept so a single-token
+	// option can be case-checked in prose (see optionMatches).
+	raw string
+	// prose marks the edit as targeting a DOCUMENT rather than code. A
+	// single-token killed option cannot fire on prose — see optionMatches.
+	prose bool
 }
 
 func newGuardText(s string) guardText {
-	return guardText{set: tokenSet(s), seq: tokenSeq(s)}
+	return guardText{set: tokenSet(s), seq: tokenSeq(s), raw: s}
+}
+
+// containsCased reports whether key appears in text as a whole word with the
+// SAME casing the option was recorded with. Whole-word so "Record" does not
+// match inside "Recorder", and exact-case so lower-case prose usage of an
+// ordinary word never satisfies a capitalised option name.
+func containsCased(text, key string) bool {
+	if text == "" || key == "" {
+		return false
+	}
+	// '-' counts as a word character here: in prose a hyphenated compound is its
+	// OWN term, so "Record-conflicts panel" (a feature name) is not a mention of
+	// the product "Record", any more than "record_conflicts_enabled" is. This only
+	// governs the single-token prose check — multi-word options take the adjacency
+	// path, where the tokenizer still splits on hyphens so "spring-boot" and
+	// "Spring Boot" both match.
+	isWord := func(r byte) bool {
+		return r == '_' || r == '-' || ('0' <= r && r <= '9') || ('a' <= r && r <= 'z') || ('A' <= r && r <= 'Z')
+	}
+	for i := 0; ; {
+		j := strings.Index(text[i:], key)
+		if j < 0 {
+			return false
+		}
+		st := i + j
+		en := st + len(key)
+		beforeOK := st == 0 || !isWord(text[st-1])
+		afterOK := en == len(text) || !isWord(text[en])
+		if beforeOK && afterOK {
+			return true
+		}
+		i = st + 1
+		if i >= len(text) {
+			return false
+		}
+	}
+}
+
+func newGuardTextForPath(path, s string) guardText {
+	t := newGuardText(s)
+	t.prose = isProseTarget(path)
+	return t
+}
+
+// proseExts are document extensions: files whose content DESCRIBES work rather
+// than performing it.
+var proseExts = map[string]bool{
+	".md": true, ".mdx": true, ".markdown": true, ".txt": true, ".rst": true, ".adoc": true,
+}
+
+// isProseTarget reports whether an edit targets a document. Unknown/empty paths
+// (a Bash command, a payload with no file_path) are NOT prose: the conservative
+// default preserves the existing fire behaviour everywhere the signal is absent.
+func isProseTarget(path string) bool {
+	if path == "" {
+		return false
+	}
+	return proseExts[strings.ToLower(filepath.Ext(path))]
+}
+
+// guardTargetPath lifts the edited file's path from a PreToolUse payload. Unlike
+// guardQuery (which reduces it to a basename for lexical matching) this keeps the
+// full path, because only the EXTENSION is being read.
+func guardTargetPath(in map[string]any) string {
+	if p, ok := in["file_path"].(string); ok {
+		return p
+	}
+	return ""
 }
 
 func (q guardText) empty() bool { return len(q.set) == 0 }
@@ -206,18 +280,49 @@ func optionMatches(key string, q guardText) (bool, float64) {
 	if len(joined) < 3 {
 		return false, 0 // too short/trivial to match safely
 	}
-	if q.set[joined] {
-		return true, float64(len(joined))
-	}
 	pieces := verdict.Tokenize(key)
+	// NB: the joined-form hit is checked INSIDE the arms below, not before them.
+	// Hoisting it above the switch (as it was until 2026-07-26) silently bypassed
+	// the single-token rules, because for a one-word option the joined form IS
+	// that token — so the prose case-check below could never be reached.
 	switch len(pieces) {
 	case 0:
 		return false, 0
 	case 1:
-		if q.set[pieces[0]] {
-			return true, float64(len(joined))
+		// A ONE-WORD killed option carries a single token of evidence, and no
+		// corpus statistic separates a real name from an ordinary English word:
+		// text-df measured record 6.6% / knowledge 1.0% / linear 0.6% / kafka 0.0%,
+		// so "knowledge" and "linear" score like "Kafka" (d_23bf88, re-derived on
+		// this path by ede667c5; an option-df bar fails the same way — tried and
+		// removed in verdict/match.go the same day).
+		//
+		// The signal that DOES separate them is orthographic, and it is only
+		// readable in prose: a product named in a sentence is capitalised the way
+		// the option is ("wire up Kafka consumer", "switch to Auth0"), while the
+		// ordinary-word usage that caused the false fires is lower-case
+		// ("recorded decisions", "the record-conflicts panel",
+		// `record_conflicts_enabled`). In CODE the same test would be wrong —
+		// identifiers are lower-case by convention and `kafka.NewProducer()` is
+		// exactly the true positive the guard exists for — which is why earlier
+		// work recorded case-sensitivity as ruled out. That verdict holds for a
+		// UNIFORM case rule; scoping it to prose is what makes it usable.
+		//
+		// Measured 2026-07-26: d_e45c79("Record") fired on all four real markdown
+		// files tested in this repo (design doc, build plan, HANDOFF.md, README.md)
+		// because they contain the word "record". A doc that MENTIONS a rejected
+		// option — including one explaining why it was rejected — is not a
+		// re-proposal, and a guard that fires on every document is the noise that
+		// teaches agents to ignore it.
+		if !q.set[pieces[0]] && !q.set[joined] {
+			return false, 0
 		}
-		return false, 0
+		if q.prose && !containsCased(q.raw, key) {
+			return false, 0
+		}
+		return true, float64(len(joined))
+	}
+	if q.set[joined] {
+		return true, float64(len(joined))
 	}
 	if containsRun(q.seq, pieces) {
 		return true, float64(len(joined))
@@ -261,6 +366,13 @@ func guardMatch(closed []source.Atom, editText string) []source.Atom {
 	return matchClosed(closed, newGuardText(editText), nil)
 }
 
+// guardMatchForPath is guardMatch with the edit's target path in scope, so the
+// prose rule in optionMatches can apply. guardMatch (no path) stays the
+// code-context primitive used by callers that have no file in hand.
+func guardMatchForPath(closed []source.Atom, path, editText string) []source.Atom {
+	return matchClosed(closed, newGuardTextForPath(path, editText), nil)
+}
+
 // guardFires is THE fire floor, shared by the fire decision and the suppression
 // counterfactual so the two can never drift apart.
 func guardFires(hits []source.Atom) bool {
@@ -274,13 +386,13 @@ func guardFires(hits []source.Atom) bool {
 // exemption prevented (nil when the guard fired or nothing was stripped). Both
 // callers (the PreToolUse hook and the terminal sidecar) consume this one
 // evaluation, so fire and suppression can never disagree.
-func evaluateCitation(closed []source.Atom, query string) (hits []source.Atom, suppressed *source.Atom) {
+func evaluateCitation(closed []source.Atom, query, path string) (hits []source.Atom, suppressed *source.Atom) {
 	kept, stripped := stripCitationLines(query)
 	if !stripped {
-		return guardMatch(closed, kept), nil
+		return guardMatchForPath(closed, path, kept), nil
 	}
-	fullSet := newGuardText(query)
-	hits = matchClosed(closed, newGuardText(kept), &fullSet)
+	fullSet := newGuardTextForPath(path, query)
+	hits = matchClosed(closed, newGuardTextForPath(path, kept), &fullSet)
 	if guardFires(hits) {
 		return hits, nil
 	}
@@ -309,10 +421,10 @@ const (
 // — so the user's normal Edit/Write confirmation is never skipped. Only real CLOSED
 // atoms (with their stored note) are surfaced; the guard never invents a why-not
 // (ADR-0052).
-func evaluateGuard(closed []source.Atom, query, mode string) (*guardOutput, *source.Atom) {
+func evaluateGuard(closed []source.Atom, query, path, mode string) (*guardOutput, *source.Atom) {
 	// Citation exemption (pain-point #4): lines that cite a prior ruling do not
 	// count as proposal text — see evaluateCitation/stripCitationLines.
-	hits, _ := evaluateCitation(closed, query)
+	hits, _ := evaluateCitation(closed, query, path)
 	return guardDecision(hits, mode)
 }
 
@@ -350,8 +462,8 @@ func guardDecision(hits []source.Atom, mode string) (*guardOutput, *source.Atom)
 // before it is trusted (ADR-0052). Only FULLY suppressed fires are reported: if
 // the kept lines still fire (even on a different atom, or downgraded
 // ask→context), nothing is logged.
-func citationExemptAtom(closed []source.Atom, query string) *source.Atom {
-	_, suppressed := evaluateCitation(closed, query)
+func citationExemptAtom(closed []source.Atom, query, path string) *source.Atom {
+	_, suppressed := evaluateCitation(closed, query, path)
 	return suppressed
 }
 
@@ -522,7 +634,7 @@ func runGuard(args []string, refreshRuntime *hostedWriteRuntime) {
 	// even if this machine never saw it land.
 	closed := append(store.ClosedAtoms(), loadADRClosed(".")...)
 	closed = append(closed, loadGuardCacheAtoms(capturePath)...)
-	hits, suppressed := evaluateCitation(closed, query)
+	hits, suppressed := evaluateCitation(closed, query, guardTargetPath(in.ToolInput))
 	out, atom := guardDecision(hits, mode)
 	if out == nil {
 		// Allow silently — but if the citation exemption is what suppressed a

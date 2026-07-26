@@ -41,7 +41,11 @@ type guardSpecimen struct {
 	// that starts passing must have this cleared so the file stays truthful.
 	KnownUnfixedReason string `json:"known_unfixed_reason"`
 	WhyFalse           string `json:"why_false"`
-	Text               string `json:"text"`
+	// Path is the file the excerpt was written to. Load-bearing: the guard reads
+	// the target's extension (a document vs code), so an eval that drops the path
+	// measures a code-context matcher the hook never runs on a doc edit.
+	Path string `json:"path"`
+	Text string `json:"text"`
 }
 
 type guardSpecimenFile struct {
@@ -112,7 +116,7 @@ func TestGuardPrecisionEval(t *testing.T) {
 	// --- PRECISION: real documents that must not fire ---
 	falseFires, knownUnfixed := 0, 0
 	for _, neg := range spec.Negatives {
-		hits := guardMatch(corpus, neg.Text)
+		hits := guardMatchForPath(corpus, neg.Path, neg.Text)
 		fired := guardFires(hits)
 
 		if !fired {
