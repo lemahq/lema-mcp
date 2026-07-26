@@ -303,19 +303,30 @@ func syncOnBoundary(dir, harness string, ev collectorEnvelope) {
 	}
 	cwd := ev.Evidence["cwd"]
 	if cwd == "" {
+		collectorDebugf("sync skipped: %s envelope for run %s carries no cwd evidence", ev.Kind, ev.RunID)
 		return
 	}
 	cp, ok := readCollectorCheckpoint(dir, cwd, time.Now())
-	if !ok || cp.RunID != ev.RunID {
+	if !ok {
+		collectorDebugf("sync skipped: no live checkpoint on disk for %s — absent, unreadable, or older than the %s TTL", cwd, collectorTTL)
+		return
+	}
+	if cp.RunID != ev.RunID {
 		// Sync only the checkpoint THIS run just produced — never re-send
 		// another run's state under this run's identity.
+		collectorDebugf("sync skipped: checkpoint belongs to run %s but this boundary is run %s — refusing to re-send another run's state under this identity", cp.RunID, ev.RunID)
 		return
 	}
 	s := newCollectorSyncerForCWD(cp.CWD)
 	if s == nil {
+		collectorDebugf("sync skipped: hosted target not configured — LEMA_API_URL and LEMA_API_TOKEN did not resolve from the environment or the credentials file")
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), collectorSyncTimeout)
 	defer cancel()
-	_ = s.syncCheckpoint(ctx, harness, cp)
+	if err := s.syncCheckpoint(ctx, harness, cp); err != nil {
+		collectorDebugf("sync failed for run %s: %v — the local spool remains authoritative", ev.RunID, err)
+		return
+	}
+	collectorDebugf("sync ok: checkpoint for run %s landed on the hosted run journal", ev.RunID)
 }
