@@ -34,7 +34,7 @@ func TestDistillEnvelopesSelectsDeterministically(t *testing.T) {
 		mkEnv("r1", "tool_use", map[string]string{"tool_name": "Write", "file_path": "b.go"}),
 		mkEnv("r1", "user_prompt", map[string]string{"prompt": "second ask"}),
 	}
-	cp := distillEnvelopes(envs, "/repo/proj")
+	cp := distillEnvelopes(envs, "/repo/proj", collectorCheckpoint{})
 	if cp.RunID != "r1" || cp.CWD != "/repo/proj" || cp.EventCount != 6 {
 		t.Fatalf("cp = %#v", cp)
 	}
@@ -51,7 +51,7 @@ func TestDistillEnvelopesSelectsDeterministically(t *testing.T) {
 
 func TestCheckpointRoundTripAndExpiry(t *testing.T) {
 	dir := t.TempDir()
-	cp := distillEnvelopes([]collectorEnvelope{mkEnv("r1", "user_prompt", map[string]string{"prompt": "x"})}, "/repo/proj")
+	cp := distillEnvelopes([]collectorEnvelope{mkEnv("r1", "user_prompt", map[string]string{"prompt": "x"})}, "/repo/proj", collectorCheckpoint{})
 	if err := writeCollectorCheckpoint(dir, cp); err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestCheckpointFiltersForeignCwdEnvelopes(t *testing.T) {
 
 func TestReadCheckpointRefusesForeignCWD(t *testing.T) {
 	dir := t.TempDir()
-	cp := distillEnvelopes([]collectorEnvelope{mkEnv("r1", "user_prompt", map[string]string{"prompt": "x"})}, "/repo/proj")
+	cp := distillEnvelopes([]collectorEnvelope{mkEnv("r1", "user_prompt", map[string]string{"prompt": "x"})}, "/repo/proj", collectorCheckpoint{})
 	cp.CWD = "/somewhere/else" // simulate a mis-filed or corrupted checkpoint
 	if err := writeCollectorCheckpoint(dir, cp); err != nil {
 		t.Fatal(err)
@@ -146,7 +146,7 @@ func TestInjectOnStartEmitsAdditionalContext(t *testing.T) {
 	cp := distillEnvelopes([]collectorEnvelope{
 		mkEnv("r1", "user_prompt", map[string]string{"prompt": "ship F4"}),
 		mkEnv("r1", "tool_use", map[string]string{"file_path": "collector.go"}),
-	}, "/repo/proj")
+	}, "/repo/proj", collectorCheckpoint{})
 	if err := writeCollectorCheckpoint(dir, cp); err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestInjectOnStartPrefersHostedStateBrief(t *testing.T) {
 	dir := t.TempDir()
 	cp := distillEnvelopes([]collectorEnvelope{
 		mkEnv("r1", "user_prompt", map[string]string{"prompt": "ship F4"}),
-	}, "/repo/proj")
+	}, "/repo/proj", collectorCheckpoint{})
 	if err := writeCollectorCheckpoint(dir, cp); err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestInjectOnStartFallsBackWhenHostedBriefUnavailable(t *testing.T) {
 	dir := t.TempDir()
 	cp := distillEnvelopes([]collectorEnvelope{
 		mkEnv("r1", "user_prompt", map[string]string{"prompt": "ship F4"}),
-	}, "/repo/proj")
+	}, "/repo/proj", collectorCheckpoint{})
 	if err := writeCollectorCheckpoint(dir, cp); err != nil {
 		t.Fatal(err)
 	}
@@ -270,5 +270,72 @@ func TestInjectOnStartSilentWhenNoCheckpoint(t *testing.T) {
 	})
 	if strings.TrimSpace(out) != "" {
 		t.Fatalf("no checkpoint → no stdout, got %q", out)
+	}
+}
+
+// The self-predecessor bug (state_brief_tool.go's resolvePriorRun): a run
+// boundary write (checkpointOnBoundary) overwrites RunID with the CURRENT
+// run's own id, so a later read within that same session was resolving
+// itself as "the prior run". PreviousRunID exists to survive that
+// overwrite — these three tests pin the write-side half of the fix;
+// TestResolvePriorRunRefusesSelf (state_brief_tool_test.go) pins the read
+// side.
+
+func TestDistillEnvelopesCapturesTransitionToNewRun(t *testing.T) {
+	previous := collectorCheckpoint{CWD: "/repo/proj", RunID: "r1", PreviousRunID: "r0"}
+	cp := distillEnvelopes([]collectorEnvelope{
+		mkEnv("r2", "user_prompt", map[string]string{"prompt": "new session"}),
+	}, "/repo/proj", previous)
+	if cp.RunID != "r2" {
+		t.Fatalf("RunID = %q, want the new run r2", cp.RunID)
+	}
+	if cp.PreviousRunID != "r1" {
+		t.Fatalf("PreviousRunID = %q, want r1 (the run r2 took over from) — not r0, r2's own grandparent", cp.PreviousRunID)
+	}
+}
+
+func TestDistillEnvelopesPreservesPreviousRunIDAcrossSameRunRewrite(t *testing.T) {
+	previous := collectorCheckpoint{CWD: "/repo/proj", RunID: "r2", PreviousRunID: "r1"}
+	cp := distillEnvelopes([]collectorEnvelope{
+		mkEnv("r2", "user_prompt", map[string]string{"prompt": "turn 3, same run"}),
+	}, "/repo/proj", previous)
+	if cp.RunID != "r2" || cp.PreviousRunID != "r1" {
+		t.Fatalf("cp = %#v, want RunID=r2 PreviousRunID=r1 preserved (never re-derived from r2 itself)", cp)
+	}
+}
+
+func TestDistillEnvelopesNoPreviousRunIDWithoutAKnownPredecessor(t *testing.T) {
+	for name, previous := range map[string]collectorCheckpoint{
+		"genesis, no prior checkpoint at all": {},
+		"prior checkpoint belongs to a different cwd": {CWD: "/other", RunID: "r0"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cp := distillEnvelopes([]collectorEnvelope{
+				mkEnv("r1", "user_prompt", map[string]string{"prompt": "first ever"}),
+			}, "/repo/proj", previous)
+			if cp.PreviousRunID != "" {
+				t.Fatalf("PreviousRunID = %q, want empty (honest: no predecessor known)", cp.PreviousRunID)
+			}
+		})
+	}
+}
+
+func TestInjectOnStartStampsPreviousRunID(t *testing.T) {
+	dir := t.TempDir()
+	cp := distillEnvelopes([]collectorEnvelope{
+		mkEnv("r1", "user_prompt", map[string]string{"prompt": "ship F4"}),
+	}, "/repo/proj", collectorCheckpoint{})
+	if err := writeCollectorCheckpoint(dir, cp); err != nil {
+		t.Fatal(err)
+	}
+	captureStdout(t, func() {
+		injectOnStart(dir, mkEnv("r2-new-session", "session_start", nil))
+	})
+	stamped, ok := readCollectorCheckpoint(dir, "/repo/proj", time.Now())
+	if !ok {
+		t.Fatal("checkpoint must still read back after injectOnStart")
+	}
+	if stamped.PreviousRunID != "r1" {
+		t.Fatalf("PreviousRunID = %q, want r1 frozen before this new session can overwrite RunID", stamped.PreviousRunID)
 	}
 }

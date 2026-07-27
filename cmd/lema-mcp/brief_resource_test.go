@@ -40,7 +40,11 @@ func TestBriefResourceMatchesToolOutput(t *testing.T) {
 		RunID: "sess-prior", TS: time.Now().UTC().Format(time.RFC3339), Kind: "user_prompt",
 		Payload:  map[string]string{"prompt": "resume me"},
 		Evidence: map[string]string{"harness": "claude-code", "cwd": cwd},
-	}}, cwd)
+	}}, cwd, collectorCheckpoint{})
+	// Simulates what injectOnStart stamps at this run's own session start:
+	// RunID is frozen as PreviousRunID before this run's own boundary writes
+	// would otherwise overwrite it.
+	cp.PreviousRunID = cp.RunID
 	if err := writeCollectorCheckpoint(dir, cp); err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +126,11 @@ func TestBriefResourceHonestNoteAsContent(t *testing.T) {
 		RunID: "sess-prior", TS: time.Now().UTC().Format(time.RFC3339), Kind: "user_prompt",
 		Payload:  map[string]string{"prompt": "resume me"},
 		Evidence: map[string]string{"harness": "claude-code", "cwd": cwd},
-	}}, cwd)
+	}}, cwd, collectorCheckpoint{})
+	// Simulates what injectOnStart stamps at this run's own session start:
+	// RunID is frozen as PreviousRunID before this run's own boundary writes
+	// would otherwise overwrite it.
+	cp.PreviousRunID = cp.RunID
 	if err := writeCollectorCheckpoint(dir, cp); err != nil {
 		t.Fatal(err)
 	}

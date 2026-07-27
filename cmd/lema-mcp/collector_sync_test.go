@@ -86,7 +86,7 @@ func writeTestCheckpoint(t *testing.T, dir, runID string) collectorCheckpoint {
 	cp := distillEnvelopes([]collectorEnvelope{
 		mkEnv(runID, "user_prompt", map[string]string{"prompt": "sync me"}),
 		mkEnv(runID, "tool_use", map[string]string{"file_path": "a.go"}),
-	}, "/repo/proj")
+	}, "/repo/proj", collectorCheckpoint{})
 	if err := writeCollectorCheckpoint(dir, cp); err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +408,7 @@ func TestSyncResolvesTargetFromCanonicalGitRemote(t *testing.T) {
 	gitHere(t, root, "remote", "add", "origin", "https://github.com/lemahq/lema.git")
 
 	dir := t.TempDir()
-	cp := distillEnvelopes([]collectorEnvelope{mkEnv("sess-derive", "user_prompt", map[string]string{"prompt": "sync me"})}, root)
+	cp := distillEnvelopes([]collectorEnvelope{mkEnv("sess-derive", "user_prompt", map[string]string{"prompt": "sync me"})}, root, collectorCheckpoint{})
 	if err := writeCollectorCheckpoint(dir, cp); err != nil {
 		t.Fatal(err)
 	}
@@ -510,7 +510,7 @@ func TestSyncCheckpointEventRejectedIsAnError(t *testing.T) {
 	}
 	cp := distillEnvelopes([]collectorEnvelope{
 		mkEnv("sess-r", "user_prompt", map[string]string{"prompt": "x"}),
-	}, "/repo/proj")
+	}, "/repo/proj", collectorCheckpoint{})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := s.syncCheckpoint(ctx, "claude-code", cp); err == nil {

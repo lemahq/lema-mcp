@@ -266,7 +266,11 @@ func TestStateBriefResolvesPriorRunThenCreatesAndReadsUnderOneProjectReceipt(t *
 		RunID: "sess-prior", TS: time.Now().UTC().Format(time.RFC3339), Kind: "user_prompt",
 		Payload:  map[string]string{"prompt": "resume me"},
 		Evidence: map[string]string{"harness": "claude-code", "cwd": cwd},
-	}}, cwd)
+	}}, cwd, collectorCheckpoint{})
+	// Simulates what injectOnStart stamps at this run's own session start:
+	// RunID is frozen as PreviousRunID before this run's own boundary writes
+	// would otherwise overwrite it.
+	cp.PreviousRunID = cp.RunID
 	if err := writeCollectorCheckpoint(dir, cp); err != nil {
 		t.Fatal(err)
 	}
@@ -290,6 +294,94 @@ func TestStateBriefResolvesPriorRunThenCreatesAndReadsUnderOneProjectReceipt(t *
 	}
 	if len(cap.briefRuns) != 1 || cap.briefRuns[0] != briefRunID {
 		t.Fatalf("brief must be fetched for the ensured hosted run: %v", cap.briefRuns)
+	}
+}
+
+// TestResolvePriorRunRefusesSelf pins the self-predecessor fix. A run
+// boundary write (checkpointOnBoundary, see collector_checkpoint.go) claims
+// RunID for the CURRENT run on every stop/pre_compact within a session —
+// so by the time this same session calls get_state_brief again later, the
+// checkpoint's RunID is itself, not a genuine predecessor. Before this fix,
+// resolvePriorRun read RunID directly and would resolve the asking run as
+// its own prior session. PreviousRunID is the value that survives that
+// overwrite; this test constructs exactly that post-overwrite state (RunID
+// already reclaimed by "sess-self", PreviousRunID still the true, distinct
+// predecessor) and asserts the resolved run is the predecessor, never self.
+func TestResolvePriorRunRefusesSelf(t *testing.T) {
+	srv, cap := newBriefTestServer(t, "claude-code", http.StatusOK)
+	defer srv.Close()
+	provider := &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: stateBriefRoutingContext()}}
+	installStateBriefRuntime(t, provider, srv, resolveTargetInput{CWD: "/private/operator/payments-api"})
+
+	restoreRemote, restoreBranch := gitRemoteURL, gitCurrentBranch
+	t.Cleanup(func() { gitRemoteURL, gitCurrentBranch = restoreRemote, restoreBranch })
+	gitRemoteURL = func(string) (string, bool) { return "git@github.com:acme/payments-api.git", true }
+	gitCurrentBranch = func(string) (string, bool) { return "feat/context", true }
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	t.Setenv(collectorDirEnv, dir)
+	cp := collectorCheckpoint{
+		CWD: cwd, RunID: "sess-self", PreviousRunID: "sess-genuine-prior",
+		Harness: "claude-code", UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		Summary: "turn 3 of the asking session's own activity",
+	}
+	if err := writeCollectorCheckpoint(dir, cp); err != nil {
+		t.Fatal(err)
+	}
+
+	_, out, err := getStateBrief(context.Background(), nil, stateBriefInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.Note, "sess-self") {
+		t.Fatalf("must never resolve the asking run as its own predecessor: %+v", out)
+	}
+	if !strings.Contains(out.Note, "sess-genuine-prior") {
+		t.Fatalf("note must attribute the genuine predecessor: %+v", out)
+	}
+	if cap.runCreate["repo"] != "acme/payments-api" {
+		t.Fatalf("run create = %#v; want primary repository provenance", cap.runCreate)
+	}
+}
+
+// TestResolvePriorRunNoFallbackToRunIDWithoutAPreviousRunID pins the honesty
+// half: an empty PreviousRunID must never fall back to the (potentially
+// self-referential) RunID — "no prior run known" is the honest answer,
+// covering both a genesis checkpoint predating this field and a checkpoint
+// injectOnStart never got to stamp.
+func TestResolvePriorRunNoFallbackToRunIDWithoutAPreviousRunID(t *testing.T) {
+	srv, _ := newBriefTestServer(t, "claude-code", http.StatusOK)
+	defer srv.Close()
+	provider := &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: stateBriefRoutingContext()}}
+	installStateBriefRuntime(t, provider, srv, resolveTargetInput{CWD: "/private/operator/payments-api"})
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	t.Setenv(collectorDirEnv, dir)
+	cp := collectorCheckpoint{
+		CWD: cwd, RunID: "sess-self", Harness: "claude-code",
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339), Summary: "no predecessor stamped",
+	}
+	if err := writeCollectorCheckpoint(dir, cp); err != nil {
+		t.Fatal(err)
+	}
+
+	_, out, err := getStateBrief(context.Background(), nil, stateBriefInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.Note, "sess-self") {
+		t.Fatalf("must never fall back to RunID when PreviousRunID is empty: %+v", out)
+	}
+	if !strings.Contains(out.Note, "no prior run known") {
+		t.Fatalf("must report the honest silence, got: %+v", out)
 	}
 }
 
