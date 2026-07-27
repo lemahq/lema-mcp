@@ -339,3 +339,37 @@ func TestInjectOnStartStampsPreviousRunID(t *testing.T) {
 		t.Fatalf("PreviousRunID = %q, want r1 frozen before this new session can overwrite RunID", stamped.PreviousRunID)
 	}
 }
+
+// After this run has already written a boundary checkpoint, RunID is self.
+// A later session_start for the same run (resume / reconnect) must not
+// re-stamp PreviousRunID from that self-owned RunID — that would overwrite
+// the true predecessor and let resolvePriorRun treat the asking run as its
+// own prior again.
+func TestInjectOnStartPreservesPreviousRunIDOnSameRunResume(t *testing.T) {
+	dir := t.TempDir()
+	cp := collectorCheckpoint{
+		CWD:           "/repo/proj",
+		RunID:         "r2",
+		PreviousRunID: "r1",
+		Harness:       "claude-code",
+		UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
+		Summary:       "mid-session checkpoint",
+		EventCount:    3,
+	}
+	if err := writeCollectorCheckpoint(dir, cp); err != nil {
+		t.Fatal(err)
+	}
+	captureStdout(t, func() {
+		injectOnStart(dir, mkEnv("r2", "session_start", nil))
+	})
+	got, ok := readCollectorCheckpoint(dir, "/repo/proj", time.Now())
+	if !ok {
+		t.Fatal("checkpoint must still read back after injectOnStart")
+	}
+	if got.PreviousRunID != "r1" {
+		t.Fatalf("PreviousRunID = %q, want r1 preserved (must not overwrite with self RunID r2 on resume)", got.PreviousRunID)
+	}
+	if got.RunID != "r2" {
+		t.Fatalf("RunID = %q, want r2 unchanged", got.RunID)
+	}
+}

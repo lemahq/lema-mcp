@@ -366,10 +366,14 @@ func injectOnStart(dir string, ev collectorEnvelope) {
 	}
 	// Freeze today's RunID as the true predecessor before this session's own
 	// boundary writes can overwrite it — this is the one moment self vs.
-	// prior is unambiguous. The value used for injection below stays cp
-	// (unchanged); only the on-disk copy gains the stamp, for a later
-	// mid-session resolvePriorRun read to find.
-	if cp.RunID != "" {
+	// prior is unambiguous. Skip when cp.RunID already equals this session
+	// (a resume / reconnect after a boundary write): RunID is self-owned, and
+	// PreviousRunID already holds the real predecessor — stamping from
+	// cp.RunID would overwrite it with self and make resolvePriorRun treat
+	// the asking run as its own prior again. The value used for injection
+	// below stays cp (unchanged); only the on-disk copy gains the stamp, for
+	// a later mid-session resolvePriorRun read to find.
+	if cp.RunID != "" && cp.RunID != ev.RunID {
 		stamped := cp
 		stamped.PreviousRunID = cp.RunID
 		_ = writeCollectorCheckpoint(dir, stamped)
