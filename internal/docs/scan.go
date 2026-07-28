@@ -1,7 +1,6 @@
 package docs
 
 import (
-	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -26,12 +25,12 @@ type Config struct {
 // Malformed file → zero value with a loud stderr line, never a crash: the
 // engine is the workbench's sidecar and a config typo must not brick the app.
 func loadConfig(root string) Config {
-	var c Config
 	b, err := os.ReadFile(filepath.Join(root, ".lema", "config.json"))
 	if err != nil {
-		return c
+		return Config{}
 	}
-	if err := json.Unmarshal(b, &c); err != nil {
+	c, err := ParseConfig(b)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "lema-mcp: docs: bad .lema/config.json (%v); using default roots\n", err)
 		return Config{}
 	}
@@ -58,22 +57,17 @@ var (
 // skip-dirs, and files over the size cap.
 func scanFiles(root string, cfg Config) []string {
 	seen := map[string]bool{}
-	excluded := func(rel string) bool {
-		for _, ex := range cfg.Docs.Exclude {
-			ex = strings.Trim(filepath.ToSlash(ex), "/")
-			if ex != "" && (rel == ex || strings.HasPrefix(rel, ex+"/")) {
-				return true
-			}
-		}
-		return false
-	}
 	addFile := func(rel string) {
 		rel = filepath.ToSlash(rel)
-		if !strings.HasSuffix(strings.ToLower(rel), ".md") || excluded(rel) || seen[rel] {
+		// InScope (scope.go) is the ONE definition of project-doc scope,
+		// shared with the server-side scanner. Everything path-shaped lives
+		// there; only the size cap stays here, because only this side has a
+		// filesystem to stat.
+		if seen[rel] || !InScope(rel, cfg) {
 			return
 		}
 		info, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel)))
-		if err != nil || info.Size() > maxDocBytes {
+		if err != nil || info.Size() > MaxDocBytes {
 			return
 		}
 		seen[rel] = true
@@ -85,7 +79,7 @@ func scanFiles(root string, cfg Config) []string {
 				return nil // unreadable subtree: skip, don't abort the scan
 			}
 			if d.IsDir() {
-				if skipDirs[d.Name()] {
+				if SkipDir(d.Name()) {
 					return filepath.SkipDir
 				}
 				return nil
