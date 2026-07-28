@@ -37,8 +37,16 @@ var collectorSyncerForCheckpoint = newCollectorSyncerForCWD
 // (harness, external_run_id) — a resolver using a different harness value
 // would mint a second identity for the same session.
 type collectorCheckpoint struct {
-	CWD           string   `json:"cwd"`
-	RunID         string   `json:"run_id"`
+	CWD   string `json:"cwd"`
+	RunID string `json:"run_id"`
+	// PreviousRunID is the run that occupied RunID before the current run
+	// took it over — frozen once, at injectOnStart, the one moment self vs.
+	// prior is unambiguous (RunID still belongs to the true predecessor,
+	// because this session has not yet written its own checkpoint). Carried
+	// forward unchanged by distillEnvelopes across this run's own later
+	// boundary writes, so a mid-session read never labels the asking run as
+	// its own predecessor.
+	PreviousRunID string   `json:"previous_run_id,omitempty"`
 	Harness       string   `json:"harness,omitempty"`
 	UpdatedAt     string   `json:"updated_at"`
 	Summary       string   `json:"summary"`
@@ -64,7 +72,20 @@ func collectorCheckpointPath(dir, cwd string) string {
 
 // distillEnvelopes reduces one run's envelopes to a checkpoint. Deterministic
 // selection only: last prompts, files touched, counts — judgment stays human.
-func distillEnvelopes(envs []collectorEnvelope, cwd string) collectorCheckpoint {
+// previous is whatever checkpoint currently sits on disk for this cwd, read
+// before this write — it exists only to carry PreviousRunID forward:
+//   - previous is absent, or belongs to a different cwd, or has no RunID:
+//     nothing to carry (a fresh project, or a genesis run with no known
+//     predecessor).
+//   - previous.RunID differs from this checkpoint's RunID: a new run has
+//     just taken over the slot — previous.RunID was the true predecessor
+//     (injectOnStart already confirmed this at that run's session start),
+//     so it becomes PreviousRunID now.
+//   - previous.RunID matches: this is the SAME run rewriting its own
+//     checkpoint at a later boundary — preserve whatever PreviousRunID it
+//     already carried rather than re-deriving it from the (by now
+//     self-owned) RunID.
+func distillEnvelopes(envs []collectorEnvelope, cwd string, previous collectorCheckpoint) collectorCheckpoint {
 	cp := collectorCheckpoint{
 		CWD:        cwd,
 		UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
@@ -82,6 +103,14 @@ func distillEnvelopes(envs []collectorEnvelope, cwd string) collectorCheckpoint 
 			seen[fp] = true
 			cp.FilesTouched = append(cp.FilesTouched, fp)
 		}
+	}
+	switch {
+	case previous.CWD != cwd || previous.RunID == "":
+		// No known predecessor for this cwd.
+	case previous.RunID != cp.RunID:
+		cp.PreviousRunID = previous.RunID
+	default:
+		cp.PreviousRunID = previous.PreviousRunID
 	}
 	if len(cp.FilesTouched) > checkpointMaxFiles {
 		cp.FilesTouched = cp.FilesTouched[len(cp.FilesTouched)-checkpointMaxFiles:]
@@ -317,7 +346,8 @@ func checkpointOnBoundary(dir string, ev collectorEnvelope) {
 	if len(here) == 0 {
 		return
 	}
-	_ = writeCollectorCheckpoint(dir, distillEnvelopes(here, cwd))
+	previous, _ := readCollectorCheckpoint(dir, cwd, time.Now())
+	_ = writeCollectorCheckpoint(dir, distillEnvelopes(here, cwd, previous))
 }
 
 func injectOnStart(dir string, ev collectorEnvelope) {
@@ -333,6 +363,20 @@ func injectOnStart(dir string, ev collectorEnvelope) {
 	if !ok {
 		collectorDebugf("no injection: no live checkpoint for %s — first session in this project, or older than the %s TTL", cwd, collectorTTL)
 		return
+	}
+	// Freeze today's RunID as the true predecessor before this session's own
+	// boundary writes can overwrite it — this is the one moment self vs.
+	// prior is unambiguous. Skip when cp.RunID already equals this session
+	// (a resume / reconnect after a boundary write): RunID is self-owned, and
+	// PreviousRunID already holds the real predecessor — stamping from
+	// cp.RunID would overwrite it with self and make resolvePriorRun treat
+	// the asking run as its own prior again. The value used for injection
+	// below stays cp (unchanged); only the on-disk copy gains the stamp, for
+	// a later mid-session resolvePriorRun read to find.
+	if cp.RunID != "" && cp.RunID != ev.RunID {
+		stamped := cp
+		stamped.PreviousRunID = cp.RunID
+		_ = writeCollectorCheckpoint(dir, stamped)
 	}
 	if brief, ok := checkpointStateBrief(cp); ok {
 		collectorDebugf("injected the hosted State Brief for %s", cwd)

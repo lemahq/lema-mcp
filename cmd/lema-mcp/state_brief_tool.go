@@ -134,17 +134,28 @@ func resolvePriorRun(ctx context.Context, s *collectorSyncer, receipt targetCont
 	if !ok {
 		return "", "", errNoPriorStateBriefRun
 	}
+	// cp.RunID is THIS session's own run once its first boundary write has
+	// landed (checkpointOnBoundary overwrites it on every stop/pre_compact),
+	// so it can never be trusted as "the prior run" — cp.PreviousRunID is
+	// frozen once, at injectOnStart, before that overwrite is possible, and
+	// carried forward unchanged by distillEnvelopes across this run's own
+	// later writes. An empty PreviousRunID is honest silence (no predecessor
+	// known — a genesis run, or the checkpoint predates this field), never a
+	// fallback to the self-referential RunID.
+	if strings.TrimSpace(cp.PreviousRunID) == "" {
+		return "", "", errNoPriorStateBriefRun
+	}
 	harness := cp.Harness
 	if harness == "" {
 		// Checkpoints written before the harness field existed: the collector
 		// shipped with only this adapter, so the key is stable.
 		harness = "claude-code"
 	}
-	hosted, err := s.ensureRunInWorkspace(ctx, receipt.ProjectWorkspaceID, harness, cp.RunID, cp.CWD)
+	hosted, err := s.ensureRunInWorkspace(ctx, receipt.ProjectWorkspaceID, harness, cp.PreviousRunID, cp.CWD)
 	if err != nil {
 		return "", "", err
 	}
-	return hosted.ID, fmt.Sprintf("resolved from this project's prior session %s (%s)", cp.RunID, harness), nil
+	return hosted.ID, fmt.Sprintf("resolved from this project's prior session %s (%s)", cp.PreviousRunID, harness), nil
 }
 
 // stateBrief is the ONE code path the State Brief serves from — workspace
