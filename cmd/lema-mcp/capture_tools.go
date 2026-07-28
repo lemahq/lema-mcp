@@ -19,6 +19,7 @@ type recordInput struct {
 	Constraint  string               `json:"constraint,omitempty" jsonschema:"a hard limit this decision imposes"`
 	Consequence string               `json:"consequence,omitempty" jsonschema:"a downstream effect of this decision"`
 	Supersedes  []string             `json:"supersedes,omitempty" jsonschema:"ids of earlier decisions this overrides; they become CLOSED (never reopen)"`
+	Assent      string               `json:"assent,omitempty" jsonschema:"only when the operator explicitly affirmed this decision in-session: their affirmation, quoted or paraphrased with date — stages the capture for one-keystroke boundary binding; never binds by itself; set it when first recording the decision — re-recording an existing decision does not update it"`
 }
 
 type recordOutput struct {

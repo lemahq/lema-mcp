@@ -187,6 +187,7 @@ func recordToHosted(ctx context.Context, dr source.DecisionRecord, now time.Time
 		Refs:        dr.Refs,
 		Constraint:  dr.Constraint,
 		Consequence: dr.Consequence,
+		Assent:      dr.Assent,
 		Supersedes:  dr.Supersedes,
 	}
 	resp, err := push(ctx, []pushRecord{rec})
@@ -264,5 +265,6 @@ func (in recordInput) toDecisionRecord() source.DecisionRecord {
 	return source.DecisionRecord{
 		Title: in.Title, Chosen: in.Chosen, Rejected: in.Rejected, Rationale: in.Rationale,
 		Refs: in.Refs, Constraint: in.Constraint, Consequence: in.Consequence, Supersedes: in.Supersedes,
+		Assent: in.Assent,
 	}
 }

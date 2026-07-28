@@ -636,10 +636,14 @@ type pushRecord struct {
 	// accepts them). Signal A leaves them empty — the deterministic transcript
 	// signal can't see a constraint or a superseded decision — so they are
 	// omitempty and only the record_decision wire populates them.
-	Constraint  string   `json:"constraint,omitempty"`
-	Consequence string   `json:"consequence,omitempty"`
-	Supersedes  []string `json:"supersedes,omitempty"`
-	Status      string   `json:"status"`
+	Constraint  string `json:"constraint,omitempty"`
+	Consequence string `json:"consequence,omitempty"`
+	// Assent is agent-relayed provenance: the operator's in-session ruling,
+	// quoted or dated. Descriptive only — it stages a capture for the boundary
+	// batch and NEVER binds (ADR-0125/0129; MC-7).
+	Assent     string   `json:"assent,omitempty"`
+	Supersedes []string `json:"supersedes,omitempty"`
+	Status     string   `json:"status"`
 }
 
 type pushRequest struct {

@@ -299,6 +299,35 @@ func TestRecorder_NoSinkErrors(t *testing.T) {
 	}
 }
 
+// Assent is agent-relayed provenance (MC-7): when a record_decision capture
+// carries the operator's in-session ruling, it must survive the DecisionRecord
+// → pushRecord mapping in recordToHosted so a boundary batch has something to
+// stage against later. It never binds anything by itself (ADR-0125/0129) —
+// this test only asserts the field rides the wire, not that it accepts.
+func TestRecordDecisionCarriesAssentToPush(t *testing.T) {
+	var got []pushRecord
+	r := recorder{
+		targets: &fakeTargetProvider{result: resolutionResult{Status: resolutionResolved, Context: validRoutingContext()}},
+		pushHosted: func(ctx context.Context, receipt targetContext, dr source.DecisionRecord) (recordOutput, error) {
+			return recordToHosted(ctx, dr, time.Now(), func(_ context.Context, recs []pushRecord) (pushResponse, error) {
+				got = recs
+				return pushResponse{Created: 1, Results: []pushResult{{Status: "created", CurrentStatus: "accepted"}}}, nil
+			})
+		},
+	}
+	dr := source.DecisionRecord{
+		Title:  "boundary binding v1",
+		Chosen: "deep-link batch confirm",
+		Assent: "operator affirmed in-session 2026-07-28",
+	}
+	if _, err := r.record(context.Background(), dr); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if len(got) != 1 || got[0].Assent != dr.Assent {
+		t.Fatalf("assent did not survive the push mapping: %+v", got)
+	}
+}
+
 // #6: the MCP input maps onto the canonical capture model in one place.
 func TestRecordInput_ToDecisionRecord(t *testing.T) {
 	in := recordInput{
