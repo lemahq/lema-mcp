@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/lemahq/lema-mcp/internal/httpx"
 )
 
 // errHostedSearchOnly is returned by the non-search tools in hosted mode: the
@@ -37,7 +39,7 @@ type Hosted struct {
 // agent bearer token. A nil client gets a sensible default with a timeout.
 func NewHosted(baseURL, token string, hc *http.Client) *Hosted {
 	if hc == nil {
-		hc = &http.Client{Timeout: 30 * time.Second}
+		hc = httpx.Client(30 * time.Second)
 	}
 	return &Hosted{baseURL: strings.TrimRight(baseURL, "/"), token: token, hc: hc}
 }

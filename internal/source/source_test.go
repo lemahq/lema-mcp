@@ -106,6 +106,43 @@ func TestBestSnippetMultiByteNoPanic(t *testing.T) {
 	}
 }
 
+// splitSections accumulates each section's body with a strings.Builder (ported
+// from lema-mcp#50, R4). This pins the accumulated text exactly — blank lines
+// inside a section, trailing newlines, and a ##/### heading transition all in
+// one body — so a Builder/Reset off-by-one in newline handling would fail here
+// even though it wouldn't visibly break search ranking.
+func TestSplitSectionsAccumulatesTextAcrossBlankLinesAndHeadingTransitions(t *testing.T) {
+	body := "## Context\n" +
+		"First line of context.\n" +
+		"\n" +
+		"Second line after a blank line.\n" +
+		"\n\n" +
+		"### Nested detail\n" +
+		"Detail line one.\n" +
+		"Detail line two.\n" +
+		"\n"
+	secs := splitSections(body)
+	if len(secs) != 2 {
+		t.Fatalf("expected 2 sections, got %d: %+v", len(secs), secs)
+	}
+	ctx := secs[0]
+	if ctx.heading != "Context" || ctx.level != 2 {
+		t.Fatalf("section 0: got heading=%q level=%d, want Context/2", ctx.heading, ctx.level)
+	}
+	wantCtx := "First line of context.\n\nSecond line after a blank line."
+	if ctx.text != wantCtx {
+		t.Errorf("section 0 text = %q, want %q", ctx.text, wantCtx)
+	}
+	detail := secs[1]
+	if detail.heading != "Nested detail" || detail.level != 3 {
+		t.Fatalf("section 1: got heading=%q level=%d, want Nested detail/3", detail.heading, detail.level)
+	}
+	wantDetail := "Detail line one.\nDetail line two."
+	if detail.text != wantDetail {
+		t.Errorf("section 1 text = %q, want %q", detail.text, wantDetail)
+	}
+}
+
 // A client asking for more than the cap must get the cap, not the default —
 // the workbench sidebar lists every decision via limit=300, and resetting an
 // over-cap ask to 50 silently hides the newest ADRs from the Docs tab.

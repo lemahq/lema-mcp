@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/lemahq/lema-mcp/internal/httpx"
 )
 
 // Public is the tokenless client for Lema's PUBLIC demo graphs (React/k8s/Rust)
@@ -25,7 +27,7 @@ type Public struct {
 // client gets a sensible default with a timeout.
 func NewPublic(baseURL string, hc *http.Client) *Public {
 	if hc == nil {
-		hc = &http.Client{Timeout: 30 * time.Second}
+		hc = httpx.Client(30 * time.Second)
 	}
 	return &Public{baseURL: strings.TrimRight(baseURL, "/"), hc: hc}
 }
