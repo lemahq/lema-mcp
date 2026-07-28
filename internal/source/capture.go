@@ -54,15 +54,19 @@ type TargetEvidenceItem struct {
 // the server only stores and projects it. Status is derived, not authored —
 // "superseded" is set when a later record supersedes this one.
 type DecisionRecord struct {
-	ID             string          `json:"id"`
-	TS             string          `json:"ts"`
-	Title          string          `json:"title"`
-	Chosen         string          `json:"chosen"`
-	Rejected       []RejectedAlt   `json:"rejected,omitempty"`
-	Rationale      string          `json:"rationale,omitempty"`
-	Refs           []string        `json:"refs,omitempty"`
-	Constraint     string          `json:"constraint,omitempty"`
-	Consequence    string          `json:"consequence,omitempty"`
+	ID          string        `json:"id"`
+	TS          string        `json:"ts"`
+	Title       string        `json:"title"`
+	Chosen      string        `json:"chosen"`
+	Rejected    []RejectedAlt `json:"rejected,omitempty"`
+	Rationale   string        `json:"rationale,omitempty"`
+	Refs        []string      `json:"refs,omitempty"`
+	Constraint  string        `json:"constraint,omitempty"`
+	Consequence string        `json:"consequence,omitempty"`
+	// Assent is agent-relayed provenance: the operator's in-session ruling
+	// ("this looks correct"), quoted or dated. Descriptive only — it stages a
+	// capture for the boundary batch and NEVER binds (ADR-0125/0129; MC-7).
+	Assent         string          `json:"assent,omitempty"`
 	Supersedes     []string        `json:"supersedes,omitempty"`
 	SupersededBy   *string         `json:"superseded_by,omitempty"`
 	Status         string          `json:"status"`
