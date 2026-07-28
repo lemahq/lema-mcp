@@ -45,12 +45,29 @@ func TestBoundaryBindNoticeSilentOnFailureAndZero(t *testing.T) {
 // adaptation that leaves the workspace id empty would silently hit
 // "/workspaces//decisions/bind-pending" forever — this test catches that by
 // asserting the resolved id actually reaches the request path.
+//
+// The repository and project workspace ids are deliberately DISTINCT here
+// (a linked project atop a repository leaf): hosted captures are pushed via
+// receipt.RepositoryWorkspaceID (newHostedRecorder / pushDecisions in
+// record_decision.go), so the notice must resolve and query that same id,
+// not receipt.ProjectWorkspaceID. A solo single-workspace setup where both
+// ids happen to be identical would mask a regression back to
+// ProjectWorkspaceID; distinct ids pin the choice so that regression fails
+// the assertion below instead of failing open silently.
 
 func TestNotifyBindPendingResolvesWorkspaceAndHitsCorrectEndpoint(t *testing.T) {
+	const repoWorkspaceID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	const projectWorkspaceID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 	var hitPath string
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /workspaces", func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"workspaces":[{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","org_id":"org-1","is_repo":true,"repo_url":"https://github.com/acme/proj.git"}]}`)
+		io.WriteString(w, `{"workspaces":[`+
+			`{"id":"`+repoWorkspaceID+`","org_id":"org-1","is_repo":true,"repo_url":"https://github.com/acme/proj.git"},`+
+			`{"id":"`+projectWorkspaceID+`","org_id":"org-1","is_repo":false}`+
+			`]}`)
+	})
+	mux.HandleFunc("GET /workspaces/"+projectWorkspaceID+"/links", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"links":[{"workspace_id":"`+repoWorkspaceID+`"}]}`)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/decisions/bind-pending") {
@@ -62,13 +79,13 @@ func TestNotifyBindPendingResolvesWorkspaceAndHitsCorrectEndpoint(t *testing.T) 
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
-	setSyncEnv(t, srv.URL)
+	setSyncEnv(t, srv.URL) // sets LEMA_WORKSPACE_ID = repoWorkspaceID
 
 	notifyBindPending("unused-dir", mkEnv("sess-notice", "stop", nil))
 
-	want := "/workspaces/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/decisions/bind-pending"
+	want := "/workspaces/" + repoWorkspaceID + "/decisions/bind-pending"
 	if hitPath != want {
-		t.Fatalf("bind-pending hit path = %q, want %q — workspace id must resolve, never be empty", hitPath, want)
+		t.Fatalf("bind-pending hit path = %q, want %q — notice must resolve RepositoryWorkspaceID (where pushDecisions writes), not ProjectWorkspaceID (%s)", hitPath, want, projectWorkspaceID)
 	}
 }
 

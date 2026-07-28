@@ -44,9 +44,13 @@ func notifyBindPending(dir string, ev collectorEnvelope) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), bindNoticeTimeout)
 	defer cancel()
+	// The notice must read the workspace captures are actually pushed to:
+	// newHostedRecorder calls pushDecisions(..., receipt.RepositoryWorkspaceID,
+	// records) in record_decision.go. If that push target ever changes, this
+	// must change with it.
 	workspaceID, err := withResolvedTarget(ctx, s.runtime.targets, s.runtime.targetInput,
 		func(_ context.Context, receipt targetContext) (string, error) {
-			return receipt.ProjectWorkspaceID, nil
+			return receipt.RepositoryWorkspaceID, nil
 		})
 	if err != nil {
 		collectorDebugf("bind notice skipped: workspace not resolved: %v", err)
