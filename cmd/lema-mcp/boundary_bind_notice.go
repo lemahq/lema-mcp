@@ -83,6 +83,6 @@ func notifyBindPendingTo(w io.Writer, apiURL, token, workspaceID, appURL string)
 	if json.NewDecoder(resp.Body).Decode(&body) != nil || body.Count == 0 {
 		return
 	}
-	fmt.Fprintf(w, "lema: %d ruling(s) from your work await one-click binding → %s/decisions/bind-pending\n",
+	fmt.Fprintf(w, "lema: %d ruling(s) await one-click binding → %s/decisions/bind-pending\n",
 		body.Count, appURL)
 }
