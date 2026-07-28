@@ -1,6 +1,6 @@
 {
   "name": "lema-mcp-linux-x64",
-  "version": "0.21.4",
+  "version": "0.22.1",
   "description": "Prebuilt lema-mcp binary for Linux x64.",
   "os": [
     "linux"
