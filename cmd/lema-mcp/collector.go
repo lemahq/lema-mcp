@@ -270,4 +270,5 @@ func runCollect(args []string) {
 	}
 	injectOnStart(dir, ev)
 	syncOnBoundary(dir, adapter.name(), ev)
+	notifyBindPending(dir, ev)
 }
