@@ -342,20 +342,72 @@ func structuralMatch(query string, a source.Atom, df map[string]int, n int) bool
 	}
 	dd := distinctiveDF(n)
 	atomDistinct, shared := 0, 0
+	keyTerms, keyShared := 0, 0
+	loneShared := ""
 	for _, t := range gateTerms(matchKeyFor(a)) {
+		// Full-key tally, common terms included — the solo path below needs the
+		// identity as WRITTEN, not the post-filter remainder.
+		keyTerms++
+		if q[t] {
+			keyShared++
+		}
 		if df[t] > dd {
 			continue // common in this corpus — category vocabulary, not identity
 		}
 		atomDistinct++
 		if q[t] {
 			shared++
+			loneShared = t
 		}
 	}
 	if atomDistinct == 0 || shared == 0 {
 		return false
 	}
 	cov := float64(shared) / float64(atomDistinct)
-	return (shared >= 2 && cov >= structuralCov) || cov >= structuralCovSolo
+	if shared >= 2 && cov >= structuralCov {
+		return true
+	}
+	if cov < structuralCovSolo {
+		return false
+	}
+	// SOLO PATH — a single distinctive term is carrying the whole match, so cov
+	// is 1.0 by construction whenever the df filter stripped every OTHER term of
+	// the key. On a long key that ratio measures nothing: the live specimen
+	// "Session-source join as MVP path for Judgment pending" reduces to the one
+	// term "mvp" (the other six are corpus-common), after which ANY topic naming
+	// MVP work reads as governed — measured 2026-07-28, three unrelated topics
+	// returned ruled_out/binding against it. Coverage of a one-element set is an
+	// artifact of the filter, not evidence of identity.
+	//
+	// So make the solo bar mean what its comment always claimed — "most of a
+	// short focused identity" — by measuring against the identity as written.
+	// A genuinely focused option is unaffected ("pinecone" IS its key), and so is
+	// verbatim relitigation (the query is the key, so this ratio is 1.0). What it
+	// drops is exactly the degenerate case: one common word of a long key.
+	//
+	// Escape hatch for a token that is an IDENTIFIER rather than a word — naming
+	// "adr-0111" or "b0" is naming that thing and nothing else, so it carries a
+	// focused identity even inside a long key. Digit-bearing is the only shape
+	// signal that SURVIVES Tokenize: underscores, dots and camelCase boundaries
+	// all become token splits and case is folded, so "task_id" and "OriginSource"
+	// reach this gate as ordinary words ("task", "origin") and cannot be told
+	// apart by shape. Measured, not assumed — of the 22 atoms the full-key bar
+	// drops, exactly 3 have a digit-bearing lone term.
+	if hasDigitRune(loneShared) {
+		return true
+	}
+	return float64(keyShared)/float64(keyTerms) >= structuralCovSolo
+}
+
+// hasDigitRune reports whether a gate term carries a digit — the surviving
+// identifier signal after Tokenize folds case and splits on punctuation.
+func hasDigitRune(s string) bool {
+	for _, r := range s {
+		if unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // Governing returns the CLOSED atoms whose option the query STRUCTURALLY reaches —
