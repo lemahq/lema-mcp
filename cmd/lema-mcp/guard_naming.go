@@ -229,15 +229,21 @@ func singleTokenKey(key string) (string, bool) {
 	return pieces[0], true
 }
 
-// guardNovelHits drops hits whose single-word option ALREADY appears in the
+// guardNovelHits drops hits whose single-word option is ALREADY NAMED in the
 // file's pre-edit content — the second gate, and the only one that can answer
 // "did this edit introduce the name?".
 //
 // PreToolUse runs before the write lands, so the file on disk IS the baseline;
-// no git call is needed. A term already in the file is not something this edit
-// is proposing — which is what makes `/record?repo=` in a doc comment of
+// no git call is needed. A name already present as itself is not something this
+// edit is proposing — which is what makes `/record?repo=` in a doc comment of
 // public_record.go silent while a genuinely new `/record` route in a file that
-// never said "record" still fires.
+// never named "record" still fires.
+//
+// Reuses namesOption rather than tokenSet membership: Tokenize splits
+// camelCase, so a bare set check would treat PublicRecord as evidence that
+// Record already exists and silence a real `type Record` proposal in the same
+// file. The lexical gate already decided the edit names the option; novelty
+// asks whether the baseline did too, under the same definition.
 //
 // Scoped to single-token keys on purpose (d_23bf88's blast-radius discipline):
 // applying novelty to every key would silence a real re-proposal in a document
@@ -272,10 +278,9 @@ func guardNovelHits(hits []source.Atom, baseline string) []source.Atom {
 	if baseline == "" || len(hits) == 0 {
 		return hits
 	}
-	base := tokenSet(baseline)
 	out := hits[:0:0]
 	for _, h := range hits {
-		if tok, ok := singleTokenKey(h.MatchKey); ok && base[tok] {
+		if _, ok := singleTokenKey(h.MatchKey); ok && namesOption(h.MatchKey, baseline) {
 			continue
 		}
 		out = append(out, h)

@@ -81,18 +81,31 @@ func TestNamesOptionOnlyGatesSingleTokenKeys(t *testing.T) {
 	}
 }
 
-// TestGuardNovelHits pins the second gate: a one-word name already in the file
-// is carried along by the edit, not proposed by it. This is what separates a
-// NEW `/record` route from the `/record?repo=` already in public_record.go,
-// which no lexical rule can do — they are character-identical.
+// TestGuardNovelHits pins the second gate: a one-word name already NAMES itself
+// in the file is carried along by the edit, not proposed by it. This is what
+// separates a NEW `/record` route from the `/record?repo=` already in
+// public_record.go, which no lexical rule can do — they are character-identical.
+//
+// Novelty must reuse the lexical gate's notion of "names the option". A bare
+// tokenSet membership check re-introduces the PublicRecord defect: Tokenize
+// splits the compound, so a baseline that never names Record as its own
+// identifier would suppress a real `type Record` proposal in the same file.
 func TestGuardNovelHits(t *testing.T) {
 	hits := []source.Atom{
 		{Ref: "d_e45c79", MatchKey: "Record"},
 		{Ref: "d_e45c79", MatchKey: "Lema Relay"},
 	}
-	got := guardNovelHits(hits, "// the repo record page (/gh/{org}/{repo})\ntype PublicRecord struct{}")
+	// Baseline already names Record as a route — character-identical to a new
+	// `/record` proposal, so novelty alone must drop it.
+	got := guardNovelHits(hits, "// slug for the /record?repo= cross-link\ntype PublicRecord struct{}")
 	if len(got) != 1 || got[0].MatchKey != "Lema Relay" {
 		t.Errorf("a name already in the file must be dropped; kept %v", keysOf(got))
+	}
+	// Compound identifiers contribute the token via Tokenize, but do not name
+	// the option. A lexical hit on a new `type Record` must survive.
+	got = guardNovelHits(hits, "type PublicRecord struct{}\nfunc (s *PublicRecord) GetRepoRecord() {}")
+	if len(got) != 2 {
+		t.Errorf("compound-only baseline must not suppress Record; kept %v", keysOf(got))
 	}
 	// Multi-word keys are out of scope — novelty must not silence them.
 	if got := guardNovelHits(hits, "we already discussed the Lema Relay option at length"); len(got) != 2 {
