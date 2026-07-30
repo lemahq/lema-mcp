@@ -36,6 +36,12 @@ type guardSpecimen struct {
 	Name            string `json:"name"`
 	WronglyFired    string `json:"wrongly_fired"`
 	WronglyFiredKey string `json:"wrongly_fired_key"`
+	// Baseline is the target file's content BEFORE the edit, when the specimen
+	// came from editing an existing file. It feeds the novelty gate, which is
+	// the only thing that can answer "did this edit introduce the name?" — an
+	// identifier already in the file is carried along, not proposed. Empty
+	// means a new file (or plain prose), where the lexical gate stands alone.
+	Baseline string `json:"baseline"`
 	// KnownUnfixedReason, when set, marks a specimen the matcher provably
 	// cannot reach. It is REPORTED, never silently tolerated, and a specimen
 	// that starts passing must have this cleared so the file stays truthful.
@@ -44,9 +50,32 @@ type guardSpecimen struct {
 	Text               string `json:"text"`
 }
 
+// guardPositive is a hand-labelled specimen that MUST fire: a real attempt to
+// introduce a surface named after a killed option. These exist because a
+// precision fix can always be made to pass by matching less, and the generated
+// recall set below only ever exercises one sentence shape ("let's use X"). A
+// declaration, a route, and two prose proposals pin the shapes a real naming
+// proposal actually takes.
+type guardPositive struct {
+	Name        string `json:"name"`
+	MustFireKey string `json:"must_fire_key"`
+	WhyTrue     string `json:"why_true"`
+	Baseline    string `json:"baseline"`
+	Text        string `json:"text"`
+}
+
 type guardSpecimenFile struct {
 	Negatives         []guardSpecimen `json:"negatives"`
+	Positives         []guardPositive `json:"positives"`
 	PositiveTemplates []string        `json:"positive_templates"`
+}
+
+// evalHits is the specimen-side equivalent of the hook's evaluation order:
+// the pure matcher, then the novelty gate against the pre-edit file. Keeping
+// them in one helper is what stops the eval from measuring a pipeline the
+// guard does not actually run.
+func evalHits(corpus []source.Atom, text, baseline string) []source.Atom {
+	return guardNovelHits(guardMatch(corpus, text), baseline)
 }
 
 // loadEvalCorpus reads the real closed-atom feed THROUGH THE GUARD'S OWN CACHE
@@ -112,7 +141,7 @@ func TestGuardPrecisionEval(t *testing.T) {
 	// --- PRECISION: real documents that must not fire ---
 	falseFires, knownUnfixed := 0, 0
 	for _, neg := range spec.Negatives {
-		hits := guardMatch(corpus, neg.Text)
+		hits := evalHits(corpus, neg.Text, neg.Baseline)
 		fired := guardFires(hits)
 
 		if !fired {
@@ -138,6 +167,26 @@ func TestGuardPrecisionEval(t *testing.T) {
 		falseFires++
 		t.Errorf("FALSE FIRE %-26s expected silence, got %d hit(s): %s\n    why false: %s",
 			neg.Name, len(hits), strings.Join(named, ", "), neg.WhyFalse)
+	}
+
+	// --- POSITIVES: a real attempt to introduce the surface must still fire ---
+	missedPositives := 0
+	for _, pos := range spec.Positives {
+		hits := evalHits(corpus, pos.Text, pos.Baseline)
+		hit := false
+		for _, h := range hits {
+			if strings.EqualFold(h.MatchKey, pos.MustFireKey) {
+				hit = true
+				break
+			}
+		}
+		if hit && guardFires(hits) {
+			t.Logf("PASS positive  %-26s fires on %q", pos.Name, pos.MustFireKey)
+			continue
+		}
+		missedPositives++
+		t.Errorf("MISSED POSITIVE %-23s expected a fire on %q, got %d hit(s)\n    why true: %s",
+			pos.Name, pos.MustFireKey, len(hits), pos.WhyTrue)
 	}
 
 	// --- RECALL: naming a killed option verbatim must fire it ---
@@ -171,6 +220,7 @@ func TestGuardPrecisionEval(t *testing.T) {
 
 	t.Logf("PRECISION: %d/%d labelled negatives silent (%d known-unfixed, %d regressions)",
 		len(spec.Negatives)-falseFires-knownUnfixed, len(spec.Negatives), knownUnfixed, falseFires)
+	t.Logf("POSITIVES: %d/%d labelled naming proposals still fire", len(spec.Positives)-missedPositives, len(spec.Positives))
 	t.Logf("RECALL:    %.1f%% (%d/%d killed options fire when named verbatim)", recall, eligible-len(missed), eligible)
 	if len(missed) > 0 {
 		sort.Strings(missed)
