@@ -113,6 +113,43 @@ jobs:
         env:
           FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
+      # The registry HARD-VALIDATES that npm already serves this version, and
+      # answers with an opaque 400 when it does not. That is not a race here: the
+      # npm-publish job above is gated behind NPM_PUBLISH_ENABLED, so whenever it
+      # is off, npm is populated by hand (PUBLISHING.md "Each release") and a tag
+      # pushed BEFORE that publish can never satisfy the registry.
+      #
+      # v0.22.0 and v0.22.1 both failed exactly this way. So check first, and say
+      # which order to use — rather than spending three minutes downloading a
+      # publisher to receive a 400 that reads like a transient registry fault.
+      #
+      # The retry loop still earns its keep when npm-publish DID run: a freshly
+      # published version takes a moment to become visible to the registry.
+      - name: Guard — npm must already serve this version
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          for attempt in $(seq 1 10); do
+            if npm view "lema-mcp@${v}" version >/dev/null 2>&1; then
+              echo "npm serves lema-mcp@${v} — proceeding."
+              exit 0
+            fi
+            echo "attempt ${attempt}/10: npm does not serve lema-mcp@${v} yet; waiting 15s…"
+            sleep 15
+          done
+          cat >&2 <<EOF
+          npm does not serve lema-mcp@${v}, so the MCP registry will reject it.
+
+          The registry is discovery-only and validates against npm. Publish first,
+          tag second:
+
+            1. bash scripts/publish.sh      # or enable NPM_PUBLISH_ENABLED + NPM_TOKEN
+            2. git tag ${GITHUB_REF_NAME} && git push origin ${GITHUB_REF_NAME}
+
+          The GitHub Release for this tag already succeeded; re-run this job once
+          npm serves the version. Nothing needs reverting.
+          EOF
+          exit 1
+
       - name: Install mcp-publisher
         env:
           GH_TOKEN: ${{ github.token }}
