@@ -138,16 +138,22 @@ func tokenSet(s string) map[string]bool {
 // meant: does this text NAME the option.
 func tokenSeq(s string) []string { return verdict.Tokenize(s) }
 
-// guardQuery is one edit's text in both forms the matcher needs: the membership
-// set (single-word options, identifier hits) and the ordered stream (multi-word
-// adjacency). Built once per query.
+// guardQuery is one edit's text in the three forms the matcher needs: the
+// membership set (identifier hits), the ordered stream (multi-word adjacency),
+// and the RAW text. Built once per query.
+//
+// raw is kept because tokenization is lossy in exactly the way that broke
+// single-word options: it folds case and splits camelCase/underscores, so
+// `PublicRecord` and the word "Record" arrive at the set identically. The
+// naming gate (guard_naming.go) needs the un-tokenized text to tell them apart.
 type guardText struct {
 	set map[string]bool
 	seq []string
+	raw string
 }
 
 func newGuardText(s string) guardText {
-	return guardText{set: tokenSet(s), seq: tokenSeq(s)}
+	return guardText{set: tokenSet(s), seq: tokenSeq(s), raw: s}
 }
 
 func (q guardText) empty() bool { return len(q.set) == 0 }
@@ -199,24 +205,29 @@ func alnumLower(s string) string {
 // requiring only that each piece appear SOMEWHERE asks whether the document
 // contains the option's vocabulary, not whether it names the option, and over a
 // long document built from ordinary words the answer is always yes.
-// Single-word options keep set membership, which is what lets a killed option
-// match inside a lowercase identifier (`kafka.NewProducer()`).
+// A SINGLE-WORD option additionally has to NAME the option rather than merely
+// contain the word (guard_naming.go). Bare set membership was the whole defect
+// for one-word keys: Tokenize splits camelCase and underscores, so the killed
+// name "Record" matched `PublicRecord` and "Knowledge" matched
+// `jobs_one_active_knowledge_audit` — pre-existing identifiers, not proposals.
+// The gate still admits `kafka.NewProducer()` and `new KafkaClient()`, which is
+// the coverage d_194bff protects when it rejects suppressing one-word keys.
 func optionMatches(key string, q guardText) (bool, float64) {
 	joined := alnumLower(key)
 	if len(joined) < 3 {
 		return false, 0 // too short/trivial to match safely
 	}
+	pieces := verdict.Tokenize(key)
+	if len(pieces) == 1 {
+		if namesOption(key, q.raw) {
+			return true, float64(len(joined))
+		}
+		return false, 0
+	}
 	if q.set[joined] {
 		return true, float64(len(joined))
 	}
-	pieces := verdict.Tokenize(key)
-	switch len(pieces) {
-	case 0:
-		return false, 0
-	case 1:
-		if q.set[pieces[0]] {
-			return true, float64(len(joined))
-		}
+	if len(pieces) == 0 {
 		return false, 0
 	}
 	if containsRun(q.seq, pieces) {
@@ -523,6 +534,12 @@ func runGuard(args []string, refreshRuntime *hostedWriteRuntime) {
 	closed := append(store.ClosedAtoms(), loadADRClosed(".")...)
 	closed = append(closed, loadGuardCacheAtoms(capturePath)...)
 	hits, suppressed := evaluateCitation(closed, query)
+	// Novelty gate (guard_naming.go): a one-word name already present in the
+	// file this edit targets is not a name this edit is PROPOSING. Applied here
+	// rather than inside the matcher so guardMatch/evaluateCitation stay pure —
+	// the terminal sidecar and the PR-time verify path share them and have no
+	// pre-edit file to read.
+	hits = guardNovelHits(hits, guardBaseline(in.ToolInput))
 	out, atom := guardDecision(hits, mode)
 	if out == nil {
 		// Allow silently — but if the citation exemption is what suppressed a
