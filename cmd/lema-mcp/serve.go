@@ -77,7 +77,7 @@ func serveHTTP(port int) error {
 	watchParentDeath()
 
 	fmt.Fprintf(os.Stderr, "lema-mcp: workspace API on http://%s  (repo %q)\n", addr, repoName)
-	fmt.Fprintf(os.Stderr, "lema-mcp: token %s  (Authorization: Bearer <token>, or ?token=)\n", token)
+	fmt.Fprintf(os.Stderr, "lema-mcp: token %s  (Authorization: Bearer <token>)\n", token)
 	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -174,8 +174,8 @@ func isGuardCoordinationPath(p string) bool {
 	return p == "/api/guard" || strings.HasPrefix(p, "/api/guard/")
 }
 
-// withToken guards every /api/ route with the local token (Bearer header or
-// ?token=). /healthz, CORS preflight, and the /api/guard* coordination routes
+// withToken guards every /api/ route with the local token (Bearer header).
+// /healthz, CORS preflight, and the /api/guard* coordination routes
 // stay open. A localhost write port that any local process or a drive-by page
 // could POST to is a real surface (ADR-0044).
 //
@@ -196,9 +196,6 @@ func withToken(token string, next http.Handler) http.Handler {
 			return
 		}
 		got := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-		if got == "" {
-			got = r.URL.Query().Get("token")
-		}
 		// Constant-time compare so this local write port (ADR-0044) gives no
 		// timing oracle on the token to a co-resident process or drive-by page.
 		// ConstantTimeCompare returns 0 on a length mismatch, which is the correct
