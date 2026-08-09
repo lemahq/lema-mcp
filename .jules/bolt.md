@@ -11,3 +11,11 @@
 - **Allocations:** Decreased from ~15,000 allocs/op to 51 allocs/op.
 - **Memory Consumption:** Dropped from ~2.4GB/op to ~2.6MB/op.
 **Learning:** Always use `strings.Builder` instead of `+=` for string accumulation in loops, particularly when parsing files or large inputs line-by-line.
+
+## Performance Optimization: Caching Lowercased Snippets (internal/source/source.go)
+**Issue:** `strings.ToLower(clean)` was executed inside the hot `bestSnippet` function inside the main nested loops in `Search()`, immediately after already computing `strings.ToLower(clean)` to find hits.
+**Optimization:** Reused the already lowercased string variable `cl` across `Search` and passed it into `bestSnippet` directly, removing the redundant `strings.ToLower` call.
+**Measured Impact:**
+- **Execution Time:** Decreased from ~18.5ms/op to ~17.0ms/op.
+- **Allocations:** Decreased from ~4240 allocs/op to ~4140 allocs/op.
+**Learning:** Always pass pre-computed allocations (e.g. lowercased strings for case-insensitive matching) down to helper functions in hot loops rather than redundantly re-calculating them inside the helpers.

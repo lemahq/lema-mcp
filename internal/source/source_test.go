@@ -100,7 +100,7 @@ func TestSnippetsAreTightAndClean(t *testing.T) {
 // lowercasing ('Ⱥ' U+023A, 2 bytes → 'ⱥ' U+2C65, 3 bytes). Credit: Jules (DoS report).
 func TestBestSnippetMultiByteNoPanic(t *testing.T) {
 	clean := strings.Repeat("Ⱥ", 10) + " want"
-	got := bestSnippet(clean, []string{"want"}, 10) // panics if hitByte is sliced into clean
+	got := bestSnippet(clean, strings.ToLower(clean), []string{"want"}, 10) // panics if hitByte is sliced into clean
 	if !strings.Contains(got, "want") {
 		t.Errorf("expected snippet to contain the matched term, got %q", got)
 	}
