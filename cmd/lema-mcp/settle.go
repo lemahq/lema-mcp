@@ -276,100 +276,109 @@ func runSettleWithClient(args []string, client *settleClient) error {
 
 	switch verb {
 	case "accept":
-		fs := flag.NewFlagSet("settle accept", flag.ContinueOnError)
-		note := fs.String("note", "", "optional note recorded on the accept event")
-		ids, err := parseSettleFlags(fs, rest)
-		if err != nil {
-			return err
-		}
-		if len(ids) == 0 {
-			return fmt.Errorf("usage: lema settle accept <decision-id>... [--note <text>]")
-		}
-		var failed []string
-		for _, raw := range ids {
-			d, err := client.resolveDecisionID(raw)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "settle: %v\n", err)
-				failed = append(failed, raw)
-				continue
-			}
-			payload := map[string]any{"via": "lema-settle"}
-			if *note != "" {
-				payload["note"] = *note
-			}
-			if err := client.appendEvent(d.ID, "accepted", payload); err != nil {
-				fmt.Fprintf(os.Stderr, "settle: accept %s: %v\n", raw, err)
-				failed = append(failed, raw)
-				continue
-			}
-			printDraftResult(os.Stdout, d, statusNote(d))
-		}
-		if len(failed) > 0 {
-			return fmt.Errorf("%d of %d accepts failed: %s", len(failed), len(ids), strings.Join(failed, ", "))
-		}
-		return nil
-
+		return handleAccept(client, rest)
 	case "reject":
-		fs := flag.NewFlagSet("settle reject", flag.ContinueOnError)
-		reason := fs.String("reason", "", "why the proposal is rejected (required)")
-		category := fs.String("category", "declined", `"withdrawn" or "declined"`)
-		pos, err := parseSettleFlags(fs, rest)
-		if err != nil {
-			return err
-		}
-		if len(pos) != 1 {
-			return fmt.Errorf("usage: lema settle reject <decision-id> --reason <text> [--category withdrawn|declined]")
-		}
-		if strings.TrimSpace(*reason) == "" {
-			return fmt.Errorf("--reason is required: the recorded why is the product")
-		}
-		d, err := client.resolveDecisionID(pos[0])
-		if err != nil {
-			return err
-		}
-		if err := client.appendEvent(d.ID, "rejected", map[string]any{
-			"reason_category": *category,
-			"reason_body":     *reason,
-			"via":             "lema-settle",
-		}); err != nil {
-			return err
-		}
-		printAppliedResult(os.Stdout, "reject", d, "")
-		return nil
-
+		return handleReject(client, rest)
 	case "supersede":
-		fs := flag.NewFlagSet("settle supersede", flag.ContinueOnError)
-		by := fs.String("by", "", "the superseding decision id (required; record it first with record_decision)")
-		reason := fs.String("reason", "", "optional reason recorded on the supersession")
-		pos, err := parseSettleFlags(fs, rest)
-		if err != nil {
-			return err
-		}
-		if len(pos) != 1 || strings.TrimSpace(*by) == "" {
-			return fmt.Errorf("usage: lema settle supersede <decision-id> --by <decision-id> [--reason <text>]")
-		}
-		d, err := client.resolveDecisionID(pos[0])
-		if err != nil {
-			return err
-		}
-		successor, err := client.resolveDecisionID(*by)
-		if err != nil {
-			return fmt.Errorf("resolve --by: %w", err)
-		}
-		if err := client.appendEvent(d.ID, "superseded", map[string]any{
-			"superseded_by_id": successor.ID,
-			"reason":           *reason,
-			"via":              "lema-settle",
-		}); err != nil {
-			return err
-		}
-		printAppliedResult(os.Stdout, "supersede", d,
-			fmt.Sprintf("superseded by: %s (%s)", successor.ID, successor.Title))
-		return nil
-
+		return handleSupersede(client, rest)
 	default:
 		return fmt.Errorf("unknown settle verb %q\n%s", verb, settleUsage)
 	}
+}
+
+func handleAccept(client *settleClient, args []string) error {
+	fs := flag.NewFlagSet("settle accept", flag.ContinueOnError)
+	note := fs.String("note", "", "optional note recorded on the accept event")
+	ids, err := parseSettleFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return fmt.Errorf("usage: lema settle accept <decision-id>... [--note <text>]")
+	}
+	var failed []string
+	for _, raw := range ids {
+		d, err := client.resolveDecisionID(raw)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "settle: %v\n", err)
+			failed = append(failed, raw)
+			continue
+		}
+		payload := map[string]any{"via": "lema-settle"}
+		if *note != "" {
+			payload["note"] = *note
+		}
+		if err := client.appendEvent(d.ID, "accepted", payload); err != nil {
+			fmt.Fprintf(os.Stderr, "settle: accept %s: %v\n", raw, err)
+			failed = append(failed, raw)
+			continue
+		}
+		printDraftResult(os.Stdout, d, statusNote(d))
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("%d of %d accepts failed: %s", len(failed), len(ids), strings.Join(failed, ", "))
+	}
+	return nil
+}
+
+func handleReject(client *settleClient, args []string) error {
+	fs := flag.NewFlagSet("settle reject", flag.ContinueOnError)
+	reason := fs.String("reason", "", "why the proposal is rejected (required)")
+	category := fs.String("category", "declined", `"withdrawn" or "declined"`)
+	pos, err := parseSettleFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 {
+		return fmt.Errorf("usage: lema settle reject <decision-id> --reason <text> [--category withdrawn|declined]")
+	}
+	if strings.TrimSpace(*reason) == "" {
+		return fmt.Errorf("--reason is required: the recorded why is the product")
+	}
+	d, err := client.resolveDecisionID(pos[0])
+	if err != nil {
+		return err
+	}
+	if err := client.appendEvent(d.ID, "rejected", map[string]any{
+		"reason_category": *category,
+		"reason_body":     *reason,
+		"via":             "lema-settle",
+	}); err != nil {
+		return err
+	}
+	printAppliedResult(os.Stdout, "reject", d, "")
+	return nil
+}
+
+func handleSupersede(client *settleClient, args []string) error {
+	fs := flag.NewFlagSet("settle supersede", flag.ContinueOnError)
+	by := fs.String("by", "", "the superseding decision id (required; record it first with record_decision)")
+	reason := fs.String("reason", "", "optional reason recorded on the supersession")
+	pos, err := parseSettleFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 || strings.TrimSpace(*by) == "" {
+		return fmt.Errorf("usage: lema settle supersede <decision-id> --by <decision-id> [--reason <text>]")
+	}
+	d, err := client.resolveDecisionID(pos[0])
+	if err != nil {
+		return err
+	}
+	successor, err := client.resolveDecisionID(*by)
+	if err != nil {
+		return fmt.Errorf("resolve --by: %w", err)
+	}
+	if err := client.appendEvent(d.ID, "superseded", map[string]any{
+		"superseded_by_id": successor.ID,
+		"reason":           *reason,
+		"via":              "lema-settle",
+	}); err != nil {
+		return err
+	}
+	printAppliedResult(os.Stdout, "supersede", d,
+		fmt.Sprintf("superseded by: %s (%s)", successor.ID, successor.Title))
+	return nil
 }
 
 // settleWithTarget resolves once before any decision lookup or event append.
