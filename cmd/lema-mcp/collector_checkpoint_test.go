@@ -306,7 +306,7 @@ func TestDistillEnvelopesPreservesPreviousRunIDAcrossSameRunRewrite(t *testing.T
 
 func TestDistillEnvelopesNoPreviousRunIDWithoutAKnownPredecessor(t *testing.T) {
 	for name, previous := range map[string]collectorCheckpoint{
-		"genesis, no prior checkpoint at all": {},
+		"genesis, no prior checkpoint at all":         {},
 		"prior checkpoint belongs to a different cwd": {CWD: "/other", RunID: "r0"},
 	} {
 		t.Run(name, func(t *testing.T) {
