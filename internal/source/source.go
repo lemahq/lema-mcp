@@ -260,7 +260,7 @@ func (l *Local) Search(_ context.Context, query string, k int) ([]Atom, error) {
 				if hits == 0 {
 					continue
 				}
-				text := bestSnippet(clean, terms, 240)
+				text := bestSnippet(clean, cl, terms, 240)
 				norm := strings.ToLower(strings.Join(strings.Fields(text), " "))
 				if seen[norm] {
 					continue
@@ -279,7 +279,7 @@ func (l *Local) Search(_ context.Context, query string, k int) ([]Atom, error) {
 			// Only the title/tags matched — surface one representative lead block so
 			// a title hit still returns something, without flooding with every block.
 			cands = append(cands, cand{
-				atom:  Atom{ID: fmt.Sprintf("%d-%d", a.Number, leadID), Type: leadType, Text: bestSnippet(leadText, terms, 240), Ref: ref, Edges: edgesOf(a)},
+				atom:  Atom{ID: fmt.Sprintf("%d-%d", a.Number, leadID), Type: leadType, Text: bestSnippet(leadText, strings.ToLower(leadText), terms, 240), Ref: ref, Edges: edgesOf(a)},
 				score: rerank(titleScore, len([]rune(leadText)), a.Status),
 			})
 		}
@@ -432,12 +432,11 @@ func cleanMarkdown(s string) string {
 // bestSnippet returns a tight, query-centered window of clean text: the whole
 // block when it already fits maxLen runes, else a maxLen-rune window around the
 // first query-term hit, trimmed to word boundaries with ellipses.
-func bestSnippet(clean string, terms []string, maxLen int) string {
+func bestSnippet(clean, lower string, terms []string, maxLen int) string {
 	r := []rune(clean)
 	if len(r) <= maxLen {
 		return clean
 	}
-	lower := strings.ToLower(clean)
 	hitByte := -1
 	for _, t := range terms {
 		if i := strings.Index(lower, t); i >= 0 && (hitByte < 0 || i < hitByte) {
@@ -522,7 +521,7 @@ func CleanMarkdown(s string) string { return cleanMarkdown(s) }
 
 // BestSnippet exposes bestSnippet: a tight, query-centered window of clean text.
 func BestSnippet(clean string, terms []string, maxLen int) string {
-	return bestSnippet(clean, terms, maxLen)
+	return bestSnippet(clean, strings.ToLower(clean), terms, maxLen)
 }
 
 // Rerank exposes rerank: the ADR-0025 §7 density re-rank (length norm × status
